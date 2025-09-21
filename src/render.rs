@@ -410,6 +410,9 @@ mod tests {
             .render(&node, Size::new(10, 2))
             .expect("render should succeed");
 
-        assert_eq!(renderer.surface.cursor_visibility(), CursorVisibility::Hidden);
+        assert_eq!(
+            renderer.surface.cursor_visibility(),
+            CursorVisibility::Hidden
+        );
     }
 }
