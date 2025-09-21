@@ -30,11 +30,10 @@ impl Renderer {
         let height = size.height as usize;
 
         self.surface.resize(width, height);
-        self.surface
-            .add_change(Change::CursorPosition {
-                x: Position::Absolute(0),
-                y: Position::Absolute(0),
-            });
+        self.surface.add_change(Change::CursorPosition {
+            x: Position::Absolute(0),
+            y: Position::Absolute(0),
+        });
         self.surface
             .add_change(Change::ClearScreen(ColorAttribute::Default));
 
@@ -62,21 +61,16 @@ impl Renderer {
 
     fn render_text<Msg>(&mut self, text: &TextNode<Msg>, area: Rect) {
         let attrs = style_to_attributes(&text.style);
-        let content: String = text
-            .content
-            .chars()
-            .take(area.width as usize)
-            .collect();
+        let content: String = text.content.chars().take(area.width as usize).collect();
 
         if content.is_empty() {
             return;
         }
 
-        self.surface
-            .add_change(Change::CursorPosition {
-                x: Position::Absolute(area.x),
-                y: Position::Absolute(area.y),
-            });
+        self.surface.add_change(Change::CursorPosition {
+            x: Position::Absolute(area.x),
+            y: Position::Absolute(area.y),
+        });
         self.surface
             .add_change(Change::AllAttributes(attrs.clone()));
         self.surface.add_change(Change::Text(content));
@@ -95,13 +89,21 @@ impl Renderer {
             return;
         }
 
-        let heights = distribute(area.height, children.len());
         let mut cursor_y = area.y;
+        let max_y = area.y + area.height as usize;
 
-        for (child, height) in children.iter().zip(heights.into_iter()) {
-            if height == 0 {
+        for child in children {
+            if cursor_y >= max_y {
+                break;
+            }
+
+            let required = measure_height(child);
+            if required == 0 {
                 continue;
             }
+
+            let fallback = (max_y - cursor_y) as u16;
+            let height = required.min(fallback);
 
             let child_area = Rect {
                 x: area.x,
@@ -119,13 +121,21 @@ impl Renderer {
             return;
         }
 
-        let widths = distribute(area.width, children.len());
         let mut cursor_x = area.x;
+        let max_x = area.x + area.width as usize;
 
-        for (child, width) in children.iter().zip(widths.into_iter()) {
-            if width == 0 {
+        for child in children {
+            if cursor_x >= max_x {
+                break;
+            }
+
+            let required = measure_width(child);
+            if required == 0 {
                 continue;
             }
+
+            let fallback = (max_x - cursor_x) as u16;
+            let width = required.min(fallback);
 
             let child_area = Rect {
                 x: cursor_x,
@@ -198,15 +208,13 @@ impl Renderer {
             return;
         }
 
-        self.surface
-            .add_change(Change::CursorPosition {
-                x: Position::Absolute(x),
-                y: Position::Absolute(y),
-            });
+        self.surface.add_change(Change::CursorPosition {
+            x: Position::Absolute(x),
+            y: Position::Absolute(y),
+        });
         self.surface
             .add_change(Change::AllAttributes(attrs.clone()));
-        self.surface
-            .add_change(Change::Text(ch.to_string()));
+        self.surface.add_change(Change::Text(ch.to_string()));
     }
 
     pub fn surface(&self) -> &Surface {
@@ -224,26 +232,65 @@ impl Default for Renderer {
     }
 }
 
-fn distribute(total: u16, count: usize) -> Vec<u16> {
-    if count == 0 {
-        return Vec::new();
-    }
-
-    let total = total as usize;
-    let base = total / count;
-    let mut remainder = total % count;
-    let mut segments = Vec::with_capacity(count);
-
-    for _ in 0..count {
-        let mut size = base;
-        if remainder > 0 {
-            size += 1;
-            remainder -= 1;
+fn measure_height<Msg>(node: &Node<Msg>) -> u16 {
+    match node {
+        Node::Text(text) => {
+            if text.content.is_empty() {
+                0
+            } else {
+                1
+            }
         }
-        segments.push(size as u16);
+        Node::Element(element) => match element.kind {
+            ElementKind::Column => element
+                .children
+                .iter()
+                .fold(0u16, |acc, child| acc.saturating_add(measure_height(child))),
+            ElementKind::Row => element
+                .children
+                .iter()
+                .map(|child| measure_height(child))
+                .max()
+                .unwrap_or(0),
+            ElementKind::Block => {
+                let inner = element
+                    .children
+                    .iter()
+                    .fold(0u16, |acc, child| acc.saturating_add(measure_height(child)));
+                inner.saturating_add(2).max(2)
+            }
+        },
     }
+}
 
-    segments
+fn measure_width<Msg>(node: &Node<Msg>) -> u16 {
+    match node {
+        Node::Text(text) => {
+            let len = text.content.chars().count();
+            len.min(u16::MAX as usize) as u16
+        }
+        Node::Element(element) => match element.kind {
+            ElementKind::Column => element
+                .children
+                .iter()
+                .map(|child| measure_width(child))
+                .max()
+                .unwrap_or(0),
+            ElementKind::Row => element
+                .children
+                .iter()
+                .fold(0u16, |acc, child| acc.saturating_add(measure_width(child))),
+            ElementKind::Block => {
+                let inner = element
+                    .children
+                    .iter()
+                    .map(|child| measure_width(child))
+                    .max()
+                    .unwrap_or(0);
+                inner.saturating_add(2).max(2)
+            }
+        },
+    }
 }
 
 fn style_to_attributes(style: &Style) -> CellAttributes {
@@ -277,7 +324,7 @@ fn color_to_attribute(color: crate::dom::Color) -> ColorAttribute {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dom::{block, column, row, text, Color};
+    use crate::dom::{Color, block, column, row, text};
 
     #[test]
     fn renders_text_node() {
@@ -304,7 +351,7 @@ mod tests {
         let screen = renderer.surface.screen_chars_to_string();
         let lines: Vec<&str> = screen.lines().collect();
         assert_eq!(lines[0].trim_end(), "top");
-        assert_eq!(lines[2].trim_end(), "bottom");
+        assert_eq!(lines[1].trim_end(), "bottom");
     }
 
     #[test]
@@ -317,8 +364,8 @@ mod tests {
             .expect("render should succeed");
 
         let first_line = renderer.surface.screen_chars_to_string();
-        assert!(first_line.starts_with("left"));
-        assert!(first_line.contains("right"));
+        let first = first_line.lines().next().unwrap();
+        assert_eq!(first.trim_end(), "leftright");
     }
 
     #[test]

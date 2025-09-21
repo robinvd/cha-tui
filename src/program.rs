@@ -8,7 +8,7 @@ use crate::render::Renderer;
 use termwiz::caps::Capabilities;
 use termwiz::input::{InputEvent, KeyEvent, Modifiers as TwModifiers};
 use termwiz::terminal::buffered::BufferedTerminal;
-use termwiz::terminal::{new_terminal, Terminal};
+use termwiz::terminal::{Terminal, new_terminal};
 
 pub type UpdateFn<Model, Msg> = Box<dyn FnMut(&mut Model, Msg) -> Transition>;
 pub type ViewFn<Model, Msg> = Box<dyn Fn(&Model) -> Node<Msg>>;
@@ -78,7 +78,10 @@ impl<Model, Msg> Program<Model, Msg> {
         self.process_event(event, Option::<&mut BufferedTerminal<InnerTerminal>>::None)
     }
 
-    fn event_loop<T: Terminal>(&mut self, terminal: &mut BufferedTerminal<T>) -> Result<(), ProgramError> {
+    fn event_loop<T: Terminal>(
+        &mut self,
+        terminal: &mut BufferedTerminal<T>,
+    ) -> Result<(), ProgramError> {
         self.sync_size_from_terminal(terminal)?;
         self.render_to_terminal(terminal)?;
 
@@ -140,12 +143,18 @@ impl<Model, Msg> Program<Model, Msg> {
         self.renderer.render(&node, self.current_size)
     }
 
-    fn copy_to_terminal<T: Terminal>(&mut self, terminal: &mut BufferedTerminal<T>) -> Result<(), ProgramError> {
+    fn copy_to_terminal<T: Terminal>(
+        &mut self,
+        terminal: &mut BufferedTerminal<T>,
+    ) -> Result<(), ProgramError> {
         terminal.draw_from_screen(self.renderer.surface(), 0, 0);
         terminal.flush().map_err(ProgramError::from)
     }
 
-    fn render_to_terminal<T: Terminal>(&mut self, terminal: &mut BufferedTerminal<T>) -> Result<(), ProgramError> {
+    fn render_to_terminal<T: Terminal>(
+        &mut self,
+        terminal: &mut BufferedTerminal<T>,
+    ) -> Result<(), ProgramError> {
         self.render_view()?;
         self.copy_to_terminal(terminal)
     }
@@ -154,7 +163,10 @@ impl<Model, Msg> Program<Model, Msg> {
         &mut self,
         terminal: &mut BufferedTerminal<T>,
     ) -> Result<(), ProgramError> {
-        let size = terminal.terminal().get_screen_size().map_err(ProgramError::from)?;
+        let size = terminal
+            .terminal()
+            .get_screen_size()
+            .map_err(ProgramError::from)?;
         self.current_size = Size::new(clamp_to_u16(size.cols), clamp_to_u16(size.rows));
         Ok(())
     }
@@ -239,10 +251,11 @@ mod tests {
 
     #[test]
     fn send_updates_model_and_rerenders() {
-        let mut program = Program::new(CounterModel::default(), update, view).map_event(|event| match event {
-            Event::Key(key) if matches!(key.code, KeyCode::Char('+')) => Some(Msg::Increment),
-            _ => None,
-        });
+        let mut program =
+            Program::new(CounterModel::default(), update, view).map_event(|event| match event {
+                Event::Key(key) if matches!(key.code, KeyCode::Char('+')) => Some(Msg::Increment),
+                _ => None,
+            });
 
         let transition = program
             .send(Event::key(KeyCode::Char('+')))
@@ -255,10 +268,11 @@ mod tests {
 
     #[test]
     fn send_produces_quit_transition() {
-        let mut program = Program::new(CounterModel::default(), update, view).map_event(|event| match event {
-            Event::Key(key) if matches!(key.code, KeyCode::Char('q')) => Some(Msg::Quit),
-            _ => None,
-        });
+        let mut program =
+            Program::new(CounterModel::default(), update, view).map_event(|event| match event {
+                Event::Key(key) if matches!(key.code, KeyCode::Char('q')) => Some(Msg::Quit),
+                _ => None,
+            });
 
         let transition = program
             .send(Event::key(KeyCode::Char('q')))

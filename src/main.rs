@@ -1,6 +1,6 @@
 use chatui::dom::Node;
 use chatui::event::{Event, KeyCode};
-use chatui::{block, column, row, text, Program, Style, Transition};
+use chatui::{Program, Style, Transition, block, column, row, text};
 
 #[derive(Default)]
 struct Model {
@@ -46,8 +46,8 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
 }
 
 fn view(model: &Model) -> Node<Msg> {
-    let header = text::<Msg>("TODOs (q to quit, ↑/↓ move, space toggles)")
-        .with_style(Style::bold());
+    let header =
+        text::<Msg>("TODOs (q to quit, ↑/↓ move, space toggles)").with_style(Style::bold());
 
     let items = model
         .items
@@ -61,7 +61,11 @@ fn view(model: &Model) -> Node<Msg> {
 
 fn render_item(index: usize, item: &Item, selected: bool) -> Node<Msg> {
     let marker = if item.completed { "[x]" } else { "[ ]" };
-    let line = row(vec![text::<Msg>(format!("{} {}", marker, item.title.clone()))]);
+    let line = row(vec![text::<Msg>(format!(
+        "{} {}",
+        marker,
+        item.title.clone()
+    ))]);
 
     if selected {
         line.with_style(Style::fg(chatui::dom::Color::Cyan))

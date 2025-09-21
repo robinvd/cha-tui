@@ -51,7 +51,12 @@ impl Key {
     }
 
     pub fn with_modifiers(code: KeyCode, ctrl: bool, alt: bool, shift: bool) -> Self {
-        Self { code, ctrl, alt, shift }
+        Self {
+            code,
+            ctrl,
+            alt,
+            shift,
+        }
     }
 }
 
