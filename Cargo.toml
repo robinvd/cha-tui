@@ -1,0 +1,8 @@
+[package]
+name = "chatui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+taffy = "0.9.1"
+termwiz = "0.23.3"
