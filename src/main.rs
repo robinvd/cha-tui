@@ -53,25 +53,22 @@ fn view(model: &Model) -> Node<Msg> {
         .items
         .iter()
         .enumerate()
-        .map(|(index, item)| render_item(index, item, index == model.selected))
+        .map(|(index, item)| render_item(item, index == model.selected))
         .collect();
 
     block(vec![column(vec![header, column(items)])])
 }
 
-fn render_item(index: usize, item: &Item, selected: bool) -> Node<Msg> {
+fn render_item(item: &Item, selected: bool) -> Node<Msg> {
     let marker = if item.completed { "[x]" } else { "[ ]" };
-    let line = row(vec![text::<Msg>(format!(
-        "{} {}",
-        marker,
-        item.title.clone()
-    ))]);
-
-    if selected {
-        line.with_style(Style::fg(chatui::dom::Color::Cyan))
+    let text_node = text::<Msg>(format!("{} {}", marker, item.title));
+    let styled_text = if selected {
+        text_node.with_style(Style::fg(chatui::dom::Color::Cyan))
     } else {
-        line
-    }
+        text_node
+    };
+
+    row(vec![styled_text])
 }
 
 fn map_event(event: Event) -> Option<Msg> {
@@ -116,5 +113,47 @@ fn main() {
 
     if let Err(error) = program.run() {
         eprintln!("Program exited with error: {:?}", error);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chatui::dom::Color;
+
+    #[test]
+    fn selected_item_sets_text_color() {
+        let item = Item {
+            title: "Example".into(),
+            completed: false,
+        };
+
+        let node = render_item(&item, true);
+
+        match node {
+            Node::Element(row) => match row.children.first() {
+                Some(Node::Text(text)) => assert_eq!(text.style.fg, Some(Color::Cyan)),
+                _ => panic!("expected text child"),
+            },
+            _ => panic!("expected row element"),
+        }
+    }
+
+    #[test]
+    fn unselected_item_leaves_text_color_default() {
+        let item = Item {
+            title: "Example".into(),
+            completed: false,
+        };
+
+        let node = render_item(&item, false);
+
+        match node {
+            Node::Element(row) => match row.children.first() {
+                Some(Node::Text(text)) => assert_eq!(text.style.fg, None),
+                _ => panic!("expected text child"),
+            },
+            _ => panic!("expected row element"),
+        }
     }
 }
