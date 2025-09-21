@@ -7,6 +7,7 @@ use crate::render::Renderer;
 
 use termwiz::caps::Capabilities;
 use termwiz::input::{InputEvent, KeyEvent, Modifiers as TwModifiers};
+use termwiz::surface::Change;
 use termwiz::terminal::buffered::BufferedTerminal;
 use termwiz::terminal::{Terminal, new_terminal};
 
@@ -84,6 +85,14 @@ impl<Model, Msg> Program<Model, Msg> {
     ) -> Result<(), ProgramError> {
         self.sync_size_from_terminal(terminal)?;
         self.render_to_terminal(terminal)?;
+
+        // WORKAROUND: somehow the cursor visablity is not synced by the normal render correctly on first render.
+        terminal
+            .terminal()
+            .render(&[Change::CursorVisibility(
+                termwiz::surface::CursorVisibility::Hidden,
+            )])
+            .unwrap();
 
         loop {
             match terminal

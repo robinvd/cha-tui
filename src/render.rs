@@ -4,7 +4,7 @@ use crate::event::Size;
 
 use termwiz::cell::{CellAttributes, Intensity};
 use termwiz::color::{AnsiColor, ColorAttribute};
-use termwiz::surface::{Change, Position, Surface};
+use termwiz::surface::{Change, CursorVisibility, Position, Surface};
 
 pub struct Renderer {
     surface: Surface,
@@ -44,6 +44,8 @@ impl Renderer {
             height: size.height,
         };
         self.render_node(root, area);
+        self.surface
+            .add_change(Change::CursorVisibility(CursorVisibility::Hidden));
 
         Ok(())
     }
@@ -325,6 +327,7 @@ fn color_to_attribute(color: crate::dom::Color) -> ColorAttribute {
 mod tests {
     use super::*;
     use crate::dom::{Color, block, column, row, text};
+    use termwiz::surface::CursorVisibility;
 
     #[test]
     fn renders_text_node() {
@@ -396,5 +399,17 @@ mod tests {
         let line = lines.remove(0);
         let cell = line.visible_cells().next().unwrap();
         assert_eq!(cell.attrs().foreground(), AnsiColor::Blue.into());
+    }
+
+    #[test]
+    fn render_hides_cursor() {
+        let mut renderer = Renderer::new();
+        let node = text::<()>("cursor");
+
+        renderer
+            .render(&node, Size::new(10, 2))
+            .expect("render should succeed");
+
+        assert_eq!(renderer.surface.cursor_visibility(), CursorVisibility::Hidden);
     }
 }
