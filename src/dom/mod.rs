@@ -10,6 +10,8 @@ use taffy::{
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node<Msg> {
     pub content: NodeContent<Msg>,
+    classname: &'static str,
+    id: u64,
     pub layout_state: LayoutState,
 }
 
@@ -120,7 +122,27 @@ impl<Msg> Node<Msg> {
         Self {
             content,
             layout_state: LayoutState::default(),
+            classname: "",
+            id: 0,
         }
+    }
+
+    // Add an ID to this node, this is used so node references are stable
+    // across renders.
+    pub fn with_id(mut self, id: &'static str) -> Self {
+        self.classname = id;
+        self.id = crate::hash::hash_str(0, self.classname);
+        self
+    }
+
+    // Same as with_id, but add an additional mixin.
+    //
+    // Used when there are a variable number of items (like a list), then each
+    // list item has a unique ID.
+    pub fn with_id_mixin(mut self, id: &'static str, mixin: u64) -> Self {
+        self.classname = id;
+        self.id = crate::hash::hash_str(mixin, self.classname);
+        self
     }
 
     pub fn with_style(mut self, style: Style) -> Self {
