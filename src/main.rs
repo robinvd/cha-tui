@@ -13,15 +13,6 @@ enum Focus {
     Input,
 }
 
-impl Focus {
-    fn toggle(self) -> Self {
-        match self {
-            Focus::List => Focus::Input,
-            Focus::Input => Focus::List,
-        }
-    }
-}
-
 #[derive(Default)]
 struct Model {
     items: Vec<Item>,
@@ -47,16 +38,17 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
 }
 
 fn view(model: &Model) -> Node<Msg> {
-    let header = text::<Msg>(
-        "TODOs (Esc/q quit from list, ↑/↓ move, space toggles, Tab focuses input, Enter adds)",
-    )
-    .with_style(Style::bold());
+    let header = text::<Msg>("TODOs (Esc/q quit from list, ↑/↓ move, space toggles, Enter adds)")
+        .with_style(Style::bold());
 
     let items = model
         .items
         .iter()
         .enumerate()
-        .map(|(index, item)| render_item(item, index == model.selected))
+        .map(|(index, item)| {
+            let highlighted = model.focus == Focus::List && index == model.selected;
+            render_item(item, highlighted)
+        })
         .collect();
 
     block(vec![column(vec![
@@ -84,7 +76,7 @@ fn render_input(model: &Model) -> Node<Msg> {
     };
 
     block(vec![column(vec![
-        text::<Msg>("New TODO (Tab to focus, Enter adds):"),
+        text::<Msg>("New TODO (Enter adds):"),
         text::<Msg>(prompt).with_style(value_style),
     ])])
 }
@@ -102,21 +94,41 @@ fn handle_key(model: &mut Model, key: Key) -> Transition {
     match key.code {
         KeyCode::Esc => Transition::Quit,
         KeyCode::Up => {
-            if model.selected > 0 {
-                model.selected -= 1;
+            match model.focus {
+                Focus::List => {
+                    if model.selected > 0 {
+                        model.selected -= 1;
+                    } else {
+                        model.focus = Focus::Input;
+                    }
+                }
+                Focus::Input => {
+                    if !model.items.is_empty() {
+                        model.focus = Focus::List;
+                        model.selected = model.items.len() - 1;
+                    }
+                }
             }
-            model.focus = Focus::List;
             Transition::Continue
         }
         KeyCode::Down => {
-            if model.selected + 1 < model.items.len() {
-                model.selected += 1;
+            match model.focus {
+                Focus::List => {
+                    if model.selected + 1 < model.items.len() {
+                        model.selected += 1;
+                    } else {
+                        model.focus = Focus::Input;
+                    }
+                }
+                Focus::Input => {
+                    if !model.items.is_empty() {
+                        model.focus = Focus::List;
+                        if model.selected >= model.items.len() {
+                            model.selected = model.items.len() - 1;
+                        }
+                    }
+                }
             }
-            model.focus = Focus::List;
-            Transition::Continue
-        }
-        KeyCode::Char('\t') => {
-            model.focus = model.focus.toggle();
             Transition::Continue
         }
         KeyCode::Enter => {
@@ -170,25 +182,27 @@ fn handle_char(model: &mut Model, key: Key, ch: char) -> Transition {
         return Transition::Continue;
     }
 
-    if model.focus == Focus::List {
-        if matches!(ch, 'q' | 'Q') && !key.ctrl {
-            return Transition::Quit;
+    match model.focus {
+        Focus::List => {
+            if matches!(ch, 'q' | 'Q') && !key.ctrl {
+                Transition::Quit
+            } else {
+                Transition::Continue
+            }
         }
-
-        model.focus = Focus::Input;
+        Focus::Input => {
+            if !key.ctrl {
+                model.input.push(ch);
+            }
+            Transition::Continue
+        }
     }
-
-    if !key.ctrl {
-        model.input.push(ch);
-    }
-
-    Transition::Continue
 }
 
-fn render_item(item: &Item, selected: bool) -> Node<Msg> {
+fn render_item(item: &Item, highlighted: bool) -> Node<Msg> {
     let marker = if item.completed { "[x]" } else { "[ ]" };
     let text_node = text::<Msg>(format!("{} {}", marker, item.title));
-    let styled_text = if selected {
+    let styled_text = if highlighted {
         text_node.with_style(Style::fg(Color::Cyan))
     } else {
         text_node
@@ -364,5 +378,223 @@ mod tests {
         assert!(model.input.is_empty());
         assert_eq!(model.focus, Focus::List);
         assert_eq!(model.selected, 0);
+    }
+
+    #[test]
+    fn pressing_up_on_first_item_moves_focus_to_input() {
+        let mut model = Model {
+            items: vec![Item {
+                title: "Example".into(),
+                completed: false,
+            }],
+            selected: 0,
+            input: String::new(),
+            focus: Focus::List,
+        };
+
+        let transition = handle_key(&mut model, Key::new(KeyCode::Up));
+
+        match transition {
+            Transition::Continue => {}
+            _ => panic!("expected transition to continue"),
+        }
+
+        assert_eq!(model.focus, Focus::Input);
+        assert_eq!(model.selected, 0);
+    }
+
+    #[test]
+    fn pressing_down_from_input_moves_focus_to_list() {
+        let mut model = Model {
+            items: vec![Item {
+                title: "Example".into(),
+                completed: false,
+            }],
+            selected: 0,
+            input: String::new(),
+            focus: Focus::Input,
+        };
+
+        let transition = handle_key(&mut model, Key::new(KeyCode::Down));
+
+        match transition {
+            Transition::Continue => {}
+            _ => panic!("expected transition to continue"),
+        }
+
+        assert_eq!(model.focus, Focus::List);
+        assert_eq!(model.selected, 0);
+    }
+
+    #[test]
+    fn pressing_down_on_last_item_moves_focus_to_input() {
+        let mut model = Model {
+            items: vec![
+                Item {
+                    title: "One".into(),
+                    completed: false,
+                },
+                Item {
+                    title: "Two".into(),
+                    completed: false,
+                },
+            ],
+            selected: 1,
+            input: String::new(),
+            focus: Focus::List,
+        };
+
+        let transition = handle_key(&mut model, Key::new(KeyCode::Down));
+
+        match transition {
+            Transition::Continue => {}
+            _ => panic!("expected transition to continue"),
+        }
+
+        assert_eq!(model.focus, Focus::Input);
+        assert_eq!(model.selected, 1);
+    }
+
+    #[test]
+    fn pressing_up_from_input_wraps_to_last_item() {
+        let mut model = Model {
+            items: vec![
+                Item {
+                    title: "One".into(),
+                    completed: false,
+                },
+                Item {
+                    title: "Two".into(),
+                    completed: false,
+                },
+            ],
+            selected: 0,
+            input: String::new(),
+            focus: Focus::Input,
+        };
+
+        let transition = handle_key(&mut model, Key::new(KeyCode::Up));
+
+        match transition {
+            Transition::Continue => {}
+            _ => panic!("expected transition to continue"),
+        }
+
+        assert_eq!(model.focus, Focus::List);
+        assert_eq!(model.selected, 1);
+    }
+
+    #[test]
+    fn typing_while_list_focused_does_not_modify_input() {
+        let mut model = Model {
+            items: vec![Item {
+                title: "Example".into(),
+                completed: false,
+            }],
+            selected: 0,
+            input: String::new(),
+            focus: Focus::List,
+        };
+
+        let key = Key::new(KeyCode::Char('a'));
+        let transition = handle_char(&mut model, key, 'a');
+
+        match transition {
+            Transition::Continue => {}
+            _ => panic!("expected transition to continue"),
+        }
+
+        assert!(model.input.is_empty());
+        assert_eq!(model.focus, Focus::List);
+    }
+
+    #[test]
+    fn list_focus_highlights_selected_item() {
+        let model = Model {
+            items: vec![Item {
+                title: "Example".into(),
+                completed: false,
+            }],
+            selected: 0,
+            input: String::new(),
+            focus: Focus::List,
+        };
+
+        let root = view(&model);
+        let block = root.into_element().expect("expected block element");
+        let content_column = block
+            .children
+            .into_iter()
+            .next()
+            .expect("expected outer column")
+            .into_element()
+            .expect("expected column element");
+        let mut content_children = content_column.children.into_iter();
+        let _ = content_children.next();
+        let _ = content_children.next();
+        let items_column = content_children
+            .next()
+            .expect("expected items column")
+            .into_element()
+            .expect("expected column element");
+        let mut item_rows = items_column.children.into_iter();
+        let row = item_rows
+            .next()
+            .expect("expected row")
+            .into_element()
+            .expect("expected row element");
+        let mut row_children = row.children.into_iter();
+        let text = row_children
+            .next()
+            .expect("expected text child")
+            .into_text()
+            .expect("expected text node");
+
+        assert_eq!(text.style.fg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn input_focus_does_not_highlight_selected_item() {
+        let model = Model {
+            items: vec![Item {
+                title: "Example".into(),
+                completed: false,
+            }],
+            selected: 0,
+            input: String::new(),
+            focus: Focus::Input,
+        };
+
+        let root = view(&model);
+        let block = root.into_element().expect("expected block element");
+        let content_column = block
+            .children
+            .into_iter()
+            .next()
+            .expect("expected outer column")
+            .into_element()
+            .expect("expected column element");
+        let mut content_children = content_column.children.into_iter();
+        let _ = content_children.next();
+        let _ = content_children.next();
+        let items_column = content_children
+            .next()
+            .expect("expected items column")
+            .into_element()
+            .expect("expected column element");
+        let mut item_rows = items_column.children.into_iter();
+        let row = item_rows
+            .next()
+            .expect("expected row")
+            .into_element()
+            .expect("expected row element");
+        let mut row_children = row.children.into_iter();
+        let text = row_children
+            .next()
+            .expect("expected text child")
+            .into_text()
+            .expect("expected text node");
+
+        assert_eq!(text.style.fg, None);
     }
 }

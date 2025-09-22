@@ -1,5 +1,4 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+#![allow(dead_code)]
 
 //! Provides fast, non-cryptographic hash functions.
 
