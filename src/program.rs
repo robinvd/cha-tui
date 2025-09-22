@@ -5,6 +5,7 @@ use crate::error::ProgramError;
 use crate::event::{Event, Key, KeyCode, Size};
 use crate::render::Renderer;
 
+use taffy::compute_root_layout;
 use termwiz::caps::Capabilities;
 use termwiz::input::{InputEvent, KeyEvent, Modifiers as TwModifiers};
 use termwiz::surface::Change;
@@ -28,6 +29,7 @@ pub struct Program<Model, Msg> {
     event_mapper: EventFn<Msg>,
     renderer: Renderer,
     current_size: Size,
+    focus_path: Vec<u64>,
 }
 
 impl<Model, Msg> Program<Model, Msg> {
@@ -43,6 +45,7 @@ impl<Model, Msg> Program<Model, Msg> {
             event_mapper: Box::new(|_| None),
             renderer: Renderer::new(),
             current_size: Size::new(DEFAULT_WIDTH, DEFAULT_HEIGHT),
+            focus_path: Vec::new(),
         }
     }
 
@@ -148,7 +151,16 @@ impl<Model, Msg> Program<Model, Msg> {
     }
 
     fn render_view(&mut self) -> Result<(), ProgramError> {
-        let node = (self.view)(&self.model);
+        let mut node = (self.view)(&self.model);
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: taffy::AvailableSpace::Definite(self.current_size.width as f32),
+                height: taffy::AvailableSpace::Definite(self.current_size.height as f32),
+            },
+        );
+        crate::dom::rounding::round_layout(&mut node);
         self.renderer.render(&node, self.current_size)
     }
 

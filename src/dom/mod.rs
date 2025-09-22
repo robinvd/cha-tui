@@ -1,9 +1,16 @@
-use std::collections::HashMap;
+pub mod rounding;
+
 use std::marker::PhantomData;
 
 use crate::event::Size;
 use taffy::{
-    style::Style as TaffyStyle,
+    CacheTree, LayoutFlexboxContainer, compute_cached_layout, compute_flexbox_layout,
+    compute_leaf_layout,
+};
+use taffy::{
+    LayoutPartialTree,
+    geometry::Rect,
+    style::{FlexDirection, LengthPercentage, Style as TaffyStyle},
     tree::{Cache as TaffyCache, Layout as TaffyLayout, NodeId, TraversePartialTree},
 };
 
@@ -25,6 +32,7 @@ pub enum NodeContent<Msg> {
 pub struct LayoutState {
     pub style: TaffyStyle,
     pub cache: TaffyCache,
+    pub unrounded_layout: TaffyLayout,
     pub layout: TaffyLayout,
 }
 
@@ -33,6 +41,7 @@ impl Default for LayoutState {
         Self {
             style: TaffyStyle::default(),
             cache: TaffyCache::new(),
+            unrounded_layout: TaffyLayout::new(),
             layout: TaffyLayout::new(),
         }
     }
@@ -98,23 +107,35 @@ pub fn text<Msg>(content: impl Into<String>) -> Node<Msg> {
 }
 
 pub fn column<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
-    Node::new(NodeContent::Element(ElementNode::new(
+    let mut node = Node::new(NodeContent::Element(ElementNode::new(
         ElementKind::Column,
         children,
-    )))
+    )));
+    node.layout_state.style.flex_direction = FlexDirection::Column;
+    node
 }
 
 pub fn row<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
-    Node::new(NodeContent::Element(ElementNode::new(
+    let mut node = Node::new(NodeContent::Element(ElementNode::new(
         ElementKind::Row,
         children,
-    )))
+    )));
+    node.layout_state.style.flex_direction = FlexDirection::Row;
+    node
 }
 
 pub fn block<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
     let mut element = ElementNode::new(ElementKind::Block, children);
     element.attrs.style.border = true;
-    Node::new(NodeContent::Element(element))
+    let mut node = Node::new(NodeContent::Element(element));
+    node.layout_state.style.flex_direction = FlexDirection::Column;
+    node.layout_state.style.padding = Rect {
+        left: LengthPercentage::length(1.0),
+        right: LengthPercentage::length(1.0),
+        top: LengthPercentage::length(1.0),
+        bottom: LengthPercentage::length(1.0),
+    };
+    node
 }
 
 impl<Msg> Node<Msg> {
@@ -193,31 +214,36 @@ impl<Msg> Node<Msg> {
         }
     }
 
-    fn build_children_map(&self) -> HashMap<NodeId, Vec<NodeId>> {
-        fn collect<Msg>(
-            node: &Node<Msg>,
-            next_id: &mut usize,
-            map: &mut HashMap<NodeId, Vec<NodeId>>,
-        ) -> NodeId {
-            let current_id = NodeId::from(*next_id);
-            *next_id += 1;
-
-            let mut child_ids = Vec::new();
-            if let NodeContent::Element(element) = &node.content {
-                for child in &element.children {
-                    let child_id = collect(child, next_id, map);
-                    child_ids.push(child_id);
-                }
+    fn node_from_id(&self, id: NodeId) -> &Self {
+        let index: u64 = id.into();
+        if index == u64::MAX {
+            self
+        } else {
+            match &self.content {
+                NodeContent::Element(element_node) => &element_node.children[index as usize],
+                NodeContent::Text(_) => panic!("text has no children"),
             }
-
-            map.insert(current_id, child_ids);
-            current_id
         }
+    }
 
-        let mut map = HashMap::new();
-        let mut next_id = 0;
-        collect(self, &mut next_id, &mut map);
-        map
+    fn node_from_id_mut(&mut self, id: NodeId) -> &mut Self {
+        let index: u64 = id.into();
+        if index == u64::MAX {
+            self
+        } else {
+            match &mut self.content {
+                NodeContent::Element(element_node) => &mut element_node.children[index as usize],
+                NodeContent::Text(_) => panic!("text has no children"),
+            }
+        }
+    }
+
+    pub(crate) fn get_unrounded_layout(&self) -> TaffyLayout {
+        self.layout_state.unrounded_layout
+    }
+
+    pub(crate) fn set_final_layout(&mut self, layout: &TaffyLayout) {
+        self.layout_state.layout = *layout
     }
 }
 
@@ -297,25 +323,121 @@ impl<Msg> TextNode<Msg> {
 
 impl<Msg> TraversePartialTree for Node<Msg> {
     type ChildIter<'a>
-        = std::vec::IntoIter<NodeId>
+        = std::iter::Map<std::ops::Range<usize>, fn(usize) -> NodeId>
     where
         Self: 'a;
 
     fn child_ids(&self, parent_node_id: NodeId) -> Self::ChildIter<'_> {
-        let mut map = self.build_children_map();
-        map.remove(&parent_node_id).unwrap_or_default().into_iter()
+        let node = self.node_from_id(parent_node_id);
+        (0..node.child_count(parent_node_id)).map(Into::into)
     }
 
     fn child_count(&self, parent_node_id: NodeId) -> usize {
-        let map = self.build_children_map();
-        map.get(&parent_node_id).map_or(0, Vec::len)
+        let node = self.node_from_id(parent_node_id);
+        match &node.content {
+            NodeContent::Element(element_node) => element_node.children.len(),
+            NodeContent::Text(_) => 0,
+        }
     }
 
     fn get_child_id(&self, parent_node_id: NodeId, child_index: usize) -> NodeId {
-        let map = self.build_children_map();
-        *map.get(&parent_node_id)
-            .and_then(|children| children.get(child_index))
-            .expect("child index out of bounds")
+        self.child_ids(parent_node_id).nth(child_index).unwrap()
+    }
+}
+
+impl<Msg> CacheTree for Node<Msg> {
+    fn cache_get(
+        &self,
+        node_id: NodeId,
+        known_dimensions: taffy::Size<Option<f32>>,
+        available_space: taffy::Size<taffy::AvailableSpace>,
+        run_mode: taffy::RunMode,
+    ) -> Option<taffy::LayoutOutput> {
+        let node = self.node_from_id(node_id);
+        node.layout_state
+            .cache
+            .get(known_dimensions, available_space, run_mode)
+    }
+
+    fn cache_store(
+        &mut self,
+        node_id: NodeId,
+        known_dimensions: taffy::Size<Option<f32>>,
+        available_space: taffy::Size<taffy::AvailableSpace>,
+        run_mode: taffy::RunMode,
+        layout_output: taffy::LayoutOutput,
+    ) {
+        let node = self.node_from_id_mut(node_id);
+        node.layout_state
+            .cache
+            .store(known_dimensions, available_space, run_mode, layout_output);
+    }
+
+    fn cache_clear(&mut self, node_id: NodeId) {
+        let node = self.node_from_id_mut(node_id);
+        node.layout_state.cache.clear();
+    }
+}
+
+impl<Msg> LayoutPartialTree for Node<Msg> {
+    type CoreContainerStyle<'a>
+        = taffy::Style
+    where
+        Self: 'a;
+
+    type CustomIdent = String;
+
+    fn get_core_container_style(&self, node_id: NodeId) -> Self::CoreContainerStyle<'_> {
+        let node = self.node_from_id(node_id);
+        node.layout_state.style.clone()
+    }
+
+    fn set_unrounded_layout(&mut self, node_id: NodeId, layout: &TaffyLayout) {
+        let node = self.node_from_id_mut(node_id);
+        node.layout_state.unrounded_layout = *layout
+    }
+
+    fn compute_child_layout(
+        &mut self,
+        node_id: NodeId,
+        inputs: taffy::LayoutInput,
+    ) -> taffy::LayoutOutput {
+        compute_cached_layout(self, node_id, inputs, |parent, node_id, inputs| {
+            let node = parent.node_from_id_mut(node_id);
+
+            match &node.content {
+                NodeContent::Text(text) => compute_leaf_layout(
+                    inputs,
+                    &node.layout_state.style,
+                    |_val, _basis| 0.0,
+                    |_known_dimensions, _available_space| taffy::Size {
+                        width: text.content.len() as f32,
+                        height: 1.,
+                    },
+                ),
+                NodeContent::Element(_) => compute_flexbox_layout(node, u64::MAX.into(), inputs),
+            }
+        })
+    }
+}
+
+impl<Msg> LayoutFlexboxContainer for Node<Msg> {
+    type FlexboxContainerStyle<'a>
+        = TaffyStyle
+    where
+        Self: 'a;
+
+    type FlexboxItemStyle<'a>
+        = TaffyStyle
+    where
+        Self: 'a;
+
+    fn get_flexbox_container_style(&self, node_id: NodeId) -> Self::FlexboxContainerStyle<'_> {
+        self.node_from_id(node_id).layout_state.style.clone()
+    }
+
+    fn get_flexbox_child_style(&self, child_node_id: NodeId) -> Self::FlexboxItemStyle<'_> {
+        self.node_from_id(child_node_id).layout_state.style.clone()
     }
 }
 

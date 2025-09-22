@@ -6,6 +6,8 @@ use termwiz::cell::{CellAttributes, Intensity};
 use termwiz::color::{AnsiColor, ColorAttribute};
 use termwiz::surface::{Change, CursorVisibility, Position, Surface};
 
+use taffy::Layout as TaffyLayout;
+
 pub struct Renderer {
     surface: Surface,
 }
@@ -16,6 +18,12 @@ struct Rect {
     y: usize,
     width: u16,
     height: u16,
+}
+
+#[derive(Clone, Copy)]
+struct Point {
+    x: f32,
+    y: f32,
 }
 
 impl Renderer {
@@ -37,27 +45,28 @@ impl Renderer {
         self.surface
             .add_change(Change::ClearScreen(ColorAttribute::Default));
 
-        let area = Rect {
-            x: 0,
-            y: 0,
-            width: size.width,
-            height: size.height,
-        };
-        self.render_node(root, area);
+        let origin = Point { x: 0.0, y: 0.0 };
+        self.render_node(root, origin);
         self.surface
             .add_change(Change::CursorVisibility(CursorVisibility::Hidden));
 
         Ok(())
     }
 
-    fn render_node<Msg>(&mut self, node: &Node<Msg>, area: Rect) {
-        if area.width == 0 || area.height == 0 {
+    fn render_node<Msg>(&mut self, node: &Node<Msg>, parent_origin: Point) {
+        let layout = node.layout_state.layout;
+        let node_origin = Point {
+            x: parent_origin.x + layout.location.x,
+            y: parent_origin.y + layout.location.y,
+        };
+
+        let Some(area) = rect_from_layout(&layout, node_origin) else {
             return;
-        }
+        };
 
         match &node.content {
             NodeContent::Text(text) => self.render_text(text, area),
-            NodeContent::Element(element) => self.render_element(element, area),
+            NodeContent::Element(element) => self.render_element(element, area, node_origin),
         }
     }
 
@@ -78,93 +87,25 @@ impl Renderer {
         self.surface.add_change(Change::Text(content));
     }
 
-    fn render_element<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect) {
+    fn render_element<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, origin: Point) {
         match element.kind {
-            ElementKind::Column => self.render_column(&element.children, area),
-            ElementKind::Row => self.render_row(&element.children, area),
-            ElementKind::Block => self.render_block(element, area),
+            ElementKind::Block => self.render_block(element, area, origin),
+            ElementKind::Column | ElementKind::Row => {
+                self.render_children(&element.children, origin);
+            }
         }
     }
 
-    fn render_column<Msg>(&mut self, children: &[Node<Msg>], area: Rect) {
-        if children.is_empty() {
-            return;
-        }
-
-        let mut cursor_y = area.y;
-        let max_y = area.y + area.height as usize;
-
+    fn render_children<Msg>(&mut self, children: &[Node<Msg>], origin: Point) {
         for child in children {
-            if cursor_y >= max_y {
-                break;
-            }
-
-            let required = measure_height(child);
-            if required == 0 {
-                continue;
-            }
-
-            let fallback = (max_y - cursor_y) as u16;
-            let height = required.min(fallback);
-
-            let child_area = Rect {
-                x: area.x,
-                y: cursor_y,
-                width: area.width,
-                height,
-            };
-            self.render_node(child, child_area);
-            cursor_y += height as usize;
+            self.render_node(child, origin);
         }
     }
 
-    fn render_row<Msg>(&mut self, children: &[Node<Msg>], area: Rect) {
-        if children.is_empty() {
-            return;
-        }
-
-        let mut cursor_x = area.x;
-        let max_x = area.x + area.width as usize;
-
-        for child in children {
-            if cursor_x >= max_x {
-                break;
-            }
-
-            let required = measure_width(child);
-            if required == 0 {
-                continue;
-            }
-
-            let fallback = (max_x - cursor_x) as u16;
-            let width = required.min(fallback);
-
-            let child_area = Rect {
-                x: cursor_x,
-                y: area.y,
-                width,
-                height: area.height,
-            };
-            self.render_node(child, child_area);
-            cursor_x += width as usize;
-        }
-    }
-
-    fn render_block<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect) {
+    fn render_block<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, origin: Point) {
         self.draw_border(area, &element.attrs.style);
 
-        if area.width < 2 || area.height < 2 {
-            return;
-        }
-
-        let inner = Rect {
-            x: area.x + 1,
-            y: area.y + 1,
-            width: area.width - 2,
-            height: area.height - 2,
-        };
-
-        self.render_column(&element.children, inner);
+        self.render_children(&element.children, origin);
     }
 
     fn draw_border(&mut self, area: Rect, style: &Style) {
@@ -234,65 +175,47 @@ impl Default for Renderer {
     }
 }
 
-fn measure_height<Msg>(node: &Node<Msg>) -> u16 {
-    match &node.content {
-        NodeContent::Text(text) => {
-            if text.content.is_empty() {
-                0
-            } else {
-                1
-            }
-        }
-        NodeContent::Element(element) => match element.kind {
-            ElementKind::Column => element
-                .children
-                .iter()
-                .fold(0u16, |acc, child| acc.saturating_add(measure_height(child))),
-            ElementKind::Row => element
-                .children
-                .iter()
-                .map(|child| measure_height(child))
-                .max()
-                .unwrap_or(0),
-            ElementKind::Block => {
-                let inner = element
-                    .children
-                    .iter()
-                    .fold(0u16, |acc, child| acc.saturating_add(measure_height(child)));
-                inner.saturating_add(2).max(2)
-            }
-        },
-    }
-}
+fn rect_from_layout(layout: &TaffyLayout, origin: Point) -> Option<Rect> {
+    let width = layout.size.width.max(0.0);
+    let height = layout.size.height.max(0.0);
 
-fn measure_width<Msg>(node: &Node<Msg>) -> u16 {
-    match &node.content {
-        NodeContent::Text(text) => {
-            let len = text.content.chars().count();
-            len.min(u16::MAX as usize) as u16
-        }
-        NodeContent::Element(element) => match element.kind {
-            ElementKind::Column => element
-                .children
-                .iter()
-                .map(|child| measure_width(child))
-                .max()
-                .unwrap_or(0),
-            ElementKind::Row => element
-                .children
-                .iter()
-                .fold(0u16, |acc, child| acc.saturating_add(measure_width(child))),
-            ElementKind::Block => {
-                let inner = element
-                    .children
-                    .iter()
-                    .map(|child| measure_width(child))
-                    .max()
-                    .unwrap_or(0);
-                inner.saturating_add(2).max(2)
-            }
-        },
+    if width <= 0.0 || height <= 0.0 {
+        return None;
     }
+
+    let x = origin.x;
+    let y = origin.y;
+
+    let mut x_int = x.round() as i32;
+    let mut y_int = y.round() as i32;
+    let mut width_int = width.round() as i32;
+    let mut height_int = height.round() as i32;
+
+    if x < 0.0 {
+        let offset = (-x).ceil() as i32;
+        width_int -= offset;
+        x_int = 0;
+    }
+
+    if y < 0.0 {
+        let offset = (-y).ceil() as i32;
+        height_int -= offset;
+        y_int = 0;
+    }
+
+    if width_int <= 0 || height_int <= 0 {
+        return None;
+    }
+
+    let width_u16 = width_int.min(u16::MAX as i32) as u16;
+    let height_u16 = height_int.min(u16::MAX as i32) as u16;
+
+    Some(Rect {
+        x: x_int.max(0) as usize,
+        y: y_int.max(0) as usize,
+        width: width_u16,
+        height: height_u16,
+    })
 }
 
 fn style_to_attributes(style: &Style) -> CellAttributes {
@@ -326,13 +249,28 @@ fn color_to_attribute(color: crate::dom::Color) -> ColorAttribute {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dom::rounding::round_layout;
     use crate::dom::{Color, block, column, row, text};
+    use taffy::{AvailableSpace, compute_root_layout};
     use termwiz::surface::CursorVisibility;
+
+    fn prepare_layout<Msg>(node: &mut Node<Msg>, size: Size) {
+        compute_root_layout(
+            node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: AvailableSpace::Definite(size.width as f32),
+                height: AvailableSpace::Definite(size.height as f32),
+            },
+        );
+        round_layout(node);
+    }
 
     #[test]
     fn renders_text_node() {
         let mut renderer = Renderer::new();
-        let node = text::<()>("hello");
+        let mut node = text::<()>("hello");
+        prepare_layout(&mut node, Size::new(10, 4));
 
         renderer
             .render(&node, Size::new(10, 4))
@@ -345,7 +283,8 @@ mod tests {
     #[test]
     fn column_stacks_children_vertically() {
         let mut renderer = Renderer::new();
-        let node = column(vec![text::<()>("top"), text::<()>("bottom")]);
+        let mut node = column(vec![text::<()>("top"), text::<()>("bottom")]);
+        prepare_layout(&mut node, Size::new(6, 4));
 
         renderer
             .render(&node, Size::new(6, 4))
@@ -360,7 +299,8 @@ mod tests {
     #[test]
     fn row_places_children_horizontally() {
         let mut renderer = Renderer::new();
-        let node = row(vec![text::<()>("left"), text::<()>("right")]);
+        let mut node = row(vec![text::<()>("left"), text::<()>("right")]);
+        prepare_layout(&mut node, Size::new(10, 2));
 
         renderer
             .render(&node, Size::new(10, 2))
@@ -374,7 +314,8 @@ mod tests {
     #[test]
     fn block_draws_border() {
         let mut renderer = Renderer::new();
-        let node = block::<()>(Vec::new());
+        let mut node = block::<()>(Vec::new());
+        prepare_layout(&mut node, Size::new(4, 3));
 
         renderer
             .render(&node, Size::new(4, 3))
@@ -383,13 +324,19 @@ mod tests {
         let screen = renderer.surface.screen_chars_to_string();
         let lines: Vec<&str> = screen.lines().collect();
         assert_eq!(lines[0].chars().take(1).collect::<String>(), "┌");
-        assert_eq!(lines[2].chars().take(1).collect::<String>(), "└");
+        let last = lines
+            .iter()
+            .rev()
+            .find(|line| line.trim_end().len() > 0)
+            .unwrap();
+        assert_eq!(last.chars().next().unwrap(), '└');
     }
 
     #[test]
     fn style_applies_foreground_color() {
         let mut renderer = Renderer::new();
-        let node = text::<()>("color").with_style(Style::fg(Color::Blue));
+        let mut node = text::<()>("color").with_style(Style::fg(Color::Blue));
+        prepare_layout(&mut node, Size::new(10, 2));
 
         renderer
             .render(&node, Size::new(10, 2))
@@ -404,7 +351,8 @@ mod tests {
     #[test]
     fn render_hides_cursor() {
         let mut renderer = Renderer::new();
-        let node = text::<()>("cursor");
+        let mut node = text::<()>("cursor");
+        prepare_layout(&mut node, Size::new(10, 2));
 
         renderer
             .render(&node, Size::new(10, 2))
@@ -413,6 +361,50 @@ mod tests {
         assert_eq!(
             renderer.surface.cursor_visibility(),
             CursorVisibility::Hidden
+        );
+    }
+
+    #[test]
+    fn nested_blocks_render_with_borders() {
+        let header = text::<()>(
+            "TODOs (Esc/q quit from list, ↑/↓ move, space toggles, Tab focuses input, Enter adds)",
+        )
+        .with_style(Style::bold());
+
+        let input_block = block::<()>(vec![column(vec![
+            text::<()>("New TODO (Tab to focus, Enter adds):"),
+            text::<()>("> _"),
+        ])]);
+
+        let items = column(vec![
+            text::<()>("[x] Ship Elm TUI scaffold"),
+            text::<()>("[x] Wire rendering into runtime"),
+            text::<()>("[ ] Polish TODO example"),
+            text::<()>("[ ] Add focus styles"),
+        ]);
+
+        let mut root = block::<()>(vec![column(vec![header, input_block, items])]);
+
+        let mut renderer = Renderer::new();
+        prepare_layout(&mut root, Size::new(90, 12));
+
+        renderer
+            .render(&root, Size::new(90, 12))
+            .expect("render should succeed");
+
+        let screen = renderer.surface().screen_chars_to_string();
+        let lines: Vec<&str> = screen.lines().collect();
+
+        assert!(lines[0].starts_with("┌"));
+        assert!(lines[1].starts_with("│TODOs"));
+        assert!(
+            lines.iter().any(|line| line.starts_with("│┌")),
+            "expected nested block border"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("[ ] Add focus styles"))
         );
     }
 }

@@ -1,6 +1,10 @@
+use std::panic;
+
 use chatui::dom::{Color, Node};
 use chatui::event::{Event, Key, KeyCode};
 use chatui::{Program, Style, Transition, block, column, row, text};
+use termwiz::escape::CSI;
+use termwiz::escape::csi::{DecPrivateMode, DecPrivateModeCode, Mode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum Focus {
@@ -226,12 +230,74 @@ fn seed_model() -> Model {
     }
 }
 
-fn main() {
+#[cfg(unix)]
+fn install_panic_hook() -> color_eyre::Result<()> {
+    use std::io::{self, Write};
+    use std::os::fd::AsRawFd;
+    use termios::{TCSANOW, Termios, tcsetattr};
+
+    let stdout = std::io::stdout();
+    let fd = stdout.as_raw_fd();
+    let base_termios = Termios::from_fd(fd)?;
+
+    panic::set_hook(Box::new(move |panic| {
+        let _ = tcsetattr(fd, TCSANOW, &base_termios);
+        let mut stderr = io::stderr();
+
+        let restore_sequences = [
+            CSI::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(
+                DecPrivateModeCode::ClearAndEnableAlternateScreen,
+            ))),
+            CSI::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(
+                DecPrivateModeCode::BracketedPaste,
+            ))),
+            CSI::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(
+                DecPrivateModeCode::AnyEventMouse,
+            ))),
+            CSI::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(
+                DecPrivateModeCode::SGRMouse,
+            ))),
+            CSI::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(
+                DecPrivateModeCode::ShowCursor,
+            ))),
+        ];
+
+        for sequence in restore_sequences {
+            let _ = write!(stderr, "{}", sequence);
+        }
+        let _ = stderr.flush();
+
+        let (hook, _) = color_eyre::config::HookBuilder::default()
+            .try_into_hooks()
+            .unwrap();
+        eprintln!("{}", hook.panic_report(panic));
+    }));
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn install_panic_hook() -> color_eyre::Result<()> {
+    panic::set_hook(Box::new(|panic| {
+        let (hook, _) = color_eyre::config::HookBuilder::default()
+            .try_into_hooks()
+            .unwrap();
+        eprintln!("{}", hook.panic_report(panic));
+    }));
+
+    Ok(())
+}
+
+fn main() -> color_eyre::Result<()> {
+    install_panic_hook()?;
+
     let program = Program::new(seed_model(), update, view).map_event(map_event);
 
     if let Err(error) = program.run() {
         eprintln!("Program exited with error: {:?}", error);
     }
+
+    Ok(())
 }
 
 #[cfg(test)]
