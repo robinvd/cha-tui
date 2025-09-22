@@ -1,4 +1,4 @@
-use crate::dom::{ElementKind, ElementNode, Node, Style, TextNode};
+use crate::dom::{ElementKind, ElementNode, Node, NodeContent, Style, TextNode};
 use crate::error::ProgramError;
 use crate::event::Size;
 
@@ -55,9 +55,9 @@ impl Renderer {
             return;
         }
 
-        match node {
-            Node::Text(text) => self.render_text(text, area),
-            Node::Element(element) => self.render_element(element, area),
+        match &node.content {
+            NodeContent::Text(text) => self.render_text(text, area),
+            NodeContent::Element(element) => self.render_element(element, area),
         }
     }
 
@@ -235,15 +235,15 @@ impl Default for Renderer {
 }
 
 fn measure_height<Msg>(node: &Node<Msg>) -> u16 {
-    match node {
-        Node::Text(text) => {
+    match &node.content {
+        NodeContent::Text(text) => {
             if text.content.is_empty() {
                 0
             } else {
                 1
             }
         }
-        Node::Element(element) => match element.kind {
+        NodeContent::Element(element) => match element.kind {
             ElementKind::Column => element
                 .children
                 .iter()
@@ -266,12 +266,12 @@ fn measure_height<Msg>(node: &Node<Msg>) -> u16 {
 }
 
 fn measure_width<Msg>(node: &Node<Msg>) -> u16 {
-    match node {
-        Node::Text(text) => {
+    match &node.content {
+        NodeContent::Text(text) => {
             let len = text.content.chars().count();
             len.min(u16::MAX as usize) as u16
         }
-        Node::Element(element) => match element.kind {
+        NodeContent::Element(element) => match element.kind {
             ElementKind::Column => element
                 .children
                 .iter()

@@ -1,11 +1,39 @@
+use std::collections::HashMap;
 use std::marker::PhantomData;
 
 use crate::event::Size;
+use taffy::{
+    style::Style as TaffyStyle,
+    tree::{Cache as TaffyCache, Layout as TaffyLayout, NodeId, TraversePartialTree},
+};
 
 #[derive(Clone, Debug, PartialEq)]
-pub enum Node<Msg> {
+pub struct Node<Msg> {
+    pub content: NodeContent<Msg>,
+    pub layout_state: LayoutState,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum NodeContent<Msg> {
     Element(ElementNode<Msg>),
     Text(TextNode<Msg>),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LayoutState {
+    pub style: TaffyStyle,
+    pub cache: TaffyCache,
+    pub layout: TaffyLayout,
+}
+
+impl Default for LayoutState {
+    fn default() -> Self {
+        Self {
+            style: TaffyStyle::default(),
+            cache: TaffyCache::new(),
+            layout: TaffyLayout::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -13,7 +41,6 @@ pub struct ElementNode<Msg> {
     pub kind: ElementKind,
     pub attrs: Attributes,
     pub children: Vec<Node<Msg>>,
-    _marker: PhantomData<Msg>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -65,35 +92,110 @@ pub enum Color {
 }
 
 pub fn text<Msg>(content: impl Into<String>) -> Node<Msg> {
-    Node::Text(TextNode::new(content))
+    Node::new(NodeContent::Text(TextNode::new(content)))
 }
 
 pub fn column<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
-    Node::Element(ElementNode::new(ElementKind::Column, children))
+    Node::new(NodeContent::Element(ElementNode::new(
+        ElementKind::Column,
+        children,
+    )))
 }
 
 pub fn row<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
-    Node::Element(ElementNode::new(ElementKind::Row, children))
+    Node::new(NodeContent::Element(ElementNode::new(
+        ElementKind::Row,
+        children,
+    )))
 }
 
 pub fn block<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
-    let mut node = ElementNode::new(ElementKind::Block, children);
-    node.attrs.style.border = true;
-    Node::Element(node)
+    let mut element = ElementNode::new(ElementKind::Block, children);
+    element.attrs.style.border = true;
+    Node::new(NodeContent::Element(element))
 }
 
 impl<Msg> Node<Msg> {
-    pub fn with_style(self, style: Style) -> Self {
-        match self {
-            Node::Element(mut element) => {
+    pub fn new(content: NodeContent<Msg>) -> Self {
+        Self {
+            content,
+            layout_state: LayoutState::default(),
+        }
+    }
+
+    pub fn with_style(mut self, style: Style) -> Self {
+        match &mut self.content {
+            NodeContent::Element(element) => {
                 element.attrs.style = style;
-                Node::Element(element)
             }
-            Node::Text(mut text) => {
+            NodeContent::Text(text) => {
                 text.style = style;
-                Node::Text(text)
             }
         }
+        self
+    }
+
+    pub fn layout_state(&self) -> &LayoutState {
+        &self.layout_state
+    }
+
+    pub fn layout_state_mut(&mut self) -> &mut LayoutState {
+        &mut self.layout_state
+    }
+
+    pub fn as_element(&self) -> Option<&ElementNode<Msg>> {
+        match &self.content {
+            NodeContent::Element(element) => Some(element),
+            _ => None,
+        }
+    }
+
+    pub fn as_text(&self) -> Option<&TextNode<Msg>> {
+        match &self.content {
+            NodeContent::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn into_element(self) -> Option<ElementNode<Msg>> {
+        match self.content {
+            NodeContent::Element(element) => Some(element),
+            _ => None,
+        }
+    }
+
+    pub fn into_text(self) -> Option<TextNode<Msg>> {
+        match self.content {
+            NodeContent::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    fn build_children_map(&self) -> HashMap<NodeId, Vec<NodeId>> {
+        fn collect<Msg>(
+            node: &Node<Msg>,
+            next_id: &mut usize,
+            map: &mut HashMap<NodeId, Vec<NodeId>>,
+        ) -> NodeId {
+            let current_id = NodeId::from(*next_id);
+            *next_id += 1;
+
+            let mut child_ids = Vec::new();
+            if let NodeContent::Element(element) = &node.content {
+                for child in &element.children {
+                    let child_id = collect(child, next_id, map);
+                    child_ids.push(child_id);
+                }
+            }
+
+            map.insert(current_id, child_ids);
+            current_id
+        }
+
+        let mut map = HashMap::new();
+        let mut next_id = 0;
+        collect(self, &mut next_id, &mut map);
+        map
     }
 }
 
@@ -153,7 +255,6 @@ impl<Msg> ElementNode<Msg> {
             kind,
             attrs: Attributes::default(),
             children,
-            _marker: PhantomData,
         }
     }
 
@@ -172,6 +273,30 @@ impl<Msg> TextNode<Msg> {
     }
 }
 
+impl<Msg> TraversePartialTree for Node<Msg> {
+    type ChildIter<'a>
+        = std::vec::IntoIter<NodeId>
+    where
+        Self: 'a;
+
+    fn child_ids(&self, parent_node_id: NodeId) -> Self::ChildIter<'_> {
+        let mut map = self.build_children_map();
+        map.remove(&parent_node_id).unwrap_or_default().into_iter()
+    }
+
+    fn child_count(&self, parent_node_id: NodeId) -> usize {
+        let map = self.build_children_map();
+        map.get(&parent_node_id).map_or(0, Vec::len)
+    }
+
+    fn get_child_id(&self, parent_node_id: NodeId, child_index: usize) -> NodeId {
+        let map = self.build_children_map();
+        *map.get(&parent_node_id)
+            .and_then(|children| children.get(child_index))
+            .expect("child index out of bounds")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -180,12 +305,12 @@ mod tests {
     fn text_node_preserves_content() {
         let node: Node<()> = text("hello");
 
-        match node {
-            Node::Text(text) => {
+        match node.into_text() {
+            Some(text) => {
                 assert_eq!(text.content, "hello");
                 assert_eq!(text.style, Style::default());
             }
-            _ => panic!("expected text node"),
+            None => panic!("expected text node"),
         }
     }
 
@@ -194,13 +319,13 @@ mod tests {
         let child: Node<()> = text("child");
         let node = column(vec![child.clone()]);
 
-        match node {
-            Node::Element(element) => {
+        match node.into_element() {
+            Some(element) => {
                 assert_eq!(element.kind, ElementKind::Column);
                 assert_eq!(element.children, vec![child]);
                 assert_eq!(element.attrs, Attributes::default());
             }
-            _ => panic!("expected element node"),
+            None => panic!("expected element node"),
         }
     }
 
@@ -209,12 +334,12 @@ mod tests {
         let child: Node<()> = text("row child");
         let node = row(vec![child.clone()]);
 
-        match node {
-            Node::Element(element) => {
+        match node.into_element() {
+            Some(element) => {
                 assert_eq!(element.kind, ElementKind::Row);
                 assert_eq!(element.children, vec![child]);
             }
-            _ => panic!("expected element node"),
+            None => panic!("expected element node"),
         }
     }
 
@@ -222,11 +347,11 @@ mod tests {
     fn block_node_sets_border() {
         let node = block::<()>(Vec::new());
 
-        match node {
-            Node::Element(element) => {
+        match node.into_element() {
+            Some(element) => {
                 assert!(element.attrs.style.border);
             }
-            _ => panic!("expected element node"),
+            None => panic!("expected element node"),
         }
     }
 
@@ -235,9 +360,9 @@ mod tests {
         let style = Style::fg(Color::Blue);
         let node = text::<()>("styled").with_style(style.clone());
 
-        match node {
-            Node::Text(text) => assert_eq!(text.style, style),
-            _ => panic!("expected text node"),
+        match node.into_text() {
+            Some(text) => assert_eq!(text.style, style),
+            None => panic!("expected text node"),
         }
     }
 

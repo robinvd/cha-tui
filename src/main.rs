@@ -248,12 +248,13 @@ mod tests {
 
         let node = render_item(&item, true);
 
-        match node {
-            Node::Element(row) => match row.children.first() {
-                Some(Node::Text(text)) => assert_eq!(text.style.fg, Some(Color::Cyan)),
-                _ => panic!("expected text child"),
-            },
-            _ => panic!("expected row element"),
+        let row = node.into_element().expect("expected row element");
+        match row.children.first() {
+            Some(child) => {
+                let text = child.as_text().expect("expected text child");
+                assert_eq!(text.style.fg, Some(Color::Cyan));
+            }
+            None => panic!("expected text child"),
         }
     }
 
@@ -266,12 +267,13 @@ mod tests {
 
         let node = render_item(&item, false);
 
-        match node {
-            Node::Element(row) => match row.children.first() {
-                Some(Node::Text(text)) => assert_eq!(text.style.fg, None),
-                _ => panic!("expected text child"),
-            },
-            _ => panic!("expected row element"),
+        let row = node.into_element().expect("expected row element");
+        match row.children.first() {
+            Some(child) => {
+                let text = child.as_text().expect("expected text child");
+                assert_eq!(text.style.fg, None);
+            }
+            None => panic!("expected text child"),
         }
     }
 
