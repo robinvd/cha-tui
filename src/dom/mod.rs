@@ -13,6 +13,7 @@ use taffy::{
     style::{FlexDirection, LengthPercentage, Style as TaffyStyle},
     tree::{Cache as TaffyCache, Layout as TaffyLayout, NodeId, TraversePartialTree},
 };
+use termwiz::cell::unicode_column_width;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Node<Msg> {
@@ -411,7 +412,7 @@ impl<Msg> LayoutPartialTree for Node<Msg> {
                     &node.layout_state.style,
                     |_val, _basis| 0.0,
                     |_known_dimensions, _available_space| taffy::Size {
-                        width: text.content.len() as f32,
+                        width: unicode_column_width(&text.content, None) as f32,
                         height: 1.,
                     },
                 ),
