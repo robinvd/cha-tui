@@ -10,3 +10,32 @@
 - Program errors (`src/error.rs`) wrap termwiz failures and string-based render/event issues via `ProgramError::{Terminal, Render, Event}` with helper constructors and `From<termwiz::Error>`.
 - Example application in `src/main.rs`: simple TODO list demonstrating update/view/event wiring, hotkeys for navigation/toggling, and block-based layout.
 - Always run `cargo test` and `cargo clippy` after modifications.
+
+
+## Running
+
+### TUI
+
+Running any TUI app (`cargo run`) could start an interactive test app, and if so not suitable for AI development as the program will run forever.
+In this case use unit tests as a means of verifying new functionality. Or use the commands in the justfile
+
+To test the interactive app use a terminal session.
+```bash
+just session-restart # Restart a session or start a new one if none exists
+
+# Send a string to the interactive session, Use ANSI escape sequences for complex text
+# for example `session-send-key '\x11'` for Ctrl-q, '\e[B' for Down, '\ef' for Alt-f, '\r' for enter
+#
+# Will also print the screen after sending the key data
+just session-send-key
+
+just session-get-screen # print the current session screen to stdout
+```
+
+ALWAYS use the just commands, and dont use manual version of the commands for interactive terminal testing.
+
+Before running a new test in the interactive terminal, always do a `session-restart` to made sure there is nothing running.
+
+### LOGS
+
+Run the app with `RUST_LOG=debug cargo run ...` and it will put logs in todo.log or gs.log depending on the app.

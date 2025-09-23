@@ -244,6 +244,38 @@ fn seed_model() -> Model {
     }
 }
 
+fn init_tracing() -> color_eyre::Result<()> {
+    use std::fs::File;
+    use std::path::PathBuf;
+    use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+
+    let log_path = PathBuf::from("todo.log");
+
+    File::options().create(true).append(true).open(&log_path)?;
+
+    let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new({
+        let log_path = log_path.clone();
+        move || {
+            File::options()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+                .expect("log file should remain writable")
+        }
+    });
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(writer),
+        )
+        .try_init()
+        .map_err(|error| color_eyre::eyre::eyre!(error))?;
+
+    Ok(())
+}
+
 #[cfg(unix)]
 fn install_panic_hook() -> color_eyre::Result<()> {
     use std::io::{self, Write};
@@ -304,10 +336,14 @@ fn install_panic_hook() -> color_eyre::Result<()> {
 
 fn main() -> color_eyre::Result<()> {
     install_panic_hook()?;
+    init_tracing()?;
 
     let program = Program::new(seed_model(), update, view).map_event(map_event);
 
+    tracing::info!("Starting TODO program");
+
     if let Err(error) = program.run() {
+        tracing::error!(?error, "Program exited with error");
         eprintln!("Program exited with error: {:?}", error);
     }
 

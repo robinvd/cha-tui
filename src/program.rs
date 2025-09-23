@@ -11,6 +11,7 @@ use termwiz::input::{InputEvent, KeyEvent, Modifiers as TwModifiers};
 use termwiz::surface::Change;
 use termwiz::terminal::buffered::BufferedTerminal;
 use termwiz::terminal::{Terminal, new_terminal};
+use tracing::info;
 
 pub type UpdateFn<Model, Msg> = Box<dyn FnMut(&mut Model, Msg) -> Transition>;
 pub type ViewFn<Model, Msg> = Box<dyn Fn(&Model) -> Node<Msg>>;
@@ -152,6 +153,7 @@ impl<Model, Msg> Program<Model, Msg> {
 
     fn render_view(&mut self) -> Result<(), ProgramError> {
         let mut node = (self.view)(&self.model);
+        info!("computing layout with: {:?}", self.current_size);
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -161,6 +163,7 @@ impl<Model, Msg> Program<Model, Msg> {
             },
         );
         crate::dom::rounding::round_layout(&mut node);
+        crate::dom::print::print_tree(&node);
         self.renderer.render(&node, self.current_size)
     }
 

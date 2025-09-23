@@ -16,14 +16,40 @@ pub struct Renderer {
 struct Rect {
     x: usize,
     y: usize,
-    width: u16,
-    height: u16,
+    width: usize,
+    height: usize,
+}
+
+impl Rect {
+    fn intersection(self, other: Self) -> Self {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+
+        let self_right = self.x.saturating_add(self.width);
+        let other_right = other.x.saturating_add(other.width);
+        let self_bottom = self.y.saturating_add(self.height);
+        let other_bottom = other.y.saturating_add(other.height);
+
+        let width = self_right.min(other_right).saturating_sub(x);
+        let height = self_bottom.min(other_bottom).saturating_sub(y);
+
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    fn has_area(self) -> bool {
+        self.width > 0 && self.height > 0
+    }
 }
 
 #[derive(Clone, Copy)]
 struct Point {
-    x: f32,
-    y: f32,
+    x: usize,
+    y: usize,
 }
 
 impl Renderer {
@@ -45,7 +71,12 @@ impl Renderer {
         self.surface
             .add_change(Change::ClearScreen(ColorAttribute::Default));
 
-        let origin = Point { x: 0.0, y: 0.0 };
+        let origin = Rect {
+            x: 0,
+            y: 0,
+            width,
+            height,
+        };
         self.render_node(root, origin);
         self.surface
             .add_change(Change::CursorVisibility(CursorVisibility::Hidden));
@@ -53,26 +84,34 @@ impl Renderer {
         Ok(())
     }
 
-    fn render_node<Msg>(&mut self, node: &Node<Msg>, parent_origin: Point) {
+    fn render_node<Msg>(&mut self, node: &Node<Msg>, parent_origin: Rect) {
         let layout = node.layout_state.layout;
         let node_origin = Point {
-            x: parent_origin.x + layout.location.x,
-            y: parent_origin.y + layout.location.y,
+            x: parent_origin.x + layout.location.x as usize,
+            y: parent_origin.y + layout.location.y as usize,
         };
 
         let Some(area) = rect_from_layout(&layout, node_origin) else {
             return;
         };
+        if !area.has_area() {
+            return;
+        }
+
+        let area = area.intersection(parent_origin);
+        if !parent_origin.has_area() {
+            return;
+        }
 
         match &node.content {
             NodeContent::Text(text) => self.render_text(text, area),
-            NodeContent::Element(element) => self.render_element(element, area, node_origin),
+            NodeContent::Element(element) => self.render_element(element, area),
         }
     }
 
     fn render_text<Msg>(&mut self, text: &TextNode<Msg>, area: Rect) {
         let attrs = style_to_attributes(&text.style);
-        let content: String = text.content.chars().take(area.width as usize).collect();
+        let content: String = text.content.chars().take(area.width).collect();
 
         if content.is_empty() {
             return;
@@ -87,25 +126,34 @@ impl Renderer {
         self.surface.add_change(Change::Text(content));
     }
 
-    fn render_element<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, origin: Point) {
+    fn render_element<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect) {
         match element.kind {
-            ElementKind::Block => self.render_block(element, area, origin),
+            ElementKind::Block => self.render_block(element, area),
             ElementKind::Column | ElementKind::Row => {
-                self.render_children(&element.children, origin);
+                self.render_children(&element.children, area);
             }
         }
     }
 
-    fn render_children<Msg>(&mut self, children: &[Node<Msg>], origin: Point) {
+    fn render_children<Msg>(&mut self, children: &[Node<Msg>], clip: Rect) {
         for child in children {
-            self.render_node(child, origin);
+            self.render_node(child, clip);
         }
     }
 
-    fn render_block<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, origin: Point) {
+    fn render_block<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect) {
         self.draw_border(area, &element.attrs.style);
 
-        self.render_children(&element.children, origin);
+        // TODO correct?
+        self.render_children(
+            &element.children,
+            Rect {
+                x: area.x,
+                y: area.y,
+                width: area.width.saturating_sub(1),
+                height: area.height.saturating_sub(1),
+            },
+        );
     }
 
     fn draw_border(&mut self, area: Rect, style: &Style) {
@@ -117,29 +165,29 @@ impl Renderer {
 
         // Top border
         self.write_char(area.x, area.y, '┌', &attrs);
-        for x in (area.x + 1)..(area.x + area.width as usize - 1) {
+        for x in (area.x + 1)..(area.x + area.width - 1) {
             self.write_char(x, area.y, '─', &attrs);
         }
         if area.width > 1 {
-            self.write_char(area.x + area.width as usize - 1, area.y, '┐', &attrs);
+            self.write_char(area.x + area.width - 1, area.y, '┐', &attrs);
         }
 
         // Bottom border
         if area.height > 1 {
-            let bottom = area.y + area.height as usize - 1;
+            let bottom = area.y + area.height - 1;
             self.write_char(area.x, bottom, '└', &attrs);
-            for x in (area.x + 1)..(area.x + area.width as usize - 1) {
+            for x in (area.x + 1)..(area.x + area.width - 1) {
                 self.write_char(x, bottom, '─', &attrs);
             }
             if area.width > 1 {
-                self.write_char(area.x + area.width as usize - 1, bottom, '┘', &attrs);
+                self.write_char(area.x + area.width - 1, bottom, '┘', &attrs);
             }
 
             // Side borders
             for y in (area.y + 1)..bottom {
                 self.write_char(area.x, y, '│', &attrs);
                 if area.width > 1 {
-                    self.write_char(area.x + area.width as usize - 1, y, '│', &attrs);
+                    self.write_char(area.x + area.width - 1, y, '│', &attrs);
                 }
             }
         }
@@ -176,45 +224,21 @@ impl Default for Renderer {
 }
 
 fn rect_from_layout(layout: &TaffyLayout, origin: Point) -> Option<Rect> {
-    let width = layout.size.width.max(0.0);
-    let height = layout.size.height.max(0.0);
+    let width = layout.size.width.max(0.0).round() as usize;
+    let height = layout.size.height.max(0.0).round() as usize;
 
-    if width <= 0.0 || height <= 0.0 {
+    if width == 0 || height == 0 {
         return None;
     }
 
     let x = origin.x;
     let y = origin.y;
 
-    let mut x_int = x.round() as i32;
-    let mut y_int = y.round() as i32;
-    let mut width_int = width.round() as i32;
-    let mut height_int = height.round() as i32;
-
-    if x < 0.0 {
-        let offset = (-x).ceil() as i32;
-        width_int -= offset;
-        x_int = 0;
-    }
-
-    if y < 0.0 {
-        let offset = (-y).ceil() as i32;
-        height_int -= offset;
-        y_int = 0;
-    }
-
-    if width_int <= 0 || height_int <= 0 {
-        return None;
-    }
-
-    let width_u16 = width_int.min(u16::MAX as i32) as u16;
-    let height_u16 = height_int.min(u16::MAX as i32) as u16;
-
     Some(Rect {
-        x: x_int.max(0) as usize,
-        y: y_int.max(0) as usize,
-        width: width_u16,
-        height: height_u16,
+        x,
+        y,
+        width,
+        height,
     })
 }
 
@@ -278,6 +302,52 @@ mod tests {
 
         let contents = renderer.surface.screen_chars_to_string();
         assert!(contents.starts_with("hello"));
+    }
+
+    #[test]
+    fn rect_intersection_clips_to_overlap() {
+        let parent = Rect {
+            x: 0,
+            y: 0,
+            width: 6,
+            height: 4,
+        };
+        let child = Rect {
+            x: 4,
+            y: 1,
+            width: 5,
+            height: 3,
+        };
+
+        let intersection = child.intersection(parent);
+
+        assert_eq!(intersection.x, 4);
+        assert_eq!(intersection.width, 2);
+        assert_eq!(intersection.y, 1);
+        assert_eq!(intersection.height, 3);
+    }
+
+    #[test]
+    fn rect_intersection_handles_non_overlapping_rects() {
+        let a = Rect {
+            x: 0,
+            y: 0,
+            width: 3,
+            height: 3,
+        };
+        let b = Rect {
+            x: 5,
+            y: 5,
+            width: 2,
+            height: 2,
+        };
+
+        let intersection = a.intersection(b);
+
+        assert_eq!(intersection.x, 5);
+        assert_eq!(intersection.y, 5);
+        assert_eq!(intersection.width, 0);
+        assert_eq!(intersection.height, 0);
     }
 
     #[test]

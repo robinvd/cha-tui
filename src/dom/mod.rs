@@ -1,10 +1,11 @@
+pub mod print;
 pub mod rounding;
 
 use std::marker::PhantomData;
 
 use crate::event::Size;
 use taffy::{
-    CacheTree, LayoutFlexboxContainer, compute_cached_layout, compute_flexbox_layout,
+    CacheTree, LayoutFlexboxContainer, Overflow, compute_cached_layout, compute_flexbox_layout,
     compute_leaf_layout,
 };
 use taffy::{
@@ -39,12 +40,16 @@ pub struct LayoutState {
 
 impl Default for LayoutState {
     fn default() -> Self {
-        Self {
+        let mut new = Self {
             style: TaffyStyle::default(),
             cache: TaffyCache::new(),
             unrounded_layout: TaffyLayout::new(),
             layout: TaffyLayout::new(),
-        }
+        };
+        new.style.overflow.x = Overflow::Clip;
+        new.style.overflow.y = Overflow::Clip;
+        new.style.scrollbar_width = 1.;
+        new
     }
 }
 
@@ -130,7 +135,7 @@ pub fn block<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
     element.attrs.style.border = true;
     let mut node = Node::new(NodeContent::Element(element));
     node.layout_state.style.flex_direction = FlexDirection::Column;
-    node.layout_state.style.padding = Rect {
+    node.layout_state.style.border = Rect {
         left: LengthPercentage::length(1.0),
         right: LengthPercentage::length(1.0),
         top: LengthPercentage::length(1.0),
@@ -149,6 +154,24 @@ impl<Msg> Node<Msg> {
         }
     }
 
+    fn get_debug_label(&self) -> &'static str {
+        if self.classname != "" {
+            return self.classname;
+        }
+        match &self.content {
+            NodeContent::Element(element_node) => match element_node.kind {
+                ElementKind::Column => "col",
+                ElementKind::Row => "row",
+                ElementKind::Block => "block",
+            },
+            NodeContent::Text(_text_node) => "text",
+        }
+    }
+
+    fn get_final_layout(&self) -> &TaffyLayout {
+        &self.layout_state.layout
+    }
+
     // Add an ID to this node, this is used so node references are stable
     // across renders.
     pub fn with_id(mut self, id: &'static str) -> Self {
@@ -164,6 +187,56 @@ impl<Msg> Node<Msg> {
     pub fn with_id_mixin(mut self, id: &'static str, mixin: u64) -> Self {
         self.classname = id;
         self.id = crate::hash::hash_str(mixin, self.classname);
+        self
+    }
+
+    pub fn with_flex_grow(mut self, val: f32) -> Self {
+        self.layout_state.style.flex_grow = val;
+        self
+    }
+
+    pub fn with_flex_basis(mut self, val: taffy::Dimension) -> Self {
+        self.layout_state.style.flex_basis = val;
+        self
+    }
+
+    pub fn with_flex_shrink(mut self, val: f32) -> Self {
+        self.layout_state.style.flex_shrink = val;
+        self
+    }
+
+    pub fn with_height(mut self, val: taffy::Dimension) -> Self {
+        self.layout_state.style.size.height = val;
+        self
+    }
+
+    pub fn with_min_height(mut self, val: taffy::Dimension) -> Self {
+        self.layout_state.style.min_size.height = val;
+        self
+    }
+
+    pub fn with_min_width(mut self, val: taffy::Dimension) -> Self {
+        self.layout_state.style.min_size.width = val;
+        self
+    }
+
+    pub fn with_width(mut self, val: taffy::Dimension) -> Self {
+        self.layout_state.style.size.width = val;
+        self
+    }
+
+    pub fn with_fill(self) -> Self {
+        self.with_height(taffy::Dimension::percent(1.))
+            .with_width(taffy::Dimension::percent(1.))
+    }
+
+    pub fn with_overflow_y(mut self, val: taffy::Overflow) -> Self {
+        self.layout_state.style.overflow.y = val;
+        self
+    }
+
+    pub fn with_overflow_x(mut self, val: taffy::Overflow) -> Self {
+        self.layout_state.style.overflow.x = val;
         self
     }
 
