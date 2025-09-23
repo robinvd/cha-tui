@@ -25,13 +25,24 @@ fn main() -> Result<()> {
 fn map_event(event: Event) -> Option<Msg> {
     match event {
         Event::Key(key) => Some(Msg::KeyPressed(key)),
-        Event::Resize(_) => None,
+        _ => None,
     }
 }
 
 fn update(model: &mut Model, msg: Msg) -> Transition {
     match msg {
         Msg::KeyPressed(key) => handle_key(model, key),
+        Msg::ActivateFile(staged, index) => {
+            if staged {
+                model.selected_staged = index;
+                model.focus = Focus::Staged
+            } else {
+                model.selected_unstaged = index;
+                model.focus = Focus::Unstaged
+            };
+            model.update_diff();
+            Transition::Continue
+        }
     }
 }
 
@@ -114,6 +125,7 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
         &model.unstaged,
         model.focus == Focus::Unstaged,
         model.selected_unstaged,
+        false,
     )
     .with_id("unstaged-section")
     .with_overflow_y(taffy::Overflow::Scroll);
@@ -123,6 +135,7 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
         &model.staged,
         model.focus == Focus::Staged,
         model.selected_staged,
+        true,
     )
     .with_id("staged-section")
     .with_overflow_y(taffy::Overflow::Scroll);
@@ -139,9 +152,10 @@ fn render_section(
     entries: &[FileEntry],
     is_active: bool,
     selected: usize,
+    is_staged: bool,
 ) -> Node<Msg> {
     let heading = text::<Msg>(title).with_style(section_title_style());
-    let list = render_file_list(entries, is_active, selected);
+    let list = render_file_list(entries, is_active, selected, is_staged);
 
     block(vec![
         column(vec![heading, list])
@@ -154,14 +168,20 @@ fn render_section(
     .with_flex_basis(Dimension::ZERO)
 }
 
-fn render_file_list(entries: &[FileEntry], is_active: bool, selected: usize) -> Node<Msg> {
+fn render_file_list(
+    entries: &[FileEntry],
+    is_active: bool,
+    selected: usize,
+    is_staged: bool,
+) -> Node<Msg> {
     let mut items = Vec::new();
 
     if entries.is_empty() {
         items.push(text::<Msg>("(no files)").with_style(inactive_style()));
     } else {
         for (idx, entry) in entries.iter().enumerate() {
-            let mut node = text::<Msg>(&entry.display);
+            let mut node =
+                text::<Msg>(&entry.display).on_click(move || Msg::ActivateFile(is_staged, idx));
 
             if idx == selected {
                 let mut style = if is_active {
@@ -455,6 +475,7 @@ impl Model {
 
 enum Msg {
     KeyPressed(Key),
+    ActivateFile(bool, usize),
 }
 
 #[derive(Clone, Debug)]

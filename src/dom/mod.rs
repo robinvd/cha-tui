@@ -1,9 +1,11 @@
 pub mod print;
 pub mod rounding;
 
+use std::fmt;
 use std::marker::PhantomData;
+use std::rc::Rc;
 
-use crate::event::Size;
+use crate::event::{MouseEvent, Size};
 use taffy::{
     CacheTree, LayoutFlexboxContainer, Overflow, compute_cached_layout, compute_flexbox_layout,
     compute_leaf_layout,
@@ -16,18 +18,60 @@ use taffy::{
 };
 use termwiz::cell::unicode_column_width;
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct Node<Msg> {
     pub content: NodeContent<Msg>,
     classname: &'static str,
     id: u64,
     pub layout_state: LayoutState,
+    on_mouse: Option<Rc<dyn Fn(MouseEvent) -> Option<Msg>>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+impl<Msg: fmt::Debug> fmt::Debug for Node<Msg> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Node")
+            .field("content", &self.content)
+            .field("classname", &self.classname)
+            .field("id", &self.id)
+            .field("layout_state", &self.layout_state)
+            .field("clickable", &self.on_mouse.is_some())
+            .finish()
+    }
+}
+
+impl<Msg: PartialEq> PartialEq for Node<Msg> {
+    fn eq(&self, other: &Self) -> bool {
+        self.content == other.content
+            && self.classname == other.classname
+            && self.id == other.id
+            && self.layout_state == other.layout_state
+            && self.on_mouse.is_some() == other.on_mouse.is_some()
+    }
+}
+
+#[derive(Clone)]
 pub enum NodeContent<Msg> {
     Element(ElementNode<Msg>),
     Text(TextNode<Msg>),
+}
+
+impl<Msg: fmt::Debug> fmt::Debug for NodeContent<Msg> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Element(e) => f.debug_tuple("Element").field(e).finish(),
+            Self::Text(t) => f.debug_tuple("Text").field(t).finish(),
+        }
+    }
+}
+
+impl<Msg: PartialEq> PartialEq for NodeContent<Msg> {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Element(a), Self::Element(b)) => a == b,
+            (Self::Text(a), Self::Text(b)) => a == b,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -53,11 +97,27 @@ impl Default for LayoutState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
 pub struct ElementNode<Msg> {
     pub kind: ElementKind,
     pub attrs: Attributes,
     pub children: Vec<Node<Msg>>,
+}
+
+impl<Msg: fmt::Debug> fmt::Debug for ElementNode<Msg> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ElementNode")
+            .field("kind", &self.kind)
+            .field("attrs", &self.attrs)
+            .field("children_len", &self.children.len())
+            .finish()
+    }
+}
+
+impl<Msg: PartialEq> PartialEq for ElementNode<Msg> {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.attrs == other.attrs && self.children == other.children
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -151,11 +211,12 @@ impl<Msg> Node<Msg> {
             layout_state: LayoutState::default(),
             classname: "",
             id: 0,
+            on_mouse: None,
         }
     }
 
     fn get_debug_label(&self) -> &'static str {
-        if self.classname != "" {
+        if !self.classname.is_empty() {
             return self.classname;
         }
         match &self.content {
@@ -187,6 +248,22 @@ impl<Msg> Node<Msg> {
     pub fn with_id_mixin(mut self, id: &'static str, mixin: u64) -> Self {
         self.classname = id;
         self.id = crate::hash::hash_str(mixin, self.classname);
+        self
+    }
+
+    pub fn on_click(mut self, handler: impl Fn() -> Msg + 'static) -> Self {
+        self.on_mouse = Some(Rc::new(move |e: MouseEvent| {
+            if e.buttons.left {
+                Some(handler())
+            } else {
+                None
+            }
+        }));
+        self
+    }
+
+    pub fn on_mouse(mut self, handler: impl Fn(MouseEvent) -> Msg + 'static) -> Self {
+        self.on_mouse = Some(Rc::new(move |e| Some(handler(e))));
         self
     }
 
@@ -318,6 +395,60 @@ impl<Msg> Node<Msg> {
 
     pub(crate) fn set_final_layout(&mut self, layout: &TaffyLayout) {
         self.layout_state.layout = *layout
+    }
+
+    pub(crate) fn mouse_message(&self, event: &MouseEvent) -> Option<Msg> {
+        // First see if there is a general mouse handler
+        if let Some(handler) = &self.on_mouse {
+            return handler(*event);
+        }
+        None
+    }
+
+    pub(crate) fn hit_test(&self, x: u16, y: u16) -> Option<&Self> {
+        Self::hit_test_inner(self, x, y, 0.0, 0.0)
+    }
+
+    fn hit_test_inner(
+        node: &Node<Msg>,
+        x: u16,
+        y: u16,
+        origin_x: f32,
+        origin_y: f32,
+    ) -> Option<&Node<Msg>> {
+        let layout = node.layout_state.layout;
+        let abs_x = origin_x + layout.location.x;
+        let abs_y = origin_y + layout.location.y;
+        let width = layout.size.width;
+        let height = layout.size.height;
+
+        if width <= 0.0 || height <= 0.0 {
+            return None;
+        }
+
+        let target_x = f32::from(x);
+        let target_y = f32::from(y);
+        if target_x < abs_x
+            || target_x >= abs_x + width
+            || target_y < abs_y
+            || target_y >= abs_y + height
+        {
+            return None;
+        }
+
+        if let NodeContent::Element(element) = &node.content {
+            for child in &element.children {
+                if let Some(hit) = Self::hit_test_inner(child, x, y, abs_x, abs_y) {
+                    return Some(hit);
+                }
+            }
+        }
+
+        if node.on_mouse.is_some() {
+            Some(node)
+        } else {
+            None
+        }
     }
 }
 
@@ -598,5 +729,30 @@ mod tests {
         let available = Size::new(10, 5);
 
         assert_eq!(node.layout(available), available);
+    }
+
+    #[test]
+    fn hit_test_finds_clickable_node() {
+        let mut node = text::<()>("btn").on_click(|| ());
+
+        taffy::compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: taffy::AvailableSpace::Definite(4.0),
+                height: taffy::AvailableSpace::Definite(2.0),
+            },
+        );
+        crate::dom::rounding::round_layout(&mut node);
+
+        let hit = node.hit_test(0, 0).expect("expected hit");
+        assert!(
+            hit.mouse_message(&crate::event::MouseEvent::new(
+                0,
+                0,
+                crate::event::MouseButtons::new(true, false, false)
+            ))
+            .is_some()
+        );
     }
 }

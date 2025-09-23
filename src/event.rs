@@ -2,6 +2,7 @@
 pub enum Event {
     Key(Key),
     Resize(Size),
+    Mouse(MouseEvent),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10,6 +11,23 @@ pub struct Key {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouseEvent {
+    pub x: u16,
+    pub y: u16,
+    pub buttons: MouseButtons,
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct MouseButtons {
+    pub left: bool,
+    pub right: bool,
+    pub middle: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -38,6 +56,10 @@ impl Event {
     pub fn resize(width: u16, height: u16) -> Self {
         Self::Resize(Size::new(width, height))
     }
+
+    pub fn mouse(x: u16, y: u16, buttons: MouseButtons) -> Self {
+        Self::Mouse(MouseEvent::new(x, y, buttons))
+    }
 }
 
 impl Key {
@@ -57,6 +79,59 @@ impl Key {
             alt,
             shift,
         }
+    }
+}
+
+impl MouseEvent {
+    pub fn new(x: u16, y: u16, buttons: MouseButtons) -> Self {
+        Self {
+            x,
+            y,
+            buttons,
+            ctrl: false,
+            alt: false,
+            shift: false,
+        }
+    }
+
+    pub fn with_modifiers(
+        x: u16,
+        y: u16,
+        buttons: MouseButtons,
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+    ) -> Self {
+        Self {
+            x,
+            y,
+            buttons,
+            ctrl,
+            alt,
+            shift,
+        }
+    }
+}
+
+impl MouseButtons {
+    pub fn new(left: bool, right: bool, middle: bool) -> Self {
+        Self {
+            left,
+            right,
+            middle,
+        }
+    }
+
+    pub fn is_left_pressed(self) -> bool {
+        self.left
+    }
+
+    pub fn is_right_pressed(self) -> bool {
+        self.right
+    }
+
+    pub fn is_middle_pressed(self) -> bool {
+        self.middle
     }
 }
 
@@ -113,6 +188,24 @@ mod tests {
                 assert_eq!(size.height, 5);
             }
             other => panic!("expected resize event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mouse_event_constructor_sets_defaults() {
+        let buttons = MouseButtons::new(true, false, false);
+        let event = Event::mouse(4, 7, buttons);
+
+        match event {
+            Event::Mouse(mouse) => {
+                assert_eq!(mouse.x, 4);
+                assert_eq!(mouse.y, 7);
+                assert!(mouse.buttons.is_left_pressed());
+                assert!(!mouse.ctrl);
+                assert!(!mouse.alt);
+                assert!(!mouse.shift);
+            }
+            other => panic!("expected mouse event, got {:?}", other),
         }
     }
 }

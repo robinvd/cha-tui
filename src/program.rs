@@ -2,12 +2,15 @@ use std::boxed::Box;
 
 use crate::dom::Node;
 use crate::error::ProgramError;
-use crate::event::{Event, Key, KeyCode, Size};
+use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};
 use crate::render::Renderer;
 
 use taffy::compute_root_layout;
 use termwiz::caps::Capabilities;
-use termwiz::input::{InputEvent, KeyEvent, Modifiers as TwModifiers};
+use termwiz::input::{
+    InputEvent, KeyEvent, Modifiers as TwModifiers, MouseButtons as TwMouseButtons,
+    MouseEvent as TwMouseEvent,
+};
 use termwiz::surface::{Change, Surface};
 use termwiz::terminal::buffered::BufferedTerminal;
 use termwiz::terminal::{Terminal, new_terminal};
@@ -29,7 +32,8 @@ pub struct Program<Model, Msg> {
     view: ViewFn<Model, Msg>,
     event_mapper: EventFn<Msg>,
     current_size: Size,
-    focus_path: Vec<u64>,
+    current_view: Option<Node<Msg>>,
+    last_mouse_buttons: MouseButtons,
 }
 
 impl<Model, Msg> Program<Model, Msg> {
@@ -44,7 +48,8 @@ impl<Model, Msg> Program<Model, Msg> {
             view: Box::new(view),
             event_mapper: Box::new(|_| None),
             current_size: Size::new(DEFAULT_WIDTH, DEFAULT_HEIGHT),
-            focus_path: Vec::new(),
+            current_view: None,
+            last_mouse_buttons: MouseButtons::default(),
         }
     }
 
@@ -140,11 +145,19 @@ impl<Model, Msg> Program<Model, Msg> {
     ) -> Result<Transition, ProgramError> {
         let mut needs_render = matches!(event, Event::Resize(_));
 
-        if let Event::Resize(size) = event {
-            self.current_size = size;
+        if let Event::Resize(size) = &event {
+            self.current_size = *size;
         }
 
-        let msg = (self.event_mapper)(event);
+        let mut msg = (self.event_mapper)(event.clone());
+
+        if let Event::Mouse(mouse_event) = &event {
+            let click_msg = self.handle_mouse_event(mouse_event);
+            if msg.is_none() {
+                msg = click_msg;
+            }
+        }
+
         let transition = if let Some(message) = msg {
             let transition = (self.update)(&mut self.model, message);
             if matches!(transition, Transition::Continue) {
@@ -155,72 +168,90 @@ impl<Model, Msg> Program<Model, Msg> {
             Transition::Continue
         };
 
-        if needs_render && let Some(term) = terminal {
-            self.render_view(term)?;
+        if needs_render {
+            if let Some(term) = terminal {
+                self.render_view(term)?;
+            } else {
+                self.rebuild_view();
+            }
         }
 
         Ok(transition)
     }
 
     fn render_view(&mut self, s: &mut Surface) -> Result<(), ProgramError> {
-        let mut node = (self.view)(&self.model);
-        info!("computing layout with: {:?}", self.current_size);
-        compute_root_layout(
-            &mut node,
-            u64::MAX.into(),
-            taffy::Size {
-                width: taffy::AvailableSpace::Definite(self.current_size.width as f32),
-                height: taffy::AvailableSpace::Definite(self.current_size.height as f32),
-            },
-        );
-        crate::dom::rounding::round_layout(&mut node);
-        crate::dom::print::print_tree(&node);
-        Renderer::new(s).render(&node, self.current_size)
+        self.rebuild_view();
+        if let Some(current_view) = self.current_view.as_ref() {
+            Renderer::new(s).render(current_view, self.current_size)
+        } else {
+            Ok(())
+        }
     }
 
-    // fn copy_to_terminal<T: Terminal>(
-    //     &mut self,
-    //     terminal: &mut BufferedTerminal<T>,
-    // ) -> Result<(), ProgramError> {
-    //     terminal.draw_from_screen(self.renderer.surface(), 0, 0);
-    //     terminal.flush().map_err(ProgramError::from)
-    // }
+    fn rebuild_view(&mut self) {
+        self.current_view = Some((self.view)(&self.model));
+        if let Some(view) = self.current_view.as_mut() {
+            info!("computing layout with: {:?}", self.current_size);
+            compute_root_layout(
+                view,
+                u64::MAX.into(),
+                taffy::Size {
+                    width: taffy::AvailableSpace::Definite(self.current_size.width as f32),
+                    height: taffy::AvailableSpace::Definite(self.current_size.height as f32),
+                },
+            );
+            crate::dom::rounding::round_layout(view);
+            crate::dom::print::print_tree(view);
+        }
+    }
 
-    // fn render_to_terminal<T: Terminal>(
-    //     &mut self,
-    //     terminal: &mut BufferedTerminal<T>,
-    // ) -> Result<(), ProgramError> {
-    //     self.render_view()?;
-    //     self.copy_to_terminal(terminal)
-    // }
+    fn handle_mouse_event(&mut self, event: &MouseEvent) -> Option<Msg> {
+        let previous = self.last_mouse_buttons;
+        self.last_mouse_buttons = event.buttons;
 
-    // fn sync_size_from_terminal<T: Terminal>(
-    //     &mut self,
-    //     terminal: &mut BufferedTerminal<T>,
-    // ) -> Result<(), ProgramError> {
-    //     let size = terminal
-    //         .terminal()
-    //         .get_screen_size()
-    //         .map_err(ProgramError::from)?;
-    //     self.current_size = Size::new(clamp_to_u16(size.cols), clamp_to_u16(size.rows));
-    //     Ok(())
-    // }
+        if let Some(view) = self.current_view.as_ref()
+            && let Some(target) = view.hit_test(event.x, event.y)
+            && let Some(msg) = target.mouse_message(event)
+            && event.buttons.left && !previous.left
+        {
+            return Some(msg);
+        }
+
+        None
+    }
 }
 
 const DEFAULT_WIDTH: u16 = 80;
 const DEFAULT_HEIGHT: u16 = 24;
 
-type InnerTerminal = termwiz::terminal::SystemTerminal;
-
 fn convert_input_event(input: InputEvent) -> Option<Event> {
     match input {
         InputEvent::Key(key) => map_key_event(key),
+        InputEvent::Mouse(mouse) => map_mouse_event(mouse),
         InputEvent::Resized { cols, rows } => Some(Event::Resize(Size::new(
             clamp_to_u16(cols),
             clamp_to_u16(rows),
         ))),
         _ => None,
     }
+}
+
+fn map_mouse_event(mouse: TwMouseEvent) -> Option<Event> {
+    let buttons = MouseButtons::new(
+        mouse.mouse_buttons.contains(TwMouseButtons::LEFT),
+        mouse.mouse_buttons.contains(TwMouseButtons::RIGHT),
+        mouse.mouse_buttons.contains(TwMouseButtons::MIDDLE),
+    );
+
+    Some(Event::Mouse(MouseEvent::with_modifiers(
+        // termwiz mouse x/y are 1 indexed
+        mouse.x - 1,
+        mouse.y - 1,
+        buttons,
+        mouse.modifiers.contains(TwModifiers::CTRL),
+        mouse.modifiers.contains(TwModifiers::ALT),
+        mouse.modifiers.contains(TwModifiers::SHIFT),
+    )))
 }
 
 fn map_key_event(key: KeyEvent) -> Option<Event> {
@@ -314,5 +345,59 @@ mod tests {
             .send(Event::key(KeyCode::Char('q')))
             .expect("send should succeed");
         assert_eq!(transition, Transition::Quit);
+    }
+
+    #[derive(Default)]
+    struct ClickModel {
+        clicks: usize,
+    }
+
+    enum ClickMsg {
+        Click,
+        Mouse(u16, u16),
+    }
+
+    fn click_update(model: &mut ClickModel, msg: ClickMsg) -> Transition {
+        match msg {
+            ClickMsg::Click => {
+                model.clicks += 1;
+                Transition::Continue
+            }
+            ClickMsg::Mouse(_, _) => Transition::Continue,
+        }
+    }
+
+    fn click_view(_model: &ClickModel) -> Node<ClickMsg> {
+        text("button").on_click(|| ClickMsg::Click)
+    }
+
+    #[test]
+    fn mouse_click_triggers_on_click_handler() {
+        let mut program = Program::new(ClickModel::default(), click_update, click_view);
+        let mut surface = Surface::new(4, 2);
+
+        program
+            .process_event(Event::resize(4, 2), Some(&mut surface))
+            .expect("resize should succeed");
+
+        program
+            .process_event(
+                Event::mouse(0, 0, MouseButtons::new(true, false, false)),
+                Some(&mut surface),
+            )
+            .expect("mouse down should succeed");
+        assert_eq!(program.model.clicks, 1);
+
+        program
+            .process_event(Event::mouse(0, 0, MouseButtons::default()), Some(&mut surface))
+            .expect("mouse move up should succeed");
+
+        program
+            .process_event(
+                Event::mouse(0, 0, MouseButtons::new(true, false, false)),
+                Some(&mut surface),
+            )
+            .expect("second click should succeed");
+        assert_eq!(program.model.clicks, 2);
     }
 }
