@@ -77,18 +77,18 @@ impl<'a> Renderer<'a> {
             width,
             height,
         };
-        self.render_node(root, origin);
+        self.render_node(root, origin, 0.0);
         self.surface
             .add_change(Change::CursorVisibility(CursorVisibility::Hidden));
 
         Ok(())
     }
 
-    fn render_node<Msg>(&mut self, node: &Node<Msg>, parent_origin: Rect) {
+    fn render_node<Msg>(&mut self, node: &Node<Msg>, parent_origin: Rect, inherited_scroll_y: f32) {
         let layout = node.layout_state.layout;
         let node_origin = Point {
             x: parent_origin.x + layout.location.x as usize,
-            y: parent_origin.y + layout.location.y as usize,
+            y: parent_origin.y + (layout.location.y - inherited_scroll_y).max(0.0) as usize,
         };
 
         let Some(area) = rect_from_layout(&layout, node_origin) else {
@@ -99,13 +99,20 @@ impl<'a> Renderer<'a> {
         }
 
         let area = area.intersection(parent_origin);
-        if !parent_origin.has_area() {
+        if !area.has_area() {
             return;
         }
 
         match &node.content {
             NodeContent::Text(text) => self.render_text(text, area),
-            NodeContent::Element(element) => self.render_element(element, area),
+            NodeContent::Element(element) => {
+                let next_scroll = if node.layout_state.style.overflow.y == taffy::Overflow::Scroll {
+                    inherited_scroll_y + node.scroll_y
+                } else {
+                    inherited_scroll_y
+                };
+                self.render_element(element, area, next_scroll);
+            }
         }
     }
 
@@ -126,25 +133,21 @@ impl<'a> Renderer<'a> {
         self.surface.add_change(Change::Text(content));
     }
 
-    fn render_element<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect) {
+    fn render_element<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, scroll_y: f32) {
         match element.kind {
-            ElementKind::Block => self.render_block(element, area),
-            ElementKind::Column | ElementKind::Row => {
-                self.render_children(&element.children, area);
-            }
+            ElementKind::Block => self.render_block(element, area, scroll_y),
+            ElementKind::Column | ElementKind::Row => self.render_children(&element.children, area, scroll_y),
         }
     }
 
-    fn render_children<Msg>(&mut self, children: &[Node<Msg>], clip: Rect) {
+    fn render_children<Msg>(&mut self, children: &[Node<Msg>], clip: Rect, scroll_y: f32) {
         for child in children {
-            self.render_node(child, clip);
+            self.render_node(child, clip, scroll_y);
         }
     }
 
-    fn render_block<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect) {
+    fn render_block<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, scroll_y: f32) {
         self.draw_border(area, &element.attrs.style);
-
-        // TODO correct?
         self.render_children(
             &element.children,
             Rect {
@@ -153,6 +156,7 @@ impl<'a> Renderer<'a> {
                 width: area.width.saturating_sub(1),
                 height: area.height.saturating_sub(1),
             },
+            scroll_y,
         );
     }
 
@@ -477,5 +481,31 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("[ ] Add focus styles"))
         );
+    }
+
+    #[test]
+    fn scroll_offset_shifts_children_up() {
+        let mut surface = Surface::new(10, 6);
+        // Create a column with many lines and apply scroll
+        let lines: Vec<Node<()>> = (0..10)
+            .map(|i| text::<()>(format!("L{}", i)))
+            .collect();
+        let mut root = column(vec![column(lines).with_scroll(3.0).with_height(taffy::Dimension::length(5.0))]);
+        compute_root_layout(
+            &mut root,
+            u64::MAX.into(),
+            taffy::Size {
+                width: AvailableSpace::Definite(10.0),
+                height: AvailableSpace::Definite(6.0),
+            },
+        );
+        round_layout(&mut root);
+        let mut renderer = Renderer::new(&mut surface);
+        renderer
+            .render(&root, Size::new(10, 6))
+            .expect("render should succeed");
+        let screen = renderer.surface().screen_chars_to_string();
+        // After scrolling by 3, first visible should be L3
+        assert!(screen.lines().next().unwrap().contains("L3"), "screen=\n{}", screen);
     }
 }

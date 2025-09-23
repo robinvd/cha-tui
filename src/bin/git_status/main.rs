@@ -31,6 +31,7 @@ fn map_event(event: Event) -> Option<Msg> {
 
 fn update(model: &mut Model, msg: Msg) -> Transition {
     match msg {
+        Msg::None => Transition::Continue,
         Msg::KeyPressed(key) => handle_key(model, key),
         Msg::ActivateFile(staged, index) => {
             if staged {
@@ -41,6 +42,10 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
                 model.focus = Focus::Unstaged
             };
             model.update_diff();
+            Transition::Continue
+        }
+        Msg::ScrollPreview(diff) => {
+            model.scroll_diff(diff);
             Transition::Continue
         }
     }
@@ -82,6 +87,14 @@ fn handle_key(model: &mut Model, key: Key) -> Transition {
             if let Err(err) = model.refresh_status() {
                 model.set_error(err);
             }
+            Transition::Continue
+        }
+        KeyCode::Char('J') => {
+            model.scroll_diff(1);
+            Transition::Continue
+        }
+        KeyCode::Char('K') => {
+            model.scroll_diff(-1);
             Transition::Continue
         }
         _ => Transition::Continue,
@@ -208,7 +221,19 @@ fn render_file_list(
 
 fn render_diff_pane(model: &Model) -> Node<Msg> {
     let title = text::<Msg>("Diff Preview").with_style(section_title_style());
-    let content = render_diff_lines(&model.diff_lines);
+    let content = render_diff_lines(&model.diff_lines)
+        .with_scroll(model.diff_scroll)
+        .on_mouse(|e| {
+            if e.buttons.vert_wheel {
+                Some(Msg::ScrollPreview(if e.buttons.wheel_positive {
+                    1
+                } else {
+                    -1
+                }))
+            } else {
+                None
+            }
+        });
 
     block(vec![
         column(vec![title, content])
@@ -324,6 +349,7 @@ struct Model {
     selected_staged: usize,
     diff_lines: Vec<DiffLine>,
     error: Option<String>,
+    diff_scroll: f32,
 }
 
 impl Model {
@@ -373,6 +399,7 @@ impl Model {
             Some(entry) => diff_for(entry, self.focus),
             None => {
                 self.diff_lines = vec![DiffLine::plain("No file selected")];
+                self.diff_scroll = 0.0;
                 return;
             }
         };
@@ -384,6 +411,7 @@ impl Model {
                 } else {
                     self.diff_lines = lines;
                 }
+                self.diff_scroll = 0.0;
 
                 if matches!(self.error.as_deref(), Some(msg) if msg.starts_with("git diff")) {
                     self.clear_error();
@@ -392,6 +420,7 @@ impl Model {
             Err(err) => {
                 self.diff_lines = vec![DiffLine::plain("Failed to load diff")];
                 self.set_error(err);
+                self.diff_scroll = 0.0;
             }
         }
     }
@@ -471,11 +500,29 @@ impl Model {
             self.set_error(err);
         }
     }
+
+    fn scroll_diff(&mut self, delta: i32) {
+        if self.diff_lines.is_empty() {
+            return;
+        }
+        let current = self.diff_scroll as i32;
+        let mut next = current + delta;
+        if next < 0 {
+            next = 0;
+        }
+        let max_offset = (self.diff_lines.len() as i32).saturating_sub(1);
+        if next > max_offset {
+            next = max_offset;
+        }
+        self.diff_scroll = next as f32;
+    }
 }
 
 enum Msg {
+    None,
     KeyPressed(Key),
     ActivateFile(bool, usize),
+    ScrollPreview(i32),
 }
 
 #[derive(Clone, Debug)]

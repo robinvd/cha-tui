@@ -212,7 +212,8 @@ impl<Model, Msg> Program<Model, Msg> {
         if let Some(view) = self.current_view.as_ref()
             && let Some(target) = view.hit_test(event.x, event.y)
             && let Some(msg) = target.mouse_message(event)
-            && event.buttons.left && !previous.left
+        // && event.buttons.left
+        // && !previous.left
         {
             return Some(msg);
         }
@@ -225,6 +226,7 @@ const DEFAULT_WIDTH: u16 = 80;
 const DEFAULT_HEIGHT: u16 = 24;
 
 fn convert_input_event(input: InputEvent) -> Option<Event> {
+    tracing::debug!("termwiz input event: {:?}", input);
     match input {
         InputEvent::Key(key) => map_key_event(key),
         InputEvent::Mouse(mouse) => map_mouse_event(mouse),
@@ -237,11 +239,14 @@ fn convert_input_event(input: InputEvent) -> Option<Event> {
 }
 
 fn map_mouse_event(mouse: TwMouseEvent) -> Option<Event> {
-    let buttons = MouseButtons::new(
-        mouse.mouse_buttons.contains(TwMouseButtons::LEFT),
-        mouse.mouse_buttons.contains(TwMouseButtons::RIGHT),
-        mouse.mouse_buttons.contains(TwMouseButtons::MIDDLE),
-    );
+    let buttons = MouseButtons {
+        left: mouse.mouse_buttons.contains(TwMouseButtons::LEFT),
+        right: mouse.mouse_buttons.contains(TwMouseButtons::RIGHT),
+        middle: mouse.mouse_buttons.contains(TwMouseButtons::MIDDLE),
+        horz_wheel: mouse.mouse_buttons.contains(TwMouseButtons::HORZ_WHEEL),
+        vert_wheel: mouse.mouse_buttons.contains(TwMouseButtons::VERT_WHEEL),
+        wheel_positive: mouse.mouse_buttons.contains(TwMouseButtons::WHEEL_POSITIVE),
+    };
 
     Some(Event::Mouse(MouseEvent::with_modifiers(
         // termwiz mouse x/y are 1 indexed
@@ -389,7 +394,10 @@ mod tests {
         assert_eq!(program.model.clicks, 1);
 
         program
-            .process_event(Event::mouse(0, 0, MouseButtons::default()), Some(&mut surface))
+            .process_event(
+                Event::mouse(0, 0, MouseButtons::default()),
+                Some(&mut surface),
+            )
             .expect("mouse move up should succeed");
 
         program

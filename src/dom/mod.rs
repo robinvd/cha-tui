@@ -25,6 +25,7 @@ pub struct Node<Msg> {
     id: u64,
     pub layout_state: LayoutState,
     on_mouse: Option<Rc<dyn Fn(MouseEvent) -> Option<Msg>>>,
+    pub(crate) scroll_y: f32,
 }
 
 impl<Msg: fmt::Debug> fmt::Debug for Node<Msg> {
@@ -46,6 +47,7 @@ impl<Msg: PartialEq> PartialEq for Node<Msg> {
             && self.id == other.id
             && self.layout_state == other.layout_state
             && self.on_mouse.is_some() == other.on_mouse.is_some()
+            && (self.scroll_y - other.scroll_y).abs() < f32::EPSILON
     }
 }
 
@@ -212,6 +214,7 @@ impl<Msg> Node<Msg> {
             classname: "",
             id: 0,
             on_mouse: None,
+            scroll_y: 0.0,
         }
     }
 
@@ -262,8 +265,8 @@ impl<Msg> Node<Msg> {
         self
     }
 
-    pub fn on_mouse(mut self, handler: impl Fn(MouseEvent) -> Msg + 'static) -> Self {
-        self.on_mouse = Some(Rc::new(move |e| Some(handler(e))));
+    pub fn on_mouse(mut self, handler: impl Fn(MouseEvent) -> Option<Msg> + 'static) -> Self {
+        self.on_mouse = Some(Rc::new(handler));
         self
     }
 
@@ -326,6 +329,12 @@ impl<Msg> Node<Msg> {
                 text.style = style;
             }
         }
+        self
+    }
+
+    pub fn with_scroll(mut self, y: f32) -> Self {
+        self.scroll_y = if y.is_sign_negative() { 0.0 } else { y };
+        self.layout_state.style.overflow.y = Overflow::Scroll;
         self
     }
 
@@ -406,7 +415,7 @@ impl<Msg> Node<Msg> {
     }
 
     pub(crate) fn hit_test(&self, x: u16, y: u16) -> Option<&Self> {
-        Self::hit_test_inner(self, x, y, 0.0, 0.0)
+        Self::hit_test_inner(self, x, y, 0.0, 0.0, 0.0)
     }
 
     fn hit_test_inner(
@@ -415,10 +424,11 @@ impl<Msg> Node<Msg> {
         y: u16,
         origin_x: f32,
         origin_y: f32,
+        ancestor_scroll_y: f32,
     ) -> Option<&Node<Msg>> {
         let layout = node.layout_state.layout;
         let abs_x = origin_x + layout.location.x;
-        let abs_y = origin_y + layout.location.y;
+        let abs_y = origin_y + layout.location.y - ancestor_scroll_y;
         let width = layout.size.width;
         let height = layout.size.height;
 
@@ -437,8 +447,13 @@ impl<Msg> Node<Msg> {
         }
 
         if let NodeContent::Element(element) = &node.content {
+            let next_scroll = if node.layout_state.style.overflow.y == Overflow::Scroll {
+                ancestor_scroll_y + node.scroll_y
+            } else {
+                ancestor_scroll_y
+            };
             for child in &element.children {
-                if let Some(hit) = Self::hit_test_inner(child, x, y, abs_x, abs_y) {
+                if let Some(hit) = Self::hit_test_inner(child, x, y, abs_x, abs_y, next_scroll) {
                     return Some(hit);
                 }
             }
@@ -733,7 +748,7 @@ mod tests {
 
     #[test]
     fn hit_test_finds_clickable_node() {
-        let mut node = text::<()>("btn").on_click(|| ());
+        let mut node = text::<()>("btn").on_mouse(|_| Some(()));
 
         taffy::compute_root_layout(
             &mut node,
@@ -754,5 +769,12 @@ mod tests {
             ))
             .is_some()
         );
+    }
+
+    #[test]
+    fn with_scroll_marks_overflow_and_offset() {
+        let node = column(vec![text::<()>("a"), text::<()>("b")]).with_scroll(5.0);
+        assert_eq!(node.scroll_y, 5.0);
+        assert_eq!(node.layout_state.style.overflow.y, Overflow::Scroll);
     }
 }

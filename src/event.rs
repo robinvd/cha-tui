@@ -28,6 +28,9 @@ pub struct MouseButtons {
     pub left: bool,
     pub right: bool,
     pub middle: bool,
+    pub horz_wheel: bool,
+    pub vert_wheel: bool,
+    pub wheel_positive: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -119,6 +122,9 @@ impl MouseButtons {
             left,
             right,
             middle,
+            horz_wheel: false,
+            vert_wheel: false,
+            wheel_positive: true,
         }
     }
 
