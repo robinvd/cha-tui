@@ -6,7 +6,7 @@ use chatui::event::{Event, Key, KeyCode};
 use chatui::{Program, Style, Transition, block, column, row, text};
 use color_eyre::eyre::{Context, Result, eyre};
 use taffy::Dimension;
-use taffy::prelude::TaffyZero;
+use taffy::prelude::{FromLength, TaffyZero};
 use tracing_subscriber::EnvFilter;
 
 fn main() -> Result<()> {
@@ -81,19 +81,22 @@ fn view(model: &Model) -> Node<Msg> {
     let layout = row(vec![
         render_left_pane(model)
             .with_flex_grow(1.)
-            .with_flex_basis(taffy::Dimension::ZERO)
-            .with_min_height(taffy::Dimension::ZERO),
+            .with_flex_basis(Dimension::ZERO)
+            .with_min_width(Dimension::from_length(20.))
+            .with_min_height(Dimension::ZERO),
         render_diff_pane(model)
-            .with_flex_grow(1.)
-            .with_flex_basis(taffy::Dimension::ZERO)
-            .with_min_height(taffy::Dimension::ZERO)
-            .with_overflow_y(taffy::Overflow::Scroll),
+            .with_flex_grow(3.)
+            .with_flex_basis(Dimension::ZERO)
+            .with_min_height(Dimension::ZERO)
+            .with_min_width(Dimension::ZERO)
+            .with_overflow_y(taffy::Overflow::Scroll)
+            .with_overflow_x(taffy::Overflow::Clip),
     ])
     .with_width(Dimension::percent(1.))
     .with_flex_basis(Dimension::ZERO)
     .with_flex_grow(1.)
     .with_flex_shrink(1.)
-    .with_min_height(taffy::Dimension::ZERO)
+    .with_min_height(Dimension::ZERO)
     .with_id("main-row");
 
     column(vec![
@@ -142,13 +145,13 @@ fn render_section(
 
     block(vec![
         column(vec![heading, list])
-            .with_min_height(taffy::Dimension::ZERO)
+            .with_min_height(Dimension::ZERO)
             .with_flex_grow(1.)
-            .with_flex_basis(taffy::Dimension::ZERO),
+            .with_flex_basis(Dimension::ZERO),
     ])
-    .with_min_height(taffy::Dimension::ZERO)
+    .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
-    .with_flex_basis(taffy::Dimension::ZERO)
+    .with_flex_basis(Dimension::ZERO)
 }
 
 fn render_file_list(entries: &[FileEntry], is_active: bool, selected: usize) -> Node<Msg> {
@@ -178,9 +181,9 @@ fn render_file_list(entries: &[FileEntry], is_active: bool, selected: usize) -> 
     }
 
     column(items)
-        .with_min_height(taffy::Dimension::ZERO)
+        .with_min_height(Dimension::ZERO)
         .with_flex_grow(1.)
-        .with_flex_basis(taffy::Dimension::ZERO)
+        .with_flex_basis(Dimension::ZERO)
 }
 
 fn render_diff_pane(model: &Model) -> Node<Msg> {
@@ -189,13 +192,13 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
 
     block(vec![
         column(vec![title, content])
-            .with_min_height(taffy::Dimension::ZERO)
+            .with_min_height(Dimension::ZERO)
             .with_flex_grow(1.)
-            .with_flex_basis(taffy::Dimension::ZERO),
+            .with_flex_basis(Dimension::ZERO),
     ])
-    .with_min_height(taffy::Dimension::ZERO)
+    .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
-    .with_flex_basis(taffy::Dimension::ZERO)
+    .with_flex_basis(Dimension::ZERO)
     .with_id("diff-pane")
 }
 
@@ -204,9 +207,9 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
         return column(vec![
             text::<Msg>("No diff available").with_style(inactive_style()),
         ])
-        .with_min_height(taffy::Dimension::ZERO)
+        .with_min_height(Dimension::ZERO)
         .with_flex_grow(1.)
-        .with_flex_basis(taffy::Dimension::ZERO);
+        .with_flex_basis(Dimension::ZERO);
     }
 
     let mut rendered = Vec::with_capacity(lines.len());
@@ -230,9 +233,9 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
     }
 
     column(rendered)
-        .with_min_height(taffy::Dimension::ZERO)
+        .with_min_height(Dimension::ZERO)
         .with_flex_grow(1.)
-        .with_flex_basis(taffy::Dimension::ZERO)
+        .with_flex_basis(Dimension::ZERO)
 }
 
 fn title_style() -> Style {

@@ -8,7 +8,7 @@ use crate::render::Renderer;
 use taffy::compute_root_layout;
 use termwiz::caps::Capabilities;
 use termwiz::input::{InputEvent, KeyEvent, Modifiers as TwModifiers};
-use termwiz::surface::Change;
+use termwiz::surface::{Change, Surface};
 use termwiz::terminal::buffered::BufferedTerminal;
 use termwiz::terminal::{Terminal, new_terminal};
 use tracing::info;
@@ -28,7 +28,6 @@ pub struct Program<Model, Msg> {
     update: UpdateFn<Model, Msg>,
     view: ViewFn<Model, Msg>,
     event_mapper: EventFn<Msg>,
-    renderer: Renderer,
     current_size: Size,
     focus_path: Vec<u64>,
 }
@@ -44,7 +43,6 @@ impl<Model, Msg> Program<Model, Msg> {
             update: Box::new(update),
             view: Box::new(view),
             event_mapper: Box::new(|_| None),
-            renderer: Renderer::new(),
             current_size: Size::new(DEFAULT_WIDTH, DEFAULT_HEIGHT),
             focus_path: Vec::new(),
         }
@@ -80,15 +78,16 @@ impl<Model, Msg> Program<Model, Msg> {
     }
 
     pub fn send(&mut self, event: Event) -> Result<Transition, ProgramError> {
-        self.process_event(event, Option::<&mut BufferedTerminal<InnerTerminal>>::None)
+        self.process_event(event, None)
     }
 
     fn event_loop<T: Terminal>(
         &mut self,
         terminal: &mut BufferedTerminal<T>,
     ) -> Result<(), ProgramError> {
-        self.sync_size_from_terminal(terminal)?;
-        self.render_to_terminal(terminal)?;
+        // self.sync_size_from_terminal(terminal)?;
+        self.render_view(terminal)?;
+        terminal.flush()?;
 
         // WORKAROUND: somehow the cursor visablity is not synced by the normal render correctly on first render.
         terminal
@@ -99,6 +98,20 @@ impl<Model, Msg> Program<Model, Msg> {
             .unwrap();
 
         loop {
+            if terminal.check_for_resize()? {
+                let size = terminal.dimensions();
+                let transition = self.process_event(
+                    Event::Resize(Size {
+                        width: size.0 as u16,
+                        height: size.1 as u16,
+                    }),
+                    Some(terminal),
+                )?;
+                if matches!(transition, Transition::Quit) {
+                    break;
+                }
+                terminal.flush()?;
+            }
             match terminal
                 .terminal()
                 .poll_input(None)
@@ -110,6 +123,7 @@ impl<Model, Msg> Program<Model, Msg> {
                         if matches!(transition, Transition::Quit) {
                             break;
                         }
+                        terminal.flush()?;
                     }
                 }
                 None => continue,
@@ -119,10 +133,10 @@ impl<Model, Msg> Program<Model, Msg> {
         Ok(())
     }
 
-    fn process_event<T: Terminal>(
+    fn process_event(
         &mut self,
         event: Event,
-        terminal: Option<&mut BufferedTerminal<T>>,
+        terminal: Option<&mut Surface>,
     ) -> Result<Transition, ProgramError> {
         let mut needs_render = matches!(event, Event::Resize(_));
 
@@ -141,17 +155,14 @@ impl<Model, Msg> Program<Model, Msg> {
             Transition::Continue
         };
 
-        if needs_render {
-            self.render_view()?;
-            if let Some(term) = terminal {
-                self.copy_to_terminal(term)?;
-            }
+        if needs_render && let Some(term) = terminal {
+            self.render_view(term)?;
         }
 
         Ok(transition)
     }
 
-    fn render_view(&mut self) -> Result<(), ProgramError> {
+    fn render_view(&mut self, s: &mut Surface) -> Result<(), ProgramError> {
         let mut node = (self.view)(&self.model);
         info!("computing layout with: {:?}", self.current_size);
         compute_root_layout(
@@ -164,36 +175,36 @@ impl<Model, Msg> Program<Model, Msg> {
         );
         crate::dom::rounding::round_layout(&mut node);
         crate::dom::print::print_tree(&node);
-        self.renderer.render(&node, self.current_size)
+        Renderer::new(s).render(&node, self.current_size)
     }
 
-    fn copy_to_terminal<T: Terminal>(
-        &mut self,
-        terminal: &mut BufferedTerminal<T>,
-    ) -> Result<(), ProgramError> {
-        terminal.draw_from_screen(self.renderer.surface(), 0, 0);
-        terminal.flush().map_err(ProgramError::from)
-    }
+    // fn copy_to_terminal<T: Terminal>(
+    //     &mut self,
+    //     terminal: &mut BufferedTerminal<T>,
+    // ) -> Result<(), ProgramError> {
+    //     terminal.draw_from_screen(self.renderer.surface(), 0, 0);
+    //     terminal.flush().map_err(ProgramError::from)
+    // }
 
-    fn render_to_terminal<T: Terminal>(
-        &mut self,
-        terminal: &mut BufferedTerminal<T>,
-    ) -> Result<(), ProgramError> {
-        self.render_view()?;
-        self.copy_to_terminal(terminal)
-    }
+    // fn render_to_terminal<T: Terminal>(
+    //     &mut self,
+    //     terminal: &mut BufferedTerminal<T>,
+    // ) -> Result<(), ProgramError> {
+    //     self.render_view()?;
+    //     self.copy_to_terminal(terminal)
+    // }
 
-    fn sync_size_from_terminal<T: Terminal>(
-        &mut self,
-        terminal: &mut BufferedTerminal<T>,
-    ) -> Result<(), ProgramError> {
-        let size = terminal
-            .terminal()
-            .get_screen_size()
-            .map_err(ProgramError::from)?;
-        self.current_size = Size::new(clamp_to_u16(size.cols), clamp_to_u16(size.rows));
-        Ok(())
-    }
+    // fn sync_size_from_terminal<T: Terminal>(
+    //     &mut self,
+    //     terminal: &mut BufferedTerminal<T>,
+    // ) -> Result<(), ProgramError> {
+    //     let size = terminal
+    //         .terminal()
+    //         .get_screen_size()
+    //         .map_err(ProgramError::from)?;
+    //     self.current_size = Size::new(clamp_to_u16(size.cols), clamp_to_u16(size.rows));
+    //     Ok(())
+    // }
 }
 
 const DEFAULT_WIDTH: u16 = 80;
@@ -280,13 +291,14 @@ mod tests {
                 Event::Key(key) if matches!(key.code, KeyCode::Char('+')) => Some(Msg::Increment),
                 _ => None,
             });
+        let mut surface = Surface::new(10, 2);
 
         let transition = program
-            .send(Event::key(KeyCode::Char('+')))
+            .process_event(Event::key(KeyCode::Char('+')), Some(&mut surface))
             .expect("send should succeed");
         assert_eq!(transition, Transition::Continue);
 
-        let screen = program.renderer.surface().screen_chars_to_string();
+        let screen = surface.screen_chars_to_string();
         assert!(screen.contains("count: 1"));
     }
 

@@ -8,8 +8,8 @@ use termwiz::surface::{Change, CursorVisibility, Position, Surface};
 
 use taffy::Layout as TaffyLayout;
 
-pub struct Renderer {
-    surface: Surface,
+pub struct Renderer<'a> {
+    surface: &'a mut Surface,
 }
 
 #[derive(Clone, Copy)]
@@ -52,22 +52,22 @@ struct Point {
     y: usize,
 }
 
-impl Renderer {
-    pub fn new() -> Self {
-        Self {
-            surface: Surface::new(0, 0),
-        }
+impl<'a> Renderer<'a> {
+    pub fn new(surface: &'a mut Surface) -> Self {
+        Self { surface }
     }
 
     pub fn render<Msg>(&mut self, root: &Node<Msg>, size: Size) -> Result<(), ProgramError> {
         let width = size.width as usize;
         let height = size.height as usize;
 
-        self.surface.resize(width, height);
         self.surface.add_change(Change::CursorPosition {
             x: Position::Absolute(0),
             y: Position::Absolute(0),
         });
+        self.surface
+            .add_change(Change::ClearScreen(ColorAttribute::Default));
+        self.surface.resize(width, height);
         self.surface
             .add_change(Change::ClearScreen(ColorAttribute::Default));
 
@@ -209,17 +209,11 @@ impl Renderer {
     }
 
     pub fn surface(&self) -> &Surface {
-        &self.surface
+        &*self.surface
     }
 
     pub fn surface_mut(&mut self) -> &mut Surface {
-        &mut self.surface
-    }
-}
-
-impl Default for Renderer {
-    fn default() -> Self {
-        Self::new()
+        &mut *self.surface
     }
 }
 
@@ -292,7 +286,8 @@ mod tests {
 
     #[test]
     fn renders_text_node() {
-        let mut renderer = Renderer::new();
+        let mut surface = Surface::new(10, 4);
+        let mut renderer = Renderer::new(&mut surface);
         let mut node = text::<()>("hello");
         prepare_layout(&mut node, Size::new(10, 4));
 
@@ -352,7 +347,8 @@ mod tests {
 
     #[test]
     fn column_stacks_children_vertically() {
-        let mut renderer = Renderer::new();
+        let mut surface = Surface::new(6, 4);
+        let mut renderer = Renderer::new(&mut surface);
         let mut node = column(vec![text::<()>("top"), text::<()>("bottom")]);
         prepare_layout(&mut node, Size::new(6, 4));
 
@@ -360,7 +356,7 @@ mod tests {
             .render(&node, Size::new(6, 4))
             .expect("render should succeed");
 
-        let screen = renderer.surface.screen_chars_to_string();
+        let screen = renderer.surface().screen_chars_to_string();
         let lines: Vec<&str> = screen.lines().collect();
         assert_eq!(lines[0].trim_end(), "top");
         assert_eq!(lines[1].trim_end(), "bottom");
@@ -368,7 +364,8 @@ mod tests {
 
     #[test]
     fn row_places_children_horizontally() {
-        let mut renderer = Renderer::new();
+        let mut surface = Surface::new(10, 2);
+        let mut renderer = Renderer::new(&mut surface);
         let mut node = row(vec![text::<()>("left"), text::<()>("right")]);
         prepare_layout(&mut node, Size::new(10, 2));
 
@@ -376,14 +373,15 @@ mod tests {
             .render(&node, Size::new(10, 2))
             .expect("render should succeed");
 
-        let first_line = renderer.surface.screen_chars_to_string();
+        let first_line = renderer.surface().screen_chars_to_string();
         let first = first_line.lines().next().unwrap();
         assert_eq!(first.trim_end(), "leftright");
     }
 
     #[test]
     fn block_draws_border() {
-        let mut renderer = Renderer::new();
+        let mut surface = Surface::new(4, 3);
+        let mut renderer = Renderer::new(&mut surface);
         let mut node = block::<()>(Vec::new());
         prepare_layout(&mut node, Size::new(4, 3));
 
@@ -391,7 +389,7 @@ mod tests {
             .render(&node, Size::new(4, 3))
             .expect("render should succeed");
 
-        let screen = renderer.surface.screen_chars_to_string();
+        let screen = renderer.surface().screen_chars_to_string();
         let lines: Vec<&str> = screen.lines().collect();
         assert_eq!(lines[0].chars().take(1).collect::<String>(), "┌");
         let last = lines
@@ -404,7 +402,8 @@ mod tests {
 
     #[test]
     fn style_applies_foreground_color() {
-        let mut renderer = Renderer::new();
+        let mut surface = Surface::new(10, 2);
+        let mut renderer = Renderer::new(&mut surface);
         let mut node = text::<()>("color").with_style(Style::fg(Color::Blue));
         prepare_layout(&mut node, Size::new(10, 2));
 
@@ -412,7 +411,7 @@ mod tests {
             .render(&node, Size::new(10, 2))
             .expect("render should succeed");
 
-        let mut lines = renderer.surface.screen_lines();
+        let mut lines = renderer.surface().screen_lines();
         let line = lines.remove(0);
         let cell = line.visible_cells().next().unwrap();
         assert_eq!(cell.attrs().foreground(), AnsiColor::Blue.into());
@@ -420,7 +419,8 @@ mod tests {
 
     #[test]
     fn render_hides_cursor() {
-        let mut renderer = Renderer::new();
+        let mut surface = Surface::new(10, 2);
+        let mut renderer = Renderer::new(&mut surface);
         let mut node = text::<()>("cursor");
         prepare_layout(&mut node, Size::new(10, 2));
 
@@ -429,7 +429,7 @@ mod tests {
             .expect("render should succeed");
 
         assert_eq!(
-            renderer.surface.cursor_visibility(),
+            renderer.surface().cursor_visibility(),
             CursorVisibility::Hidden
         );
     }
@@ -455,7 +455,8 @@ mod tests {
 
         let mut root = block::<()>(vec![column(vec![header, input_block, items])]);
 
-        let mut renderer = Renderer::new();
+        let mut surface = Surface::new(90, 12);
+        let mut renderer = Renderer::new(&mut surface);
         prepare_layout(&mut root, Size::new(90, 12));
 
         renderer
