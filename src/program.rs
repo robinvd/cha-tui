@@ -1,4 +1,5 @@
 use std::boxed::Box;
+use std::time::Duration;
 
 use crate::dom::Node;
 use crate::error::ProgramError;
@@ -90,11 +91,9 @@ impl<Model, Msg> Program<Model, Msg> {
         &mut self,
         terminal: &mut BufferedTerminal<T>,
     ) -> Result<(), ProgramError> {
-        // self.sync_size_from_terminal(terminal)?;
         self.render_view(terminal)?;
         terminal.flush()?;
 
-        // WORKAROUND: somehow the cursor visablity is not synced by the normal render correctly on first render.
         terminal
             .terminal()
             .render(&[Change::CursorVisibility(
@@ -105,33 +104,59 @@ impl<Model, Msg> Program<Model, Msg> {
         loop {
             if terminal.check_for_resize()? {
                 let size = terminal.dimensions();
-                let transition = self.process_event(
-                    Event::Resize(Size {
-                        width: size.0 as u16,
-                        height: size.1 as u16,
-                    }),
-                    Some(terminal),
-                )?;
+                let (transition, needs_render) = self.handle_event(Event::Resize(Size {
+                    width: size.0 as u16,
+                    height: size.1 as u16,
+                }));
+                if needs_render {
+                    self.render_view(terminal)?;
+                    terminal.flush()?;
+                }
                 if matches!(transition, Transition::Quit) {
                     break;
                 }
-                terminal.flush()?;
             }
-            match terminal
+
+            let first_input = terminal
                 .terminal()
                 .poll_input(None)
+                .map_err(ProgramError::from)?;
+
+            let mut needs_render = false;
+            let mut should_quit = false;
+
+            if let Some(input) = first_input
+                && let Some(event) = convert_input_event(input)
+            {
+                let (transition, render_flag) = self.handle_event(event);
+                needs_render |= render_flag;
+                if matches!(transition, Transition::Quit) {
+                    should_quit = true;
+                }
+            }
+
+            while let Some(input) = terminal
+                .terminal()
+                .poll_input(Some(Duration::from_millis(0)))
                 .map_err(ProgramError::from)?
             {
-                Some(input) => {
-                    if let Some(event) = convert_input_event(input) {
-                        let transition = self.process_event(event, Some(terminal))?;
-                        if matches!(transition, Transition::Quit) {
-                            break;
-                        }
-                        terminal.flush()?;
+                if let Some(event) = convert_input_event(input) {
+                    let (transition, render_flag) = self.handle_event(event);
+                    needs_render |= render_flag;
+                    if matches!(transition, Transition::Quit) {
+                        should_quit = true;
+                        break;
                     }
                 }
-                None => continue,
+            }
+
+            if needs_render {
+                self.render_view(terminal)?;
+                terminal.flush()?;
+            }
+
+            if should_quit {
+                break;
             }
         }
 
@@ -143,6 +168,18 @@ impl<Model, Msg> Program<Model, Msg> {
         event: Event,
         terminal: Option<&mut Surface>,
     ) -> Result<Transition, ProgramError> {
+        let (transition, needs_render) = self.handle_event(event);
+        if needs_render {
+            if let Some(term) = terminal {
+                self.render_view(term)?;
+            } else {
+                self.rebuild_view();
+            }
+        }
+        Ok(transition)
+    }
+
+    fn handle_event(&mut self, event: Event) -> (Transition, bool) {
         let mut needs_render = matches!(event, Event::Resize(_));
 
         if let Event::Resize(size) = &event {
@@ -168,15 +205,7 @@ impl<Model, Msg> Program<Model, Msg> {
             Transition::Continue
         };
 
-        if needs_render {
-            if let Some(term) = terminal {
-                self.render_view(term)?;
-            } else {
-                self.rebuild_view();
-            }
-        }
-
-        Ok(transition)
+        (transition, needs_render)
     }
 
     fn render_view(&mut self, s: &mut Surface) -> Result<(), ProgramError> {
@@ -206,7 +235,7 @@ impl<Model, Msg> Program<Model, Msg> {
     }
 
     fn handle_mouse_event(&mut self, event: &MouseEvent) -> Option<Msg> {
-        let previous = self.last_mouse_buttons;
+        let _previous = self.last_mouse_buttons;
         self.last_mouse_buttons = event.buttons;
 
         if let Some(view) = self.current_view.as_ref()
