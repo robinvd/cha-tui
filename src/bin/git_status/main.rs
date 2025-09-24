@@ -59,6 +59,17 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
             model.update_diff();
             Transition::Continue
         }
+        Msg::ToggleStageEntry { staged, index } => {
+            if staged {
+                model.selected_staged = index;
+                model.focus = Focus::Staged;
+            } else {
+                model.selected_unstaged = index;
+                model.focus = Focus::Unstaged;
+            }
+            model.toggle_stage_selected();
+            Transition::Continue
+        }
         Msg::ScrollPreview(diff) => {
             model.scroll_diff(diff);
             Transition::Continue
@@ -158,12 +169,7 @@ fn view(model: &Model) -> Node<Msg> {
 
     let header = rich_text::<Msg>(header_spans);
 
-    column(vec![
-        header,
-        layout,
-    ])
-    .with_fill()
-    .with_id("root")
+    column(vec![header, layout]).with_fill().with_id("root")
 }
 
 fn render_left_pane(model: &Model) -> Node<Msg> {
@@ -249,8 +255,18 @@ fn render_file_list(
         items.push(text::<Msg>("(no files)").with_style(inactive_style()));
     } else {
         for (idx, entry) in entries.iter().enumerate() {
-            let mut node =
-                text::<Msg>(&entry.display).on_click(move || Msg::ActivateFile(is_staged, idx));
+            let mut node = text::<Msg>(&entry.display).on_mouse(move |event| {
+                if event.is_double_click() {
+                    Some(Msg::ToggleStageEntry {
+                        staged: is_staged,
+                        index: idx,
+                    })
+                } else if event.is_single_click() {
+                    Some(Msg::ActivateFile(is_staged, idx))
+                } else {
+                    None
+                }
+            });
 
             if idx == selected {
                 let mut style = if is_active {
@@ -641,6 +657,7 @@ enum Msg {
     ReloadStatus,
     // true if its the staged list
     ActivateFile(bool, usize),
+    ToggleStageEntry { staged: bool, index: usize },
     ScrollPreview(i32),
     // true if its the staged list
     ScrollFiles(bool, i32),

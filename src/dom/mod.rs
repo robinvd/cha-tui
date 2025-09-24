@@ -301,7 +301,7 @@ impl<Msg> Node<Msg> {
 
     pub fn on_click(mut self, handler: impl Fn() -> Msg + 'static) -> Self {
         self.on_mouse = Some(Rc::new(move |e: MouseEvent| {
-            if e.buttons.left {
+            if e.is_single_click() {
                 Some(handler())
             } else {
                 None
@@ -451,10 +451,10 @@ impl<Msg> Node<Msg> {
         self.layout_state.layout = *layout
     }
 
-    pub(crate) fn mouse_message(&self, event: &MouseEvent) -> Option<Msg> {
+    pub(crate) fn mouse_message(&self, event: MouseEvent) -> Option<Msg> {
         // First see if there is a general mouse handler
         if let Some(handler) = &self.on_mouse {
-            return handler(*event);
+            return handler(event);
         }
         None
     }
@@ -867,7 +867,7 @@ mod tests {
 
         let hit = node.hit_test(0, 0).expect("expected hit");
         assert!(
-            hit.mouse_message(&crate::event::MouseEvent::new(
+            hit.mouse_message(crate::event::MouseEvent::new(
                 0,
                 0,
                 crate::event::MouseButtons::new(true, false, false)

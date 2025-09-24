@@ -21,6 +21,7 @@ pub struct MouseEvent {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+    pub click_count: u8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -94,6 +95,7 @@ impl MouseEvent {
             ctrl: false,
             alt: false,
             shift: false,
+            click_count: 0,
         }
     }
 
@@ -112,7 +114,16 @@ impl MouseEvent {
             ctrl,
             alt,
             shift,
+            click_count: 0,
         }
+    }
+
+    pub fn is_single_click(self) -> bool {
+        self.click_count == 1
+    }
+
+    pub fn is_double_click(self) -> bool {
+        self.click_count == 2
     }
 }
 

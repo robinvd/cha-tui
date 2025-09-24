@@ -1,5 +1,5 @@
 use std::boxed::Box;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::dom::Node;
 use crate::error::ProgramError;
@@ -32,6 +32,7 @@ pub struct Program<Model, Msg> {
     current_size: Size,
     current_view: Option<Node<Msg>>,
     last_mouse_buttons: MouseButtons,
+    last_click: Option<LastClick>,
 }
 
 impl<Model, Msg> Program<Model, Msg> {
@@ -48,6 +49,7 @@ impl<Model, Msg> Program<Model, Msg> {
             current_size: Size::new(DEFAULT_WIDTH, DEFAULT_HEIGHT),
             current_view: None,
             last_mouse_buttons: MouseButtons::default(),
+            last_click: None,
         }
     }
 
@@ -149,7 +151,16 @@ impl<Model, Msg> Program<Model, Msg> {
 
             if needs_render {
                 self.render_view(terminal)?;
+                // raw escape codes for `Synchronized Output` start
+                // TODO add a detection step on startup if this is supported.
+                terminal
+                    .terminal()
+                    .render(&[Change::Text("\x1b[?2026h".to_owned())])?;
                 terminal.flush()?;
+                // raw escape codes for `Synchronized Output` end
+                terminal
+                    .terminal()
+                    .render(&[Change::Text("\x1b[?2026l".to_owned())])?;
             }
 
             if should_quit {
@@ -232,14 +243,35 @@ impl<Model, Msg> Program<Model, Msg> {
     }
 
     fn handle_mouse_event(&mut self, event: &MouseEvent) -> Option<Msg> {
-        let _previous = self.last_mouse_buttons;
+        let previous = self.last_mouse_buttons;
         self.last_mouse_buttons = event.buttons;
+
+        let mut enriched = *event;
+        enriched.click_count = 0;
+
+        if event.buttons.left && !previous.left {
+            let timestamp = Instant::now();
+            let is_double = self
+                .last_click
+                .as_ref()
+                .map(|last| {
+                    timestamp.duration_since(last.timestamp) <= DOUBLE_CLICK_INTERVAL
+                        && last.x == event.x
+                        && last.y == event.y
+                })
+                .unwrap_or(false);
+
+            enriched.click_count = if is_double { 2 } else { 1 };
+            self.last_click = Some(LastClick {
+                timestamp,
+                x: event.x,
+                y: event.y,
+            });
+        }
 
         if let Some(view) = self.current_view.as_ref()
             && let Some(target) = view.hit_test(event.x, event.y)
-            && let Some(msg) = target.mouse_message(event)
-        // && event.buttons.left
-        // && !previous.left
+            && let Some(msg) = target.mouse_message(enriched)
         {
             return Some(msg);
         }
@@ -250,6 +282,13 @@ impl<Model, Msg> Program<Model, Msg> {
 
 const DEFAULT_WIDTH: u16 = 80;
 const DEFAULT_HEIGHT: u16 = 24;
+const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+
+struct LastClick {
+    timestamp: Instant,
+    x: u16,
+    y: u16,
+}
 
 fn convert_input_event(input: InputEvent) -> Option<Event> {
     tracing::debug!("termwiz input event: {:?}", input);
@@ -390,7 +429,6 @@ mod tests {
 
     enum ClickMsg {
         Click,
-        Mouse(u16, u16),
     }
 
     fn click_update(model: &mut ClickModel, msg: ClickMsg) -> Transition {
@@ -399,7 +437,6 @@ mod tests {
                 model.clicks += 1;
                 Transition::Continue
             }
-            ClickMsg::Mouse(_, _) => Transition::Continue,
         }
     }
 
@@ -437,6 +474,135 @@ mod tests {
                 Some(&mut surface),
             )
             .expect("second click should succeed");
+        assert_eq!(program.model.clicks, 1);
+
+        program
+            .process_event(
+                Event::mouse(0, 0, MouseButtons::default()),
+                Some(&mut surface),
+            )
+            .expect("mouse up should succeed");
+
+        program
+            .process_event(
+                Event::mouse(1, 0, MouseButtons::new(true, false, false)),
+                Some(&mut surface),
+            )
+            .expect("third click should succeed");
         assert_eq!(program.model.clicks, 2);
+    }
+
+    #[derive(Default)]
+    struct DoubleClickModel {
+        single: usize,
+        double: usize,
+    }
+
+    enum DoubleClickMsg {
+        Single,
+        Double,
+    }
+
+    fn double_click_update(model: &mut DoubleClickModel, msg: DoubleClickMsg) -> Transition {
+        match msg {
+            DoubleClickMsg::Single => {
+                model.single += 1;
+                Transition::Continue
+            }
+            DoubleClickMsg::Double => {
+                model.double += 1;
+                Transition::Continue
+            }
+        }
+    }
+
+    fn double_click_view(_model: &DoubleClickModel) -> Node<DoubleClickMsg> {
+        text("button").on_mouse(|event| {
+            if event.is_double_click() {
+                Some(DoubleClickMsg::Double)
+            } else if event.is_single_click() {
+                Some(DoubleClickMsg::Single)
+            } else {
+                None
+            }
+        })
+    }
+
+    #[test]
+    fn double_click_triggers_handler() {
+        let mut program = Program::new(
+            DoubleClickModel::default(),
+            double_click_update,
+            double_click_view,
+        );
+        let mut surface = Surface::new(4, 2);
+
+        program
+            .process_event(Event::resize(4, 2), Some(&mut surface))
+            .expect("resize should succeed");
+
+        program
+            .process_event(
+                Event::mouse(0, 0, MouseButtons::new(true, false, false)),
+                Some(&mut surface),
+            )
+            .expect("first click should succeed");
+        assert_eq!(program.model.single, 1);
+        assert_eq!(program.model.double, 0);
+
+        program
+            .process_event(
+                Event::mouse(0, 0, MouseButtons::default()),
+                Some(&mut surface),
+            )
+            .expect("mouse up should succeed");
+
+        program
+            .process_event(
+                Event::mouse(0, 0, MouseButtons::new(true, false, false)),
+                Some(&mut surface),
+            )
+            .expect("second click should succeed");
+        assert_eq!(program.model.single, 1);
+        assert_eq!(program.model.double, 1);
+    }
+
+    #[test]
+    fn double_click_requires_same_position() {
+        let mut program = Program::new(
+            DoubleClickModel::default(),
+            double_click_update,
+            double_click_view,
+        );
+        let mut surface = Surface::new(4, 2);
+
+        program
+            .process_event(Event::resize(4, 2), Some(&mut surface))
+            .expect("resize should succeed");
+
+        program
+            .process_event(
+                Event::mouse(0, 0, MouseButtons::new(true, false, false)),
+                Some(&mut surface),
+            )
+            .expect("first click should succeed");
+        assert_eq!(program.model.single, 1);
+        assert_eq!(program.model.double, 0);
+
+        program
+            .process_event(
+                Event::mouse(0, 0, MouseButtons::default()),
+                Some(&mut surface),
+            )
+            .expect("mouse up should succeed");
+
+        program
+            .process_event(
+                Event::mouse(1, 0, MouseButtons::new(true, false, false)),
+                Some(&mut surface),
+            )
+            .expect("second click should succeed");
+        assert_eq!(program.model.single, 2);
+        assert_eq!(program.model.double, 0);
     }
 }
