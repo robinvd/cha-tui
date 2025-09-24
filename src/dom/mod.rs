@@ -128,9 +128,23 @@ impl<Msg: PartialEq> PartialEq for ElementNode<Msg> {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TextNode<Msg> {
+pub struct TextSpan {
     pub content: String,
     pub style: Style,
+}
+
+impl TextSpan {
+    pub fn new(content: impl Into<String>, style: Style) -> Self {
+        Self {
+            content: content.into(),
+            style,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextNode<Msg> {
+    spans: Vec<TextSpan>,
     _marker: PhantomData<Msg>,
 }
 
@@ -177,6 +191,10 @@ pub enum Color {
 
 pub fn text<Msg>(content: impl Into<String>) -> Node<Msg> {
     Node::new(NodeContent::Text(TextNode::new(content)))
+}
+
+pub fn rich_text<Msg>(spans: impl Into<Vec<TextSpan>>) -> Node<Msg> {
+    Node::new(NodeContent::Text(TextNode::from_spans(spans.into())))
 }
 
 pub fn column<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
@@ -340,7 +358,7 @@ impl<Msg> Node<Msg> {
                 element.attrs.style = style;
             }
             NodeContent::Text(text) => {
-                text.style = style;
+                text.apply_uniform_style(style);
             }
         }
         self
@@ -548,10 +566,38 @@ impl<Msg> ElementNode<Msg> {
 
 impl<Msg> TextNode<Msg> {
     pub fn new(content: impl Into<String>) -> Self {
+        Self::from_span(content, Style::default())
+    }
+
+    pub fn from_span(content: impl Into<String>, style: Style) -> Self {
         Self {
-            content: content.into(),
-            style: Style::default(),
+            spans: vec![TextSpan::new(content, style)],
             _marker: PhantomData,
+        }
+    }
+
+    pub fn from_spans(spans: Vec<TextSpan>) -> Self {
+        Self {
+            spans,
+            _marker: PhantomData,
+        }
+    }
+
+    pub fn spans(&self) -> &[TextSpan] {
+        &self.spans
+    }
+
+    pub fn spans_mut(&mut self) -> &mut [TextSpan] {
+        &mut self.spans
+    }
+
+    pub fn push_span(&mut self, span: TextSpan) {
+        self.spans.push(span);
+    }
+
+    pub fn apply_uniform_style(&mut self, style: Style) {
+        for span in &mut self.spans {
+            span.style = style.clone();
         }
     }
 }
@@ -645,9 +691,16 @@ impl<Msg> LayoutPartialTree for Node<Msg> {
                     inputs,
                     &node.layout_state.style,
                     |_val, _basis| 0.0,
-                    |_known_dimensions, _available_space| taffy::Size {
-                        width: unicode_column_width(&text.content, None) as f32,
-                        height: 1.,
+                    |_known_dimensions, _available_space| {
+                        let width: usize = text
+                            .spans()
+                            .iter()
+                            .map(|span| unicode_column_width(&span.content, None))
+                            .sum();
+                        taffy::Size {
+                            width: width as f32,
+                            height: 1.,
+                        }
                     },
                 ),
                 NodeContent::Element(_) => compute_flexbox_layout(node, u64::MAX.into(), inputs),
@@ -686,11 +739,26 @@ mod tests {
 
         match node.into_text() {
             Some(text) => {
-                assert_eq!(text.content, "hello");
-                assert_eq!(text.style, Style::default());
+                assert_eq!(text.spans(), &[TextSpan::new("hello", Style::default())]);
             }
             None => panic!("expected text node"),
         }
+    }
+
+    #[test]
+    fn rich_text_creates_multiple_spans() {
+        let node: Node<()> = rich_text(vec![
+            TextSpan::new("a", Style::fg(Color::Red)),
+            TextSpan::new("b", Style::fg(Color::Green)),
+        ]);
+
+        let text = node.into_text().expect("expected text node");
+        let spans = text.spans();
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[0].content, "a");
+        assert_eq!(spans[0].style.fg, Some(Color::Red));
+        assert_eq!(spans[1].content, "b");
+        assert_eq!(spans[1].style.fg, Some(Color::Green));
     }
 
     #[test]
@@ -740,7 +808,9 @@ mod tests {
         let node = text::<()>("styled").with_style(style.clone());
 
         match node.into_text() {
-            Some(text) => assert_eq!(text.style, style),
+            Some(text) => {
+                assert!(text.spans().iter().all(|span| span.style == style));
+            }
             None => panic!("expected text node"),
         }
     }

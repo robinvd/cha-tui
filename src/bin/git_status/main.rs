@@ -1,13 +1,18 @@
 use std::ffi::OsStr;
+use std::fs;
+use std::io::ErrorKind;
+use std::path::Path;
 use std::process::Command;
 
-use chatui::dom::{Color, Node};
+use chatui::dom::{Color, Node, TextSpan};
 use chatui::event::{Event, Key, KeyCode};
-use chatui::{Program, Style, Transition, block_with_title, column, row, text};
+use chatui::{Program, Style, Transition, block_with_title, column, rich_text, row, text};
 use color_eyre::eyre::{Context, Result, eyre};
 use taffy::Dimension;
 use taffy::prelude::{FromLength, TaffyZero};
 use tracing_subscriber::EnvFilter;
+
+mod highlight;
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -298,25 +303,10 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
         .with_flex_basis(Dimension::ZERO);
     }
 
-    let mut rendered = Vec::with_capacity(lines.len());
-    for line in lines {
-        let mut node = text::<Msg>(&line.content).with_overflow_x(taffy::Overflow::Clip);
-        let mut style = Style::default();
-
-        if let Some(color) = line.color {
-            style.fg = Some(color);
-        }
-
-        if line.bold {
-            style.bold = true;
-        }
-
-        if style.fg.is_some() || style.bold {
-            node = node.with_style(style);
-        }
-
-        rendered.push(node);
-    }
+    let rendered: Vec<_> = lines
+        .iter()
+        .map(|line| rich_text::<Msg>(line.spans.clone()).with_overflow_x(taffy::Overflow::Clip))
+        .collect();
 
     column(rendered)
         .with_min_height(Dimension::ZERO)
@@ -641,38 +631,29 @@ enum Msg {
 
 #[derive(Clone, Debug)]
 struct DiffLine {
-    content: String,
-    color: Option<Color>,
-    bold: bool,
+    spans: Vec<TextSpan>,
 }
 
 impl DiffLine {
     fn plain(content: impl Into<String>) -> Self {
+        let content = content.into();
         Self {
-            content: content.into(),
-            color: None,
-            bold: false,
+            spans: vec![TextSpan::new(content, Style::default())],
         }
     }
 
-    fn from_diff_line(line: &str) -> Self {
-        let mut diff_line = Self::plain(line);
-
-        if line.starts_with("+++") || line.starts_with("---") {
-            diff_line.color = Some(Color::Yellow);
-        } else if line.starts_with("diff") {
-            diff_line.color = Some(Color::Cyan);
-            diff_line.bold = true;
-        } else if line.starts_with("@@") {
-            diff_line.color = Some(Color::Yellow);
-            diff_line.bold = true;
-        } else if line.starts_with('+') {
-            diff_line.color = Some(Color::Green);
-        } else if line.starts_with('-') {
-            diff_line.color = Some(Color::Red);
+    fn styled(content: impl Into<String>, style: Style) -> Self {
+        let content = content.into();
+        if style == Style::default() {
+            return Self::plain(content);
         }
+        Self {
+            spans: vec![TextSpan::new(content, style)],
+        }
+    }
 
-        diff_line
+    fn from_spans(spans: Vec<TextSpan>) -> Self {
+        Self { spans }
     }
 }
 
@@ -770,7 +751,12 @@ fn diff_for(entry: &FileEntry, focus: Focus) -> Result<Vec<DiffLine>> {
         Focus::Staged => diff_staged(entry),
     }?;
 
-    Ok(format_diff(&diff_output))
+    if diff_output.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let versions = load_file_versions(entry, focus)?;
+    Ok(build_diff_lines(&diff_output, &versions))
 }
 
 fn diff_unstaged(entry: &FileEntry) -> Result<String> {
@@ -792,12 +778,241 @@ fn diff_staged(entry: &FileEntry) -> Result<String> {
     run_git_allow_diff(["diff", "--cached", "--color=never", "--", &entry.path])
 }
 
-fn format_diff(diff: &str) -> Vec<DiffLine> {
-    if diff.trim().is_empty() {
-        return Vec::new();
+struct FileVersions {
+    old: Option<FileContent>,
+    new: Option<FileContent>,
+}
+
+#[derive(Clone)]
+struct FileContent {
+    lines: Vec<LineContent>,
+}
+
+#[derive(Clone)]
+struct LineContent {
+    text: String,
+    spans: Vec<TextSpan>,
+}
+
+impl FileContent {
+    fn from_source(path: &str, source: String) -> Self {
+        let text_lines: Vec<String> = source.lines().map(str::to_string).collect();
+        let highlight_lines = match highlight::highlight_lines(Path::new(path), &source) {
+            Some(lines) if lines.len() == text_lines.len() => Some(lines),
+            _ => None,
+        };
+
+        let mut lines = Vec::with_capacity(text_lines.len());
+        for (idx, text_line) in text_lines.into_iter().enumerate() {
+            let spans = highlight_lines
+                .as_ref()
+                .and_then(|hl| hl.get(idx))
+                .and_then(|spans| {
+                    let rendered: String = spans.iter().map(|span| span.content.as_str()).collect();
+                    if rendered == text_line {
+                        Some(spans.clone())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| vec![TextSpan::new(text_line.clone(), Style::default())]);
+
+            lines.push(LineContent {
+                text: text_line,
+                spans,
+            });
+        }
+
+        Self { lines }
     }
 
-    diff.lines().map(DiffLine::from_diff_line).collect()
+    fn line(&self, index: usize) -> Option<&LineContent> {
+        self.lines.get(index)
+    }
+}
+
+fn load_file_versions(entry: &FileEntry, focus: Focus) -> Result<FileVersions> {
+    let old_source = match focus {
+        Focus::Unstaged => {
+            if entry.code == '?' {
+                None
+            } else {
+                read_index_file(&entry.path)?
+            }
+        }
+        Focus::Staged => read_head_file(&entry.path)?,
+    };
+
+    let new_source = match focus {
+        Focus::Unstaged => read_worktree_file(&entry.path)?,
+        Focus::Staged => read_index_file(&entry.path)?,
+    };
+
+    Ok(FileVersions {
+        old: old_source.map(|content| FileContent::from_source(&entry.path, content)),
+        new: new_source.map(|content| FileContent::from_source(&entry.path, content)),
+    })
+}
+
+fn read_worktree_file(path: &str) -> Result<Option<String>> {
+    match fs::read_to_string(path) {
+        Ok(content) => Ok(Some(content)),
+        Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(err).wrap_err_with(|| format!("failed to read {}", path)),
+    }
+}
+
+fn read_index_file(path: &str) -> Result<Option<String>> {
+    git_show(&format!(":{}", path))
+}
+
+fn read_head_file(path: &str) -> Result<Option<String>> {
+    git_show(&format!("HEAD:{}", path))
+}
+
+fn git_show(spec: &str) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .arg("show")
+        .arg(spec)
+        .env("GIT_PAGER", "cat")
+        .output()
+        .wrap_err_with(|| format!("git show {}", spec))?;
+
+    if output.status.success() {
+        let stdout = String::from_utf8(output.stdout)
+            .map_err(|err| eyre!("git show {} produced non-utf8 output: {}", spec, err))?;
+        return Ok(Some(stdout));
+    }
+
+    if matches!(output.status.code(), Some(128)) {
+        return Ok(None);
+    }
+
+    Err(eyre!(
+        "git show {} failed: {}",
+        spec,
+        String::from_utf8_lossy(&output.stderr)
+    ))
+}
+
+fn build_diff_lines(diff: &str, versions: &FileVersions) -> Vec<DiffLine> {
+    let mut result = Vec::new();
+    let mut old_line = 0usize;
+    let mut new_line = 0usize;
+
+    for line in diff.lines() {
+        if line.starts_with("diff --git") {
+            let mut style = Style::fg(Color::Cyan);
+            style.bold = true;
+            result.push(DiffLine::styled(line.to_string(), style));
+            continue;
+        }
+
+        if line.starts_with("index ") {
+            result.push(DiffLine::plain(line.to_string()));
+            continue;
+        }
+
+        if line.starts_with("---") || line.starts_with("+++") {
+            result.push(DiffLine::styled(line.to_string(), Style::fg(Color::Yellow)));
+            continue;
+        }
+
+        if line.starts_with("@@") {
+            if let Some((old_start, new_start)) = parse_hunk_header(line) {
+                old_line = old_start;
+                new_line = new_start;
+            }
+            let mut style = Style::fg(Color::Yellow);
+            style.bold = true;
+            result.push(DiffLine::styled(line.to_string(), style));
+            continue;
+        }
+
+        if line.starts_with('\\') {
+            result.push(DiffLine::plain(line.to_string()));
+            continue;
+        }
+
+        if let Some(content) = line.strip_prefix('+') {
+            let spans = highlight_with_fallback(versions.new.as_ref(), new_line, content);
+            result.push(DiffLine::from_spans(with_prefix('+', spans)));
+            new_line = new_line.saturating_add(1);
+            continue;
+        }
+
+        if let Some(content) = line.strip_prefix('-') {
+            let spans = highlight_with_fallback(versions.old.as_ref(), old_line, content);
+            result.push(DiffLine::from_spans(with_prefix('-', spans)));
+            old_line = old_line.saturating_add(1);
+            continue;
+        }
+
+        if let Some(content) = line.strip_prefix(' ') {
+            let spans = highlight_with_fallback(versions.new.as_ref(), new_line, content);
+            result.push(DiffLine::from_spans(with_prefix(' ', spans)));
+            new_line = new_line.saturating_add(1);
+            old_line = old_line.saturating_add(1);
+            continue;
+        }
+
+        result.push(DiffLine::plain(line.to_string()));
+    }
+
+    result
+}
+
+fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
+    let mut parts = line.split_whitespace();
+    let _ = parts.next(); // @@
+    let old_part = parts.next()?; // -start,count
+    let new_part = parts.next()?; // +start,count
+
+    let old_start = parse_hunk_range(old_part.strip_prefix('-')?)?;
+    let new_start = parse_hunk_range(new_part.strip_prefix('+')?)?;
+
+    Some((old_start, new_start))
+}
+
+fn parse_hunk_range(segment: &str) -> Option<usize> {
+    segment
+        .split(',')
+        .next()
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn highlight_with_fallback(
+    content: Option<&FileContent>,
+    line_number_one_based: usize,
+    fallback: &str,
+) -> Vec<TextSpan> {
+    if line_number_one_based == 0 {
+        return vec![TextSpan::new(fallback.to_string(), Style::default())];
+    }
+
+    let index = line_number_one_based - 1;
+    if let Some(file) = content
+        && let Some(line) = file.line(index)
+        && line.text == fallback
+    {
+        return line.spans.clone();
+    }
+
+    vec![TextSpan::new(fallback.to_string(), Style::default())]
+}
+
+fn with_prefix(prefix: char, mut spans: Vec<TextSpan>) -> Vec<TextSpan> {
+    let mut style = Style::default();
+    match prefix {
+        '+' => style = Style::fg(Color::Green),
+        '-' => style = Style::fg(Color::Red),
+        _ => {}
+    }
+
+    let mut result = Vec::with_capacity(spans.len() + 1);
+    result.push(TextSpan::new(prefix.to_string(), style));
+    result.append(&mut spans);
+    result
 }
 
 fn stage_path(path: &str) -> Result<()> {

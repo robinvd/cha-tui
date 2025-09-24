@@ -368,7 +368,9 @@ mod tests {
         match row.children.first() {
             Some(child) => {
                 let text = child.as_text().expect("expected text child");
-                assert_eq!(text.style.fg, Some(Color::Cyan));
+                let spans = text.spans();
+                assert_eq!(spans.len(), 1);
+                assert_eq!(spans[0].style.fg, Some(Color::Cyan));
             }
             None => panic!("expected text child"),
         }
@@ -387,7 +389,9 @@ mod tests {
         match row.children.first() {
             Some(child) => {
                 let text = child.as_text().expect("expected text child");
-                assert_eq!(text.style.fg, None);
+                let spans = text.spans();
+                assert_eq!(spans.len(), 1);
+                assert_eq!(spans[0].style.fg, None);
             }
             None => panic!("expected text child"),
         }
@@ -586,7 +590,9 @@ mod tests {
             .into_text()
             .expect("expected text node");
 
-        assert_eq!(text.style.fg, Some(Color::Cyan));
+        let spans = text.spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.fg, Some(Color::Cyan));
     }
 
     #[test]
@@ -631,6 +637,8 @@ mod tests {
             .into_text()
             .expect("expected text node");
 
-        assert_eq!(text.style.fg, None);
+        let spans = text.spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.fg, None);
     }
 }

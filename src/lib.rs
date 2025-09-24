@@ -6,8 +6,8 @@ pub mod program;
 pub mod render;
 
 pub use crate::dom::{
-    Attributes, ElementKind, ElementNode, Node, SizePolicy, Style, TextNode, block,
-    block_with_title, column, row, text,
+    Attributes, ElementKind, ElementNode, Node, SizePolicy, Style, TextNode, TextSpan, block,
+    block_with_title, column, rich_text, row, text,
 };
 pub use crate::error::ProgramError;
 pub use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};

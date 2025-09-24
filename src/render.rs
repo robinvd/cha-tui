@@ -117,20 +117,44 @@ impl<'a> Renderer<'a> {
     }
 
     fn render_text<Msg>(&mut self, text: &TextNode<Msg>, area: Rect) {
-        let attrs = style_to_attributes(&text.style);
-        let content: String = text.content.chars().take(area.width).collect();
-
-        if content.is_empty() {
+        let mut remaining = area.width;
+        if remaining == 0 {
             return;
         }
 
-        self.surface.add_change(Change::CursorPosition {
-            x: Position::Absolute(area.x),
-            y: Position::Absolute(area.y),
-        });
-        self.surface
-            .add_change(Change::AllAttributes(attrs.clone()));
-        self.surface.add_change(Change::Text(content));
+        let mut cursor_x = area.x;
+
+        for span in text.spans() {
+            if remaining == 0 {
+                break;
+            }
+
+            let mut collected = String::new();
+            let mut taken = 0;
+
+            for ch in span.content.chars() {
+                if taken == remaining {
+                    break;
+                }
+                collected.push(ch);
+                taken += 1;
+            }
+
+            if collected.is_empty() {
+                continue;
+            }
+
+            self.surface.add_change(Change::CursorPosition {
+                x: Position::Absolute(cursor_x),
+                y: Position::Absolute(area.y),
+            });
+            self.surface
+                .add_change(Change::AllAttributes(style_to_attributes(&span.style)));
+            self.surface.add_change(Change::Text(collected));
+
+            cursor_x += taken;
+            remaining = remaining.saturating_sub(taken);
+        }
     }
 
     fn render_element<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, scroll_y: f32) {
@@ -314,7 +338,9 @@ fn color_to_attribute(color: crate::dom::Color) -> ColorAttribute {
 mod tests {
     use super::*;
     use crate::dom::rounding::round_layout;
-    use crate::dom::{Color, block, block_with_title, column, row, text};
+    use crate::dom::{
+        Color, Style, TextSpan, block, block_with_title, column, rich_text, row, text,
+    };
     use taffy::{AvailableSpace, Dimension, compute_root_layout};
     use termwiz::surface::CursorVisibility;
 
@@ -343,6 +369,50 @@ mod tests {
 
         let contents = renderer.surface.screen_chars_to_string();
         assert!(contents.starts_with("hello"));
+    }
+
+    #[test]
+    fn renders_rich_text_spans_with_styles() {
+        let mut surface = Surface::new(10, 2);
+        let mut renderer = Renderer::new(&mut surface);
+        let spans = vec![
+            TextSpan::new("+", Style::fg(Color::Green)),
+            TextSpan::new("fn", Style::fg(Color::Cyan)),
+        ];
+        let mut node = rich_text::<()>(spans);
+        prepare_layout(&mut node, Size::new(10, 2));
+
+        renderer
+            .render(&node, Size::new(10, 2))
+            .expect("render should succeed");
+
+        let mut lines = renderer.surface().screen_lines();
+        let line = lines.remove(0);
+        let mut cells = line.visible_cells();
+        let prefix = cells.next().expect("expected prefix cell");
+        assert_eq!(prefix.attrs().foreground(), AnsiColor::Green.into());
+        let keyword = cells.next().expect("expected keyword cell");
+        assert_eq!(keyword.attrs().foreground(), AnsiColor::Aqua.into());
+    }
+
+    #[test]
+    fn rich_text_respects_width_clipping() {
+        let mut surface = Surface::new(4, 2);
+        let mut renderer = Renderer::new(&mut surface);
+        let spans = vec![
+            TextSpan::new("abc", Style::fg(Color::Red)),
+            TextSpan::new("def", Style::fg(Color::Green)),
+        ];
+        let mut node = rich_text::<()>(spans);
+        prepare_layout(&mut node, Size::new(4, 2));
+
+        renderer
+            .render(&node, Size::new(4, 2))
+            .expect("render should succeed");
+
+        let screen = renderer.surface().screen_chars_to_string();
+        let first_line = screen.lines().next().unwrap_or("");
+        assert_eq!(first_line, "abcd");
     }
 
     #[test]
