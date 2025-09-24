@@ -148,9 +148,18 @@ fn view(model: &Model) -> Node<Msg> {
     .with_min_height(Dimension::ZERO)
     .with_id("main-row");
 
+    let mut header_spans = vec![TextSpan::new("Git Status", title_style())];
+    if let Some(error) = model.error.as_deref()
+        && !error.is_empty()
+    {
+        header_spans.push(TextSpan::new(" - ", Style::default()));
+        header_spans.push(TextSpan::new(error, error_style()));
+    }
+
+    let header = rich_text::<Msg>(header_spans);
+
     column(vec![
-        text::<Msg>("Git Status").with_style(title_style()),
-        text::<Msg>(model.error.as_deref().unwrap_or_default()).with_style(error_style()),
+        header,
         layout,
     ])
     .with_fill()
@@ -268,7 +277,7 @@ fn render_file_list(
 
 fn render_diff_pane(model: &Model) -> Node<Msg> {
     let diff_title = match model.current_entry() {
-        Some(entry) => format!("Diff Preview — {}", entry.path),
+        Some(entry) => format!("Diff Preview - {}", entry.path),
         None => "Diff Preview".to_string(),
     };
     let content = render_diff_lines(&model.diff_lines)
