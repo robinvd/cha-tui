@@ -267,7 +267,10 @@ fn render_file_list(
 }
 
 fn render_diff_pane(model: &Model) -> Node<Msg> {
-    const DIFF_TITLE: &str = "Diff Preview";
+    let diff_title = match model.current_entry() {
+        Some(entry) => format!("Diff Preview — {}", entry.path),
+        None => "Diff Preview".to_string(),
+    };
     let content = render_diff_lines(&model.diff_lines)
         .with_scroll(model.diff_scroll)
         .on_mouse(|e| {
@@ -283,7 +286,7 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
         });
 
     block_with_title(
-        DIFF_TITLE,
+        diff_title,
         vec![
             content
                 .with_min_height(Dimension::ZERO)
