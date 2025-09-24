@@ -4,7 +4,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::process::Command;
 
-use chatui::dom::{Color, Node, TextSpan};
+use chatui::dom::{Node, TextSpan};
 use chatui::event::{Event, Key, KeyCode};
 use chatui::{Program, Style, Transition, block_with_title, column, rich_text, row, text};
 use color_eyre::eyre::{Context, Result, eyre};
@@ -29,7 +29,11 @@ fn main() -> Result<()> {
 
 fn map_event(event: Event) -> Option<Msg> {
     if let Event::Key(key) = event {
-        Some(Msg::KeyPressed(key))
+        if matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R')) {
+            Some(Msg::ReloadStatus)
+        } else {
+            Some(Msg::KeyPressed(key))
+        }
     } else {
         None
     }
@@ -38,6 +42,12 @@ fn map_event(event: Event) -> Option<Msg> {
 fn update(model: &mut Model, msg: Msg) -> Transition {
     match msg {
         Msg::KeyPressed(key) => handle_key(model, key),
+        Msg::ReloadStatus => {
+            if let Err(err) = model.refresh_status() {
+                model.set_error(err);
+            }
+            Transition::Continue
+        }
         Msg::ActivateFile(staged, index) => {
             if staged {
                 model.selected_staged = index;
@@ -94,12 +104,6 @@ fn handle_key(model: &mut Model, key: Key) -> Transition {
         }
         KeyCode::Enter => {
             model.toggle_stage_selected();
-            Transition::Continue
-        }
-        KeyCode::Char('r') | KeyCode::Char('R') => {
-            if let Err(err) = model.refresh_status() {
-                model.set_error(err);
-            }
             Transition::Continue
         }
         KeyCode::Char('J') => {
@@ -316,27 +320,27 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
 
 fn title_style() -> Style {
     let mut style = Style::bold();
-    style.fg = Some(Color::Cyan);
+    style.fg = Some(highlight::EVERFOREST_BLUE);
     style
 }
 
 fn error_style() -> Style {
-    Style::fg(Color::Red)
+    Style::fg(highlight::EVERFOREST_RED)
 }
 
 fn inactive_style() -> Style {
-    Style::fg(Color::Blue)
+    Style::fg(highlight::EVERFOREST_GREY2)
 }
 
 fn active_selection_style() -> Style {
     let mut style = Style::bold();
-    style.fg = Some(Color::Green);
+    style.fg = Some(highlight::EVERFOREST_GREEN);
     style
 }
 
 fn inactive_selection_style() -> Style {
     Style {
-        fg: Some(Color::Magenta),
+        fg: Some(highlight::EVERFOREST_PURPLE),
         ..Style::default()
     }
 }
@@ -622,6 +626,7 @@ impl Model {
 
 enum Msg {
     KeyPressed(Key),
+    ReloadStatus,
     // true if its the staged list
     ActivateFile(bool, usize),
     ScrollPreview(i32),
@@ -902,9 +907,9 @@ fn build_diff_lines(diff: &str, versions: &FileVersions) -> Vec<DiffLine> {
 
     for line in diff.lines() {
         if line.starts_with("diff --git") {
-            let mut style = Style::fg(Color::Cyan);
-            style.bold = true;
-            result.push(DiffLine::styled(line.to_string(), style));
+            // let mut style = Style::fg(highlight::EVERFOREST_BLUE);
+            // style.bold = true;
+            // result.push(DiffLine::styled(line.to_string(), style));
             continue;
         }
 
@@ -914,7 +919,10 @@ fn build_diff_lines(diff: &str, versions: &FileVersions) -> Vec<DiffLine> {
         }
 
         if line.starts_with("---") || line.starts_with("+++") {
-            result.push(DiffLine::styled(line.to_string(), Style::fg(Color::Yellow)));
+            // result.push(DiffLine::styled(
+            //     line.to_string(),
+            //     Style::fg(highlight::EVERFOREST_YELLOW),
+            // ));
             continue;
         }
 
@@ -923,8 +931,8 @@ fn build_diff_lines(diff: &str, versions: &FileVersions) -> Vec<DiffLine> {
                 old_line = old_start;
                 new_line = new_start;
             }
-            let mut style = Style::fg(Color::Yellow);
-            style.bold = true;
+            let mut style = Style::fg(highlight::EVERFOREST_GREY1);
+            style.dim = true;
             result.push(DiffLine::styled(line.to_string(), style));
             continue;
         }
@@ -1004,8 +1012,26 @@ fn highlight_with_fallback(
 fn with_prefix(prefix: char, mut spans: Vec<TextSpan>) -> Vec<TextSpan> {
     let mut style = Style::default();
     match prefix {
-        '+' => style = Style::fg(Color::Green),
-        '-' => style = Style::fg(Color::Red),
+        '+' => {
+            style.fg = Some(highlight::EVERFOREST_GREEN);
+            style.bg = Some(highlight::EVERFOREST_BG_GREEN);
+            for span in &mut spans {
+                span.style.bg = Some(highlight::EVERFOREST_BG_GREEN);
+            }
+        }
+        '-' => {
+            style.fg = Some(highlight::EVERFOREST_RED);
+            style.bg = Some(highlight::EVERFOREST_BG_RED);
+            for span in &mut spans {
+                span.style.bg = Some(highlight::EVERFOREST_BG_RED);
+            }
+        }
+        ' ' => {
+            style.dim = true;
+            for span in &mut spans {
+                span.style.dim = true;
+            }
+        }
         _ => {}
     }
 

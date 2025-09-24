@@ -32,6 +32,7 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "keyword.function",
     "keyword.operator",
     "keyword.storage",
+    "label",
     "markup",
     "markup.bold",
     "markup.heading",
@@ -49,6 +50,7 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "markup.strikethrough",
     "module",
     "number",
+    "namespace",
     "operator",
     "property",
     "property.builtin",
@@ -61,6 +63,7 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "string.regexp",
     "string.special",
     "string.special.symbol",
+    "special",
     "tag",
     "type",
     "type.builtin",
@@ -72,6 +75,29 @@ const HIGHLIGHT_NAMES: &[&str] = &[
 
 static REGISTRY: Lazy<HighlightRegistry> =
     Lazy::new(|| HighlightRegistry::new().expect("failed to initialize highlight registry"));
+
+const RUST_HIGHLIGHTS_QUERY: &str = include_str!("queries/rust_highlights.scm");
+const RUST_INJECTIONS_QUERY: &str = include_str!("queries/rust_injections.scm");
+const RUST_LOCALS_QUERY: &str = include_str!("queries/rust_locals.scm");
+const MARKDOWN_HIGHLIGHTS_QUERY: &str = include_str!("queries/markdown_highlights.scm");
+const MARKDOWN_INJECTIONS_QUERY: &str = include_str!("queries/markdown_injections.scm");
+const MARKDOWN_INLINE_HIGHLIGHTS_QUERY: &str =
+    include_str!("queries/markdown_inline_highlights.scm");
+const MARKDOWN_INLINE_INJECTIONS_QUERY: &str =
+    include_str!("queries/markdown_inline_injections.scm");
+
+pub(crate) const EVERFOREST_FG: Color = Color::rgb(0xd3, 0xc6, 0xaa);
+pub(crate) const EVERFOREST_RED: Color = Color::rgb(0xe6, 0x7e, 0x80);
+pub(crate) const EVERFOREST_ORANGE: Color = Color::rgb(0xe6, 0x98, 0x75);
+pub(crate) const EVERFOREST_YELLOW: Color = Color::rgb(0xdb, 0xbc, 0x7f);
+pub(crate) const EVERFOREST_GREEN: Color = Color::rgb(0xa7, 0xc0, 0x80);
+pub(crate) const EVERFOREST_AQUA: Color = Color::rgb(0x83, 0xc0, 0x92);
+pub(crate) const EVERFOREST_BLUE: Color = Color::rgb(0x7f, 0xbb, 0xb3);
+pub(crate) const EVERFOREST_PURPLE: Color = Color::rgb(0xd6, 0x99, 0xb6);
+pub(crate) const EVERFOREST_GREY1: Color = Color::rgb(0x85, 0x92, 0x89);
+pub(crate) const EVERFOREST_GREY2: Color = Color::rgb(0x9d, 0xa9, 0xa0);
+pub(crate) const EVERFOREST_BG_GREEN: Color = Color::rgb(0x42, 0x50, 0x47);
+pub(crate) const EVERFOREST_BG_RED: Color = Color::rgb(0x51, 0x40, 0x45);
 
 pub fn language_for_path(path: &Path) -> Option<LanguageKind> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
@@ -99,17 +125,17 @@ impl HighlightRegistry {
         let mut rust = HighlightConfiguration::new(
             tree_sitter_rust::LANGUAGE.into(),
             "rust",
-            tree_sitter_rust::HIGHLIGHTS_QUERY,
-            tree_sitter_rust::INJECTIONS_QUERY,
-            tree_sitter_rust::TAGS_QUERY,
+            RUST_HIGHLIGHTS_QUERY,
+            RUST_INJECTIONS_QUERY,
+            RUST_LOCALS_QUERY,
         )?;
         rust.configure(HIGHLIGHT_NAMES);
 
         let mut markdown = HighlightConfiguration::new(
             tree_sitter_md::LANGUAGE.into(),
             "markdown",
-            tree_sitter_md::HIGHLIGHT_QUERY_BLOCK,
-            tree_sitter_md::INJECTION_QUERY_BLOCK,
+            MARKDOWN_HIGHLIGHTS_QUERY,
+            MARKDOWN_INJECTIONS_QUERY,
             "",
         )?;
         markdown.configure(HIGHLIGHT_NAMES);
@@ -117,8 +143,8 @@ impl HighlightRegistry {
         let mut markdown_inline = HighlightConfiguration::new(
             tree_sitter_md::INLINE_LANGUAGE.into(),
             "markdown_inline",
-            tree_sitter_md::HIGHLIGHT_QUERY_INLINE,
-            tree_sitter_md::INJECTION_QUERY_INLINE,
+            MARKDOWN_INLINE_HIGHLIGHTS_QUERY,
+            MARKDOWN_INLINE_INJECTIONS_QUERY,
             "",
         )?;
         markdown_inline.configure(HIGHLIGHT_NAMES);
@@ -232,71 +258,174 @@ fn style_for(name: &str) -> Style {
         }
     }
 
-    match name {
-        "comment" | "comment.documentation" => color_style(Color::Blue),
-        "constant.builtin" | "constant.builtin.boolean" | "constant.numeric" => {
-            color_style(Color::Magenta)
-        }
-        "constant.character.escape" => color_style(Color::Green),
-        "string" => color_style(Color::Cyan),
-        "string.regexp" => color_style(Color::Green),
-        "string.special" => color_style(Color::Yellow),
-        "variable.builtin" => color_style(Color::Magenta),
-        "variable.other.member" => color_style(Color::Blue),
-        "label" => color_style(Color::Yellow),
-        "punctuation.special" => color_style(Color::Blue),
-        "keyword" | "keyword.storage" => color_style(Color::Red),
-        "keyword.operator" | "operator" => color_style(Color::Yellow),
-        "keyword.directive" => color_style(Color::Magenta),
-        "function" | "function.builtin" | "function.macro" | "constructor" => {
-            color_style(Color::Green)
-        }
-        "tag" => color_style(Color::Yellow),
-        "namespace" | "module" => color_style(Color::Yellow),
-        "attribute" => color_style(Color::Magenta),
-        "special" => color_style(Color::Blue),
-        name if name.starts_with("markup.heading.") => {
-            let last = name.rsplit('.').next().unwrap_or("");
-            match last {
-                "1" => bold_color_style(Color::Red),
-                "2" | "3" => bold_color_style(Color::Yellow),
-                "4" => bold_color_style(Color::Green),
-                "5" => bold_color_style(Color::Blue),
-                "6" => bold_color_style(Color::Magenta),
-                _ => Style {
-                    bold: true,
-                    ..Style::default()
-                },
-            }
-        }
-        "markup.bold" => Style {
+    if name.starts_with("comment") {
+        return color_style(EVERFOREST_GREY1);
+    }
+
+    if name.starts_with("constant.character.escape") || name == "escape" {
+        return color_style(EVERFOREST_GREEN);
+    }
+
+    if name.starts_with("constant.builtin") {
+        return color_style(EVERFOREST_PURPLE);
+    }
+
+    if name.starts_with("constant.numeric") {
+        return color_style(EVERFOREST_PURPLE);
+    }
+
+    if name.starts_with("string.regexp") {
+        return color_style(EVERFOREST_GREEN);
+    }
+
+    if name.starts_with("string.escape") {
+        return color_style(EVERFOREST_GREEN);
+    }
+
+    if name.starts_with("string.special") {
+        return color_style(EVERFOREST_YELLOW);
+    }
+
+    if name.starts_with("string") {
+        return color_style(EVERFOREST_AQUA);
+    }
+
+    if name.starts_with("variable.builtin") {
+        return color_style(EVERFOREST_PURPLE);
+    }
+
+    if name.starts_with("variable.other.member") || name.starts_with("variable.member") {
+        return color_style(EVERFOREST_BLUE);
+    }
+
+    if name == "label" {
+        return color_style(EVERFOREST_ORANGE);
+    }
+
+    if name == "namespace" || name == "module" {
+        return color_style(EVERFOREST_YELLOW);
+    }
+
+    if name.starts_with("keyword.operator") || name == "operator" {
+        return color_style(EVERFOREST_ORANGE);
+    }
+
+    if name.starts_with("keyword.directive") {
+        return color_style(EVERFOREST_PURPLE);
+    }
+
+    if name.starts_with("keyword") {
+        return color_style(EVERFOREST_RED);
+    }
+
+    if name.starts_with("function") || name.starts_with("constructor") {
+        return color_style(EVERFOREST_GREEN);
+    }
+
+    if name == "attribute" {
+        return color_style(EVERFOREST_PURPLE);
+    }
+
+    if name == "tag" || name == "special" {
+        return color_style(EVERFOREST_ORANGE);
+    }
+
+    if name.starts_with("type") {
+        return color_style(EVERFOREST_YELLOW);
+    }
+
+    if name.starts_with("boolean") || name.starts_with("number") {
+        return color_style(EVERFOREST_PURPLE);
+    }
+
+    if name.starts_with("property") {
+        return color_style(EVERFOREST_BLUE);
+    }
+
+    if name == "punctuation.special" {
+        return color_style(EVERFOREST_BLUE);
+    }
+
+    if name == "punctuation.delimiter" {
+        return color_style(EVERFOREST_GREY1);
+    }
+
+    if name == "punctuation.bracket" {
+        return color_style(EVERFOREST_FG);
+    }
+
+    if name.starts_with("punctuation") {
+        return color_style(EVERFOREST_GREY2);
+    }
+
+    if name.starts_with("markup.heading.") {
+        let level = name.rsplit('.').next().unwrap_or("");
+        return match level {
+            "1" => bold_color_style(EVERFOREST_RED),
+            "2" => bold_color_style(EVERFOREST_ORANGE),
+            "3" => bold_color_style(EVERFOREST_YELLOW),
+            "4" => bold_color_style(EVERFOREST_GREEN),
+            "5" => bold_color_style(EVERFOREST_BLUE),
+            "6" => bold_color_style(EVERFOREST_PURPLE),
+            _ => Style {
+                bold: true,
+                ..Style::default()
+            },
+        };
+    }
+
+    if name == "markup.heading" {
+        return bold_color_style(EVERFOREST_YELLOW);
+    }
+
+    if name == "markup.bold" {
+        return Style {
             bold: true,
             ..Style::default()
-        },
-        "markup.list" => color_style(Color::Red),
-        "markup.link.url" => color_style(Color::Blue),
-        "markup.link.label" => color_style(Color::Yellow),
-        "markup.link.text" => color_style(Color::Magenta),
-        "markup.quote" => color_style(Color::Blue),
-        "markup.raw.inline" => color_style(Color::Green),
-        "markup.raw.block" => color_style(Color::Cyan),
-        _ => {
-            let base = name.split('.').next().unwrap_or(name);
-            match base {
-                "type" => color_style(Color::Yellow),
-                "number" => color_style(Color::Magenta),
-                "boolean" => color_style(Color::Magenta),
-                "keyword" => color_style(Color::Red),
-                "operator" => color_style(Color::Yellow),
-                "string" => color_style(Color::Cyan),
-                "function" => color_style(Color::Green),
-                "comment" => color_style(Color::Blue),
-                "attribute" => color_style(Color::Magenta),
-                "tag" => color_style(Color::Yellow),
-                _ => Style::default(),
-            }
-        }
+        };
     }
+
+    if name == "markup.list" || name.starts_with("markup.list.") {
+        return color_style(EVERFOREST_RED);
+    }
+
+    if name == "markup.link.url" {
+        return color_style(EVERFOREST_BLUE);
+    }
+
+    if name == "markup.link.label" {
+        return color_style(EVERFOREST_ORANGE);
+    }
+
+    if name == "markup.link.text" {
+        return color_style(EVERFOREST_PURPLE);
+    }
+
+    if name.starts_with("markup.link") {
+        return color_style(EVERFOREST_BLUE);
+    }
+
+    if name == "markup.quote" {
+        return color_style(EVERFOREST_GREY1);
+    }
+
+    if name == "markup.raw.inline" {
+        return color_style(EVERFOREST_GREEN);
+    }
+
+    if name == "markup.raw.block" {
+        return color_style(EVERFOREST_AQUA);
+    }
+
+    if name.starts_with("markup") {
+        return Style::default();
+    }
+
+    if name == "embedded" {
+        return color_style(EVERFOREST_FG);
+    }
+
+    Style::default()
 }
 
 #[cfg(test)]

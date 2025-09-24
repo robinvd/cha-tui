@@ -3,7 +3,7 @@ use crate::error::ProgramError;
 use crate::event::Size;
 
 use termwiz::cell::{CellAttributes, Intensity, unicode_column_width};
-use termwiz::color::{AnsiColor, ColorAttribute};
+use termwiz::color::{AnsiColor, ColorAttribute, RgbColor};
 use termwiz::surface::{Change, CursorVisibility, Position, Surface};
 
 use taffy::Layout as TaffyLayout;
@@ -124,6 +124,7 @@ impl<'a> Renderer<'a> {
 
         let mut cursor_x = area.x;
 
+        let mut fill_style: Option<Style> = None;
         for span in text.spans() {
             if remaining == 0 {
                 break;
@@ -144,6 +145,10 @@ impl<'a> Renderer<'a> {
                 continue;
             }
 
+            if span.style.bg.is_some() || span.style.dim {
+                fill_style = Some(span.style.clone());
+            }
+
             self.surface.add_change(Change::CursorPosition {
                 x: Position::Absolute(cursor_x),
                 y: Position::Absolute(area.y),
@@ -154,6 +159,18 @@ impl<'a> Renderer<'a> {
 
             cursor_x += taken;
             remaining = remaining.saturating_sub(taken);
+        }
+
+        if remaining > 0
+            && let Some(style) = fill_style
+        {
+            self.surface.add_change(Change::CursorPosition {
+                x: Position::Absolute(cursor_x),
+                y: Position::Absolute(area.y),
+            });
+            self.surface
+                .add_change(Change::AllAttributes(style_to_attributes(&style)));
+            self.surface.add_change(Change::Text(" ".repeat(remaining)));
         }
     }
 
@@ -316,6 +333,8 @@ fn style_to_attributes(style: &Style) -> CellAttributes {
     }
     if style.bold {
         attrs.set_intensity(Intensity::Bold);
+    } else if style.dim {
+        attrs.set_intensity(Intensity::Half);
     }
     attrs
 }
@@ -331,6 +350,11 @@ fn color_to_attribute(color: crate::dom::Color) -> ColorAttribute {
         crate::dom::Color::Magenta => AnsiColor::Fuchsia.into(),
         crate::dom::Color::Cyan => AnsiColor::Aqua.into(),
         crate::dom::Color::White => AnsiColor::White.into(),
+        crate::dom::Color::Indexed(idx) => ColorAttribute::PaletteIndex(idx),
+        crate::dom::Color::Rgb { r, g, b } => {
+            let color = RgbColor::new_8bpc(r, g, b);
+            ColorAttribute::TrueColorWithDefaultFallback(color.into())
+        }
     }
 }
 
@@ -511,7 +535,7 @@ mod tests {
         let last = lines
             .iter()
             .rev()
-            .find(|line| line.trim_end().len() > 0)
+            .find(|line| !line.trim_end().is_empty())
             .unwrap();
         assert_eq!(last.chars().next().unwrap(), '└');
     }
@@ -555,6 +579,26 @@ mod tests {
         let line = lines.remove(0);
         let cell = line.visible_cells().next().unwrap();
         assert_eq!(cell.attrs().foreground(), AnsiColor::Blue.into());
+    }
+
+    #[test]
+    fn dim_style_sets_half_intensity() {
+        let attrs = style_to_attributes(&Style::dim());
+        assert_eq!(attrs.intensity(), Intensity::Half);
+    }
+
+    #[test]
+    fn translates_indexed_color() {
+        let attr = color_to_attribute(Color::indexed(42));
+        assert_eq!(attr, ColorAttribute::PaletteIndex(42));
+    }
+
+    #[test]
+    fn translates_rgb_color() {
+        let attr = color_to_attribute(Color::rgb(10, 20, 30));
+        let expected =
+            ColorAttribute::TrueColorWithDefaultFallback(RgbColor::new_8bpc(10, 20, 30).into());
+        assert_eq!(attr, expected);
     }
 
     #[test]

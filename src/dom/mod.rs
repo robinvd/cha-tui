@@ -173,6 +173,7 @@ pub struct Style {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
     pub bold: bool,
+    pub dim: bool,
     pub border: bool,
 }
 
@@ -187,6 +188,18 @@ pub enum Color {
     Magenta,
     Cyan,
     White,
+    Indexed(u8),
+    Rgb { r: u8, g: u8, b: u8 },
+}
+
+impl Color {
+    pub const fn indexed(value: u8) -> Self {
+        Self::Indexed(value)
+    }
+
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self::Rgb { r, g, b }
+    }
 }
 
 pub fn text<Msg>(content: impl Into<String>) -> Node<Msg> {
@@ -517,6 +530,13 @@ impl Style {
     pub fn bold() -> Self {
         Self {
             bold: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn dim() -> Self {
+        Self {
+            dim: true,
             ..Self::default()
         }
     }
