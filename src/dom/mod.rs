@@ -104,6 +104,7 @@ pub struct ElementNode<Msg> {
     pub kind: ElementKind,
     pub attrs: Attributes,
     pub children: Vec<Node<Msg>>,
+    pub title: Option<String>,
 }
 
 impl<Msg: fmt::Debug> fmt::Debug for ElementNode<Msg> {
@@ -112,13 +113,17 @@ impl<Msg: fmt::Debug> fmt::Debug for ElementNode<Msg> {
             .field("kind", &self.kind)
             .field("attrs", &self.attrs)
             .field("children_len", &self.children.len())
+            .field("title", &self.title)
             .finish()
     }
 }
 
 impl<Msg: PartialEq> PartialEq for ElementNode<Msg> {
     fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind && self.attrs == other.attrs && self.children == other.children
+        self.kind == other.kind
+            && self.attrs == other.attrs
+            && self.children == other.children
+            && self.title == other.title
     }
 }
 
@@ -192,9 +197,10 @@ pub fn row<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
     node
 }
 
-pub fn block<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
+fn block_node_with_title<Msg>(title: Option<String>, children: Vec<Node<Msg>>) -> Node<Msg> {
     let mut element = ElementNode::new(ElementKind::Block, children);
     element.attrs.style.border = true;
+    element.title = title;
     let mut node = Node::new(NodeContent::Element(element));
     node.layout_state.style.flex_direction = FlexDirection::Column;
     node.layout_state.style.border = Rect {
@@ -204,6 +210,14 @@ pub fn block<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
         bottom: LengthPercentage::length(1.0),
     };
     node
+}
+
+pub fn block<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
+    block_node_with_title(None, children)
+}
+
+pub fn block_with_title<Msg>(title: impl Into<String>, children: Vec<Node<Msg>>) -> Node<Msg> {
+    block_node_with_title(Some(title.into()), children)
 }
 
 impl<Msg> Node<Msg> {
@@ -523,6 +537,7 @@ impl<Msg> ElementNode<Msg> {
             kind,
             attrs: Attributes::default(),
             children,
+            title: None,
         }
     }
 

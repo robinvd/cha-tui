@@ -2,7 +2,7 @@ use crate::dom::{ElementKind, ElementNode, Node, NodeContent, Style, TextNode};
 use crate::error::ProgramError;
 use crate::event::Size;
 
-use termwiz::cell::{CellAttributes, Intensity};
+use termwiz::cell::{CellAttributes, Intensity, unicode_column_width};
 use termwiz::color::{AnsiColor, ColorAttribute};
 use termwiz::surface::{Change, CursorVisibility, Position, Surface};
 
@@ -136,7 +136,9 @@ impl<'a> Renderer<'a> {
     fn render_element<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, scroll_y: f32) {
         match element.kind {
             ElementKind::Block => self.render_block(element, area, scroll_y),
-            ElementKind::Column | ElementKind::Row => self.render_children(&element.children, area, scroll_y),
+            ElementKind::Column | ElementKind::Row => {
+                self.render_children(&element.children, area, scroll_y)
+            }
         }
     }
 
@@ -148,6 +150,9 @@ impl<'a> Renderer<'a> {
 
     fn render_block<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, scroll_y: f32) {
         self.draw_border(area, &element.attrs.style);
+        if let Some(title) = &element.title {
+            self.render_block_title(title, area, &element.attrs.style);
+        }
         self.render_children(
             &element.children,
             Rect {
@@ -195,6 +200,43 @@ impl<'a> Renderer<'a> {
                 }
             }
         }
+    }
+
+    fn render_block_title(&mut self, title: &str, area: Rect, style: &Style) {
+        if area.width <= 2 {
+            return;
+        }
+
+        let mut rendered = String::new();
+        let mut available_columns = area.width.saturating_sub(2);
+
+        for ch in title.chars() {
+            let mut buf = [0u8; 4];
+            let ch_str = ch.encode_utf8(&mut buf);
+            let width = unicode_column_width(ch_str, None);
+
+            if width > available_columns && width > 0 {
+                break;
+            }
+
+            rendered.push(ch);
+            if width > 0 {
+                available_columns = available_columns.saturating_sub(width);
+            }
+        }
+
+        if rendered.is_empty() {
+            return;
+        }
+
+        let attrs = style_to_attributes(style);
+        self.surface.add_change(Change::CursorPosition {
+            x: Position::Absolute(area.x + 1),
+            y: Position::Absolute(area.y),
+        });
+        self.surface
+            .add_change(Change::AllAttributes(attrs.clone()));
+        self.surface.add_change(Change::Text(rendered));
     }
 
     fn write_char(&mut self, x: usize, y: usize, ch: char, attrs: &CellAttributes) {
@@ -272,8 +314,8 @@ fn color_to_attribute(color: crate::dom::Color) -> ColorAttribute {
 mod tests {
     use super::*;
     use crate::dom::rounding::round_layout;
-    use crate::dom::{Color, block, column, row, text};
-    use taffy::{AvailableSpace, compute_root_layout};
+    use crate::dom::{Color, block, block_with_title, column, row, text};
+    use taffy::{AvailableSpace, Dimension, compute_root_layout};
     use termwiz::surface::CursorVisibility;
 
     fn prepare_layout<Msg>(node: &mut Node<Msg>, size: Size) {
@@ -405,6 +447,30 @@ mod tests {
     }
 
     #[test]
+    fn block_renders_title() {
+        const TITLE: &str = "Title";
+        let mut surface = Surface::new(10, 4);
+        let mut renderer = Renderer::new(&mut surface);
+        let mut node = block_with_title::<()>(TITLE, Vec::new())
+            .with_min_width(Dimension::length(10.))
+            .with_min_height(Dimension::length(3.));
+        prepare_layout(&mut node, Size::new(10, 4));
+
+        renderer
+            .render(&node, Size::new(10, 4))
+            .expect("render should succeed");
+
+        let screen = renderer.surface().screen_chars_to_string();
+        let top_line = screen.lines().next().unwrap();
+        let chars: Vec<char> = top_line.chars().collect();
+        assert!(chars.len() >= TITLE.len() + 2);
+        assert_eq!(chars.first(), Some(&'┌'));
+        assert_eq!(chars.last(), Some(&'┐'));
+        let rendered_title: String = chars[1..1 + TITLE.len()].iter().collect();
+        assert_eq!(rendered_title, TITLE);
+    }
+
+    #[test]
     fn style_applies_foreground_color() {
         let mut surface = Surface::new(10, 2);
         let mut renderer = Renderer::new(&mut surface);
@@ -487,10 +553,12 @@ mod tests {
     fn scroll_offset_shifts_children_up() {
         let mut surface = Surface::new(10, 6);
         // Create a column with many lines and apply scroll
-        let lines: Vec<Node<()>> = (0..10)
-            .map(|i| text::<()>(format!("L{}", i)))
-            .collect();
-        let mut root = column(vec![column(lines).with_scroll(3.0).with_height(taffy::Dimension::length(5.0))]);
+        let lines: Vec<Node<()>> = (0..10).map(|i| text::<()>(format!("L{}", i))).collect();
+        let mut root = column(vec![
+            column(lines)
+                .with_scroll(3.0)
+                .with_height(taffy::Dimension::length(5.0)),
+        ]);
         compute_root_layout(
             &mut root,
             u64::MAX.into(),
@@ -506,6 +574,10 @@ mod tests {
             .expect("render should succeed");
         let screen = renderer.surface().screen_chars_to_string();
         // After scrolling by 3, first visible should be L3
-        assert!(screen.lines().next().unwrap().contains("L3"), "screen=\n{}", screen);
+        assert!(
+            screen.lines().next().unwrap().contains("L3"),
+            "screen=\n{}",
+            screen
+        );
     }
 }

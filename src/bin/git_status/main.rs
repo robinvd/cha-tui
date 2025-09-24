@@ -3,7 +3,7 @@ use std::process::Command;
 
 use chatui::dom::{Color, Node};
 use chatui::event::{Event, Key, KeyCode};
-use chatui::{Program, Style, Transition, block, column, row, text};
+use chatui::{Program, Style, Transition, block_with_title, column, row, text};
 use color_eyre::eyre::{Context, Result, eyre};
 use taffy::Dimension;
 use taffy::prelude::{FromLength, TaffyZero};
@@ -205,15 +205,15 @@ fn render_section(
     selected: usize,
     is_staged: bool,
 ) -> Node<Msg> {
-    let heading = text::<Msg>(title).with_style(section_title_style());
-    let list = render_file_list(entries, is_active, selected, is_staged);
-
-    block(vec![
-        column(vec![heading, list])
-            .with_min_height(Dimension::ZERO)
-            .with_flex_grow(1.)
-            .with_flex_basis(Dimension::ZERO),
-    ])
+    block_with_title(
+        title,
+        vec![
+            render_file_list(entries, is_active, selected, is_staged)
+                .with_min_height(Dimension::ZERO)
+                .with_flex_grow(1.)
+                .with_flex_basis(Dimension::ZERO),
+        ],
+    )
     .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
     .with_flex_basis(Dimension::ZERO)
@@ -258,7 +258,7 @@ fn render_file_list(
 }
 
 fn render_diff_pane(model: &Model) -> Node<Msg> {
-    let title = text::<Msg>("Diff Preview").with_style(section_title_style());
+    const DIFF_TITLE: &str = "Diff Preview";
     let content = render_diff_lines(&model.diff_lines)
         .with_scroll(model.diff_scroll)
         .on_mouse(|e| {
@@ -273,12 +273,15 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
             }
         });
 
-    block(vec![
-        column(vec![title, content])
-            .with_min_height(Dimension::ZERO)
-            .with_flex_grow(1.)
-            .with_flex_basis(Dimension::ZERO),
-    ])
+    block_with_title(
+        DIFF_TITLE,
+        vec![
+            content
+                .with_min_height(Dimension::ZERO)
+                .with_flex_grow(1.)
+                .with_flex_basis(Dimension::ZERO),
+        ],
+    )
     .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
     .with_flex_basis(Dimension::ZERO)
@@ -324,12 +327,6 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
 fn title_style() -> Style {
     let mut style = Style::bold();
     style.fg = Some(Color::Cyan);
-    style
-}
-
-fn section_title_style() -> Style {
-    let mut style = Style::bold();
-    style.fg = Some(Color::Yellow);
     style
 }
 
@@ -569,7 +566,7 @@ impl Model {
     }
 
     fn scroll_files(&mut self, focus: Focus, delta: i32) {
-        let (len, scroll, selected) = match focus {
+        let (len, scroll, _selected) = match focus {
             Focus::Unstaged => (
                 self.unstaged.len(),
                 &mut self.unstaged_scroll,
