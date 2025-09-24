@@ -8,10 +8,7 @@ use crate::render::Renderer;
 
 use taffy::compute_root_layout;
 use termwiz::caps::Capabilities;
-use termwiz::input::{
-    InputEvent, KeyEvent, Modifiers as TwModifiers, MouseButtons as TwMouseButtons,
-    MouseEvent as TwMouseEvent,
-};
+use termwiz::input::{InputEvent, KeyEvent, Modifiers as TwModifiers, MouseEvent as TwMouseEvent};
 use termwiz::surface::{Change, Surface};
 use termwiz::terminal::buffered::BufferedTerminal;
 use termwiz::terminal::{Terminal, new_terminal};
@@ -268,15 +265,20 @@ fn convert_input_event(input: InputEvent) -> Option<Event> {
 }
 
 fn map_mouse_event(mouse: TwMouseEvent) -> Option<Event> {
-    let buttons = MouseButtons {
-        left: mouse.mouse_buttons.contains(TwMouseButtons::LEFT),
-        right: mouse.mouse_buttons.contains(TwMouseButtons::RIGHT),
-        middle: mouse.mouse_buttons.contains(TwMouseButtons::MIDDLE),
-        horz_wheel: mouse.mouse_buttons.contains(TwMouseButtons::HORZ_WHEEL),
-        vert_wheel: mouse.mouse_buttons.contains(TwMouseButtons::VERT_WHEEL),
-        wheel_positive: mouse.mouse_buttons.contains(TwMouseButtons::WHEEL_POSITIVE),
-    };
-
+    use termwiz::input::MouseButtons as TwButtons;
+    let mut buttons = MouseButtons::new(
+        mouse.mouse_buttons.contains(TwButtons::LEFT),
+        mouse.mouse_buttons.contains(TwButtons::RIGHT),
+        mouse.mouse_buttons.contains(TwButtons::MIDDLE),
+    );
+    if mouse.mouse_buttons.contains(TwButtons::VERT_WHEEL) {
+        buttons.vert_wheel = true;
+        buttons.wheel_positive = mouse.mouse_buttons.contains(TwButtons::WHEEL_POSITIVE);
+    }
+    if mouse.mouse_buttons.contains(TwButtons::HORZ_WHEEL) {
+        buttons.horz_wheel = true;
+        buttons.wheel_positive = mouse.mouse_buttons.contains(TwButtons::WHEEL_POSITIVE);
+    }
     Some(Event::Mouse(MouseEvent::with_modifiers(
         // termwiz mouse x/y are 1 indexed
         mouse.x - 1,
