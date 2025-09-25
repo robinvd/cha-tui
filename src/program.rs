@@ -294,8 +294,9 @@ impl<Model, Msg> Program<Model, Msg> {
         }
 
         if let Some(view) = self.current_view.as_ref()
-            && let Some(target) = view.hit_test(event.x, event.y)
-            && let Some(msg) = target.mouse_message(enriched)
+            && let Some(msg) = view.hit_test(event.x, event.y, &mut |target| {
+                target.mouse_message(enriched)
+            })
         {
             return Some(msg);
         }

@@ -4,9 +4,10 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::process::Command;
 
+use chatui::components::scroll::{ScrollMsg, ScrollState, scrollable_content};
 use chatui::dom::{Node, TextSpan};
 use chatui::event::{Event, Key, KeyCode};
-use chatui::{Program, Size, Style, Transition, block_with_title, column, rich_text, row, text};
+use chatui::{Program, Style, Transition, block_with_title, column, rich_text, row, text};
 use color_eyre::eyre::{Context, Result, eyre};
 use taffy::Dimension;
 use taffy::prelude::{FromLength, TaffyZero};
@@ -50,13 +51,16 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
         }
         Msg::Staged(msg) => handle_section_msg(model, Focus::Staged, msg),
         Msg::Unstaged(msg) => handle_section_msg(model, Focus::Unstaged, msg),
-        Msg::Preview(PreviewMsg::Scroll(diff)) => {
-            model.scroll_diff(diff);
+        Msg::DiffScroll(scroll_msg) => {
+            model.update_diff_scroll(scroll_msg);
             Transition::Continue
         }
-        Msg::Preview(PreviewMsg::Resize { container, content }) => {
-            model.diff_size = container;
-            model.diff_content_size = content;
+        Msg::UnstagedScroll(scroll_msg) => {
+            model.update_section_scroll(Focus::Unstaged, scroll_msg);
+            Transition::Continue
+        }
+        Msg::StagedScroll(scroll_msg) => {
+            model.update_section_scroll(Focus::Staged, scroll_msg);
             Transition::Continue
         }
     }
@@ -90,10 +94,6 @@ fn handle_section_msg(model: &mut Model, focus: Focus, msg: SectionMsg) -> Trans
                 }
             }
             model.toggle_stage_selected();
-            Transition::Continue
-        }
-        SectionMsg::ScrollFiles(diff) => {
-            model.scroll_files(focus, diff);
             Transition::Continue
         }
     }
@@ -187,72 +187,71 @@ fn view(model: &Model) -> Node<Msg> {
 }
 
 fn render_left_pane(model: &Model) -> Node<Msg> {
-    let unstaged = render_section(
-        "Unstaged Changes",
+    let unstaged_list = render_file_list(
         &model.unstaged,
         model.focus == Focus::Unstaged,
         model.selected_unstaged,
         false,
     )
-    .with_id("unstaged-section")
-    .with_overflow_y(taffy::Overflow::Scroll)
-    .with_scroll(model.unstaged_scroll)
-    .on_mouse(|e| {
-        if e.buttons.vert_wheel {
-            Some(Msg::Unstaged(SectionMsg::ScrollFiles(
-                if e.buttons.wheel_positive { 1 } else { -1 },
-            )))
-        } else {
-            None
-        }
-    });
+    .with_min_height(Dimension::ZERO)
+    .with_flex_grow(1.)
+    .with_flex_basis(Dimension::ZERO);
 
-    let staged = render_section(
-        "Staged Changes",
+    let unstaged = block_with_title(
+        "Unstaged Changes",
+        vec![
+            scrollable_content(
+                "unstaged-section-content",
+                &model.unstaged_scroll,
+                1,
+                Msg::UnstagedScroll,
+                unstaged_list,
+            )
+            .with_min_height(Dimension::ZERO)
+            .with_flex_grow(1.)
+            .with_flex_basis(Dimension::ZERO),
+        ],
+    )
+    .with_min_height(Dimension::ZERO)
+    .with_flex_grow(1.)
+    .with_flex_basis(Dimension::ZERO)
+    .with_id("unstaged-section");
+
+    let staged_list = render_file_list(
         &model.staged,
         model.focus == Focus::Staged,
         model.selected_staged,
         true,
     )
-    .with_id("staged-section")
-    .with_overflow_y(taffy::Overflow::Scroll)
-    .with_scroll(model.staged_scroll)
-    .on_mouse(|e| {
-        if e.buttons.vert_wheel {
-            Some(Msg::Staged(SectionMsg::ScrollFiles(
-                if e.buttons.wheel_positive { 1 } else { -1 },
-            )))
-        } else {
-            None
-        }
-    });
+    .with_min_height(Dimension::ZERO)
+    .with_flex_grow(1.)
+    .with_flex_basis(Dimension::ZERO);
+
+    let staged = block_with_title(
+        "Staged Changes",
+        vec![
+            scrollable_content(
+                "staged-section-content",
+                &model.staged_scroll,
+                1,
+                Msg::StagedScroll,
+                staged_list,
+            )
+            .with_min_height(Dimension::ZERO)
+            .with_flex_grow(1.)
+            .with_flex_basis(Dimension::ZERO),
+        ],
+    )
+    .with_min_height(Dimension::ZERO)
+    .with_flex_grow(1.)
+    .with_flex_basis(Dimension::ZERO)
+    .with_id("staged-section");
 
     column(vec![
         unstaged.with_flex_grow(1.).with_flex_basis(Dimension::ZERO),
         staged.with_flex_grow(1.).with_flex_basis(Dimension::ZERO),
     ])
     .with_id("left-pane")
-}
-
-fn render_section(
-    title: &str,
-    entries: &[FileEntry],
-    is_active: bool,
-    selected: usize,
-    is_staged: bool,
-) -> Node<Msg> {
-    block_with_title(
-        title,
-        vec![
-            render_file_list(entries, is_active, selected, is_staged)
-                .with_min_height(Dimension::ZERO)
-                .with_flex_grow(1.)
-                .with_flex_basis(Dimension::ZERO),
-        ],
-    )
-    .with_min_height(Dimension::ZERO)
-    .with_flex_grow(1.)
-    .with_flex_basis(Dimension::ZERO)
 }
 
 fn render_file_list(
@@ -313,43 +312,22 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
         Some(entry) => format!("Diff Preview - {}", entry.path),
         None => "Diff Preview".to_string(),
     };
-    let content = render_diff_lines(&model.diff_lines)
-        .with_scroll(model.diff_scroll)
-        .on_mouse(|e| {
-            if e.buttons.vert_wheel {
-                Some(Msg::Preview(PreviewMsg::Scroll(
-                    if e.buttons.wheel_positive { 3 } else { -3 },
-                )))
-            } else {
-                None
-            }
-        })
-        .on_resize(|layout| {
-            Some(Msg::Preview(PreviewMsg::Resize {
-                container: Size {
-                    width: layout.size.width as u16,
-                    height: layout.size.height as u16,
-                },
-                content: Size {
-                    width: layout.content_size.width as u16,
-                    height: layout.content_size.height as u16,
-                },
-            }))
-        });
-
-    block_with_title(
-        diff_title,
-        vec![
-            content
-                .with_min_height(Dimension::ZERO)
-                .with_flex_grow(1.)
-                .with_flex_basis(Dimension::ZERO),
-        ],
+    let content = scrollable_content(
+        "diff-pane-content",
+        &model.diff_scroll,
+        3,
+        Msg::DiffScroll,
+        render_diff_lines(&model.diff_lines),
     )
     .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
-    .with_flex_basis(Dimension::ZERO)
-    .with_id("diff-pane")
+    .with_flex_basis(Dimension::ZERO);
+
+    block_with_title(diff_title, vec![content])
+        .with_min_height(Dimension::ZERO)
+        .with_flex_grow(1.)
+        .with_flex_basis(Dimension::ZERO)
+        .with_id("diff-pane")
 }
 
 fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
@@ -432,11 +410,9 @@ struct Model {
     selected_unstaged: usize,
     selected_staged: usize,
     diff_lines: Vec<DiffLine>,
-    diff_scroll: f32,
-    diff_size: Size,
-    diff_content_size: Size,
-    unstaged_scroll: f32,
-    staged_scroll: f32,
+    diff_scroll: ScrollState,
+    unstaged_scroll: ScrollState,
+    staged_scroll: ScrollState,
 
     error: Option<String>,
 }
@@ -489,7 +465,7 @@ impl Model {
             Some(entry) => diff_for(entry, self.focus),
             None => {
                 self.diff_lines = vec![DiffLine::plain("No file selected")];
-                self.diff_scroll = 0.0;
+                self.diff_scroll.reset();
                 return;
             }
         };
@@ -501,7 +477,7 @@ impl Model {
                 } else {
                     self.diff_lines = lines;
                 }
-                self.diff_scroll = 0.0;
+                self.diff_scroll.reset();
 
                 if matches!(self.error.as_deref(), Some(msg) if msg.starts_with("git diff")) {
                     self.clear_error();
@@ -510,7 +486,7 @@ impl Model {
             Err(err) => {
                 self.diff_lines = vec![DiffLine::plain("Failed to load diff")];
                 self.set_error(err);
-                self.diff_scroll = 0.0;
+                self.diff_scroll.reset();
             }
         }
     }
@@ -522,21 +498,36 @@ impl Model {
         }
     }
 
+    fn entries_for_focus(&self, focus: Focus) -> &[FileEntry] {
+        match focus {
+            Focus::Unstaged => &self.unstaged,
+            Focus::Staged => &self.staged,
+        }
+    }
+
+    fn scroll_state_mut(&mut self, focus: Focus) -> &mut ScrollState {
+        match focus {
+            Focus::Unstaged => &mut self.unstaged_scroll,
+            Focus::Staged => &mut self.staged_scroll,
+        }
+    }
+
     fn move_selection_up(&mut self) {
         match self.focus {
             Focus::Unstaged => {
                 if self.selected_unstaged > 0 {
                     self.selected_unstaged -= 1;
-                    if (self.selected_unstaged as f32) < self.unstaged_scroll {
-                        self.unstaged_scroll = self.selected_unstaged as f32;
+                    if (self.selected_unstaged as f32) < self.unstaged_scroll.offset() {
+                        self.unstaged_scroll
+                            .set_offset(self.selected_unstaged as f32);
                     }
                 }
             }
             Focus::Staged => {
                 if self.selected_staged > 0 {
                     self.selected_staged -= 1;
-                    if (self.selected_staged as f32) < self.staged_scroll {
-                        self.staged_scroll = self.selected_staged as f32;
+                    if (self.selected_staged as f32) < self.staged_scroll.offset() {
+                        self.staged_scroll.set_offset(self.selected_staged as f32);
                     }
                 } else if !self.unstaged.is_empty() {
                     self.focus = Focus::Unstaged;
@@ -602,66 +593,51 @@ impl Model {
     }
 
     fn scroll_diff(&mut self, delta: i32) {
-        if self.diff_lines.is_empty() {
-            return;
+        self.update_diff_scroll(ScrollMsg::Delta(delta));
+    }
+
+    fn update_diff_scroll(&mut self, msg: ScrollMsg) {
+        match msg {
+            ScrollMsg::Delta(delta) => {
+                if self.diff_lines.is_empty() {
+                    return;
+                }
+                self.diff_scroll.update(ScrollMsg::Delta(delta));
+            }
+            ScrollMsg::Resize { .. } => {
+                self.diff_scroll.update(msg);
+            }
         }
-        let current = self.diff_scroll as i32;
-        let mut next = current + delta;
-        if next < 0 {
-            next = 0;
-        }
-        let max_offset = (self.diff_content_size.height as i32)
-            .saturating_sub(1)
-            .saturating_sub(self.diff_size.height as i32);
-        if next > max_offset {
-            next = max_offset;
-        }
-        self.diff_scroll = next as f32;
     }
 
     fn scroll_files(&mut self, focus: Focus, delta: i32) {
-        let (len, scroll, _selected) = match focus {
-            Focus::Unstaged => (
-                self.unstaged.len(),
-                &mut self.unstaged_scroll,
-                self.selected_unstaged,
-            ),
-            Focus::Staged => (
-                self.staged.len(),
-                &mut self.staged_scroll,
-                self.selected_staged,
-            ),
-        };
-        if len == 0 {
-            return;
-        }
-        let mut next = (*scroll as i32) + delta;
-        if next < 0 {
-            next = 0;
-        }
-        let max_offset = (len as i32).saturating_sub(1);
-        if next > max_offset {
-            next = max_offset;
-        }
-        *scroll = next as f32;
-        // if (selected as f32) < *scroll {
-        //     *scroll = selected as f32;
-        // }
+        self.update_section_scroll(focus, ScrollMsg::Delta(delta));
     }
 
     fn ensure_selected_visible(&mut self) {
         match self.focus {
             Focus::Unstaged => {
-                if (self.selected_unstaged as f32) < self.unstaged_scroll {
-                    self.unstaged_scroll = self.selected_unstaged as f32;
+                if (self.selected_unstaged as f32) < self.unstaged_scroll.offset() {
+                    self.unstaged_scroll
+                        .set_offset(self.selected_unstaged as f32);
                 }
             }
             Focus::Staged => {
-                if (self.selected_staged as f32) < self.staged_scroll {
-                    self.staged_scroll = self.selected_staged as f32;
+                if (self.selected_staged as f32) < self.staged_scroll.offset() {
+                    self.staged_scroll.set_offset(self.selected_staged as f32);
                 }
             }
         }
+    }
+
+    fn update_section_scroll(&mut self, focus: Focus, msg: ScrollMsg) {
+        if matches!(msg, ScrollMsg::Delta(_)) && self.entries_for_focus(focus).is_empty() {
+            return;
+        }
+        self.scroll_state_mut(focus).update(msg);
+        // if focus == self.focus {
+        //     self.ensure_selected_visible();
+        // }
     }
 
     fn sync_scroll_to_selected(&mut self) {
@@ -670,16 +646,16 @@ impl Model {
 
     fn clamp_file_scrolls(&mut self) {
         if self.unstaged.is_empty() {
-            self.unstaged_scroll = 0.0;
+            self.unstaged_scroll.reset();
+        } else if self.unstaged_scroll.offset() as usize >= self.unstaged.len() {
+            self.unstaged_scroll
+                .set_offset(self.unstaged.len().saturating_sub(1) as f32);
         }
         if self.staged.is_empty() {
-            self.staged_scroll = 0.0;
-        }
-        if self.unstaged_scroll as usize >= self.unstaged.len() {
-            self.unstaged_scroll = self.unstaged.len().saturating_sub(1) as f32;
-        }
-        if self.staged_scroll as usize >= self.staged.len() {
-            self.staged_scroll = self.staged.len().saturating_sub(1) as f32;
+            self.staged_scroll.reset();
+        } else if self.staged_scroll.offset() as usize >= self.staged.len() {
+            self.staged_scroll
+                .set_offset(self.staged.len().saturating_sub(1) as f32);
         }
     }
 }
@@ -689,18 +665,14 @@ enum Msg {
     ReloadStatus,
     Staged(SectionMsg),
     Unstaged(SectionMsg),
-    Preview(PreviewMsg),
-}
-
-enum PreviewMsg {
-    Scroll(i32),
-    Resize { container: Size, content: Size },
+    DiffScroll(ScrollMsg),
+    UnstagedScroll(ScrollMsg),
+    StagedScroll(ScrollMsg),
 }
 
 enum SectionMsg {
     ActivateFile(usize),
     ToggleStageEntry(usize),
-    ScrollFiles(i32),
 }
 
 #[derive(Clone, Debug)]

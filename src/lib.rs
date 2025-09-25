@@ -1,3 +1,4 @@
+pub mod components;
 pub mod dom;
 pub mod error;
 pub mod event;
@@ -12,3 +13,4 @@ pub use crate::dom::{
 pub use crate::error::ProgramError;
 pub use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};
 pub use crate::program::{EventFn, Program, Transition, UpdateFn, ViewFn};
+pub use components::scroll::{ScrollMsg, ScrollState, scrollable_content};

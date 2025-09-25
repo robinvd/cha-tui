@@ -484,25 +484,32 @@ impl<Msg> Node<Msg> {
     }
 
     pub(crate) fn mouse_message(&self, event: MouseEvent) -> Option<Msg> {
-        // First see if there is a general mouse handler
         if let Some(handler) = &self.on_mouse {
             return handler(event);
         }
         None
     }
 
-    pub(crate) fn hit_test(&self, x: u16, y: u16) -> Option<&Self> {
-        Self::hit_test_inner(self, x, y, 0.0, 0.0, 0.0)
+    pub(crate) fn hit_test<T>(
+        &self,
+        x: u16,
+        y: u16,
+        callback: &mut impl FnMut(&Node<Msg>) -> Option<T>,
+    ) -> Option<T> {
+        let result = Self::hit_test_inner(self, x, y, 0.0, 0.0, 0.0, callback);
+        // info!("hit test: {:?}", result.map(|n| n.classname));
+        result
     }
 
-    fn hit_test_inner(
+    fn hit_test_inner<T>(
         node: &Node<Msg>,
         x: u16,
         y: u16,
         origin_x: f32,
         origin_y: f32,
         ancestor_scroll_y: f32,
-    ) -> Option<&Node<Msg>> {
+        callback: &mut impl FnMut(&Node<Msg>) -> Option<T>,
+    ) -> Option<T> {
         let layout = node.layout_state.layout;
         let abs_x = origin_x + layout.location.x;
         let abs_y = origin_y + layout.location.y - ancestor_scroll_y;
@@ -530,17 +537,15 @@ impl<Msg> Node<Msg> {
                 ancestor_scroll_y
             };
             for child in &element.children {
-                if let Some(hit) = Self::hit_test_inner(child, x, y, abs_x, abs_y, next_scroll) {
+                if let Some(hit) =
+                    Self::hit_test_inner(child, x, y, abs_x, abs_y, next_scroll, callback)
+                {
                     return Some(hit);
                 }
             }
         }
 
-        if node.on_mouse.is_some() {
-            Some(node)
-        } else {
-            None
-        }
+        callback(node)
     }
 }
 
@@ -897,15 +902,14 @@ mod tests {
         );
         crate::dom::rounding::round_layout(&mut node);
 
-        let hit = node.hit_test(0, 0).expect("expected hit");
-        assert!(
-            hit.mouse_message(crate::event::MouseEvent::new(
+        node.hit_test(0, 0, &mut |n| {
+            n.mouse_message(crate::event::MouseEvent::new(
                 0,
                 0,
-                crate::event::MouseButtons::new(true, false, false)
+                crate::event::MouseButtons::new(true, false, false),
             ))
-            .is_some()
-        );
+        })
+        .expect("expected hit");
     }
 
     #[test]
