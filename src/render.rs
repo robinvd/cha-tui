@@ -248,7 +248,9 @@ impl<'a> Renderer<'a> {
             ((clamped_scroll / max_scroll) * travel as f32).round() as usize
         };
         let thumb_top = area.y + thumb_top_offset;
-        let thumb_bottom = thumb_top.saturating_add(thumb_height).min(area.y + track_height);
+        let thumb_bottom = thumb_top
+            .saturating_add(thumb_height)
+            .min(area.y + track_height);
 
         let mut thumb_attrs = CellAttributes::default();
         thumb_attrs.set_intensity(Intensity::Bold);
@@ -844,11 +846,7 @@ mod tests {
             "expected thumb center to increase: top={top_center}, bottom={bottom_center}"
         );
         assert!(
-            bottom_rows
-                .last()
-                .copied()
-                .unwrap()
-                >= bottom_lines.len().saturating_sub(2),
+            bottom_rows.last().copied().unwrap() >= bottom_lines.len().saturating_sub(2),
             "expected thumb near bottom: {:?}",
             bottom_rows
         );

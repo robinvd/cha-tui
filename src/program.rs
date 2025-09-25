@@ -226,7 +226,18 @@ impl<Model, Msg> Program<Model, Msg> {
     }
 
     fn rebuild_view(&mut self) {
-        self.current_view = Some((self.view)(&self.model));
+        let new_view = (self.view)(&self.model);
+
+        if let Some(current_view) = self.current_view.as_mut() {
+            if let crate::dom::patch::PatchResult::Replaced(replacement) =
+                crate::dom::patch::patch(current_view, new_view)
+            {
+                *current_view = *replacement;
+            }
+        } else {
+            self.current_view = Some(new_view);
+        }
+
         if let Some(view) = self.current_view.as_mut() {
             info!("computing layout with: {:?}", self.current_size);
             compute_root_layout(
