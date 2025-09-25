@@ -52,6 +52,9 @@ struct Point {
     y: usize,
 }
 
+const SCROLLBAR_TRACK_CHAR: char = ' ';
+const SCROLLBAR_THUMB_CHAR: char = '█';
+
 impl<'a> Renderer<'a> {
     pub fn new(surface: &'a mut Surface) -> Self {
         Self { surface }
@@ -106,12 +109,16 @@ impl<'a> Renderer<'a> {
         match &node.content {
             NodeContent::Text(text) => self.render_text(text, area),
             NodeContent::Element(element) => {
-                let next_scroll = if node.layout_state.style.overflow.y == taffy::Overflow::Scroll {
+                let is_scroll = node.layout_state.style.overflow.y == taffy::Overflow::Scroll;
+                let next_scroll = if is_scroll {
                     inherited_scroll_y + node.scroll_y
                 } else {
                     inherited_scroll_y
                 };
                 self.render_element(element, area, next_scroll);
+                if is_scroll {
+                    self.render_scrollbar(area, &layout, node.scroll_y);
+                }
             }
         }
     }
@@ -186,6 +193,70 @@ impl<'a> Renderer<'a> {
     fn render_children<Msg>(&mut self, children: &[Node<Msg>], clip: Rect, scroll_y: f32) {
         for child in children {
             self.render_node(child, clip, scroll_y);
+        }
+    }
+
+    fn render_scrollbar(&mut self, area: Rect, layout: &TaffyLayout, scroll_offset: f32) {
+        let scrollbar_width = layout.scrollbar_size.width.max(0.0).round() as usize;
+        if scrollbar_width == 0 || area.width == 0 || area.height == 0 {
+            return;
+        }
+        if area.width < scrollbar_width {
+            return;
+        }
+
+        let viewport_height = layout.size.height.max(0.0);
+        if viewport_height <= 0.0 {
+            return;
+        }
+
+        let content_height = layout.content_size.height.max(viewport_height);
+        if content_height <= viewport_height + f32::EPSILON {
+            return;
+        }
+
+        let track_height = area.height;
+        if track_height == 0 {
+            return;
+        }
+
+        let scrollbar_x = area.x + area.width - scrollbar_width;
+        let track_attrs = CellAttributes::default();
+        for y in area.y..(area.y + track_height) {
+            for x in scrollbar_x..(scrollbar_x + scrollbar_width) {
+                self.write_char(x, y, SCROLLBAR_TRACK_CHAR, &track_attrs);
+            }
+        }
+
+        let max_scroll = (content_height - viewport_height).max(0.0);
+        let clamped_scroll = if max_scroll <= f32::EPSILON {
+            0.0
+        } else {
+            scroll_offset.clamp(0.0, max_scroll)
+        };
+
+        let mut thumb_height =
+            ((track_height as f32 * (viewport_height / content_height)).floor() as usize).max(1);
+        if thumb_height > track_height {
+            thumb_height = track_height;
+        }
+
+        let travel = track_height.saturating_sub(thumb_height);
+        let thumb_top_offset = if travel == 0 || max_scroll <= f32::EPSILON {
+            0
+        } else {
+            ((clamped_scroll / max_scroll) * travel as f32).round() as usize
+        };
+        let thumb_top = area.y + thumb_top_offset;
+        let thumb_bottom = thumb_top.saturating_add(thumb_height).min(area.y + track_height);
+
+        let mut thumb_attrs = CellAttributes::default();
+        thumb_attrs.set_intensity(Intensity::Bold);
+
+        for y in thumb_top..thumb_bottom {
+            for x in scrollbar_x..(scrollbar_x + scrollbar_width) {
+                self.write_char(x, y, SCROLLBAR_THUMB_CHAR, &thumb_attrs);
+            }
         }
     }
 
@@ -378,6 +449,51 @@ mod tests {
             },
         );
         round_layout(node);
+    }
+
+    fn render_scrollable_lines(scroll_offset: f32) -> Vec<String> {
+        let mut surface = Surface::new(6, 5);
+        let lines: Vec<Node<()>> = (0..20)
+            .map(|idx| text::<()>(format!("Line {idx}")))
+            .collect();
+        let scrollable = column(lines)
+            .with_scroll(scroll_offset)
+            .with_height(Dimension::length(5.0))
+            .with_width(Dimension::percent(1.0));
+        let mut root = column(vec![scrollable])
+            .with_width(Dimension::percent(1.0))
+            .with_height(Dimension::percent(1.0));
+        prepare_layout(&mut root, Size::new(6, 5));
+
+        let mut renderer = Renderer::new(&mut surface);
+        renderer
+            .render(&root, Size::new(6, 5))
+            .expect("render should succeed");
+
+        renderer
+            .surface()
+            .screen_chars_to_string()
+            .lines()
+            .map(|line| line.to_string())
+            .collect()
+    }
+
+    fn thumb_rows(lines: &[String]) -> Vec<usize> {
+        lines
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, line)| {
+                if line.chars().last() == Some(SCROLLBAR_THUMB_CHAR) {
+                    Some(idx)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn average(rows: &[usize]) -> f32 {
+        rows.iter().copied().sum::<usize>() as f32 / rows.len() as f32
     }
 
     #[test]
@@ -692,6 +808,49 @@ mod tests {
             screen.lines().next().unwrap().contains("L3"),
             "screen=\n{}",
             screen
+        );
+    }
+
+    #[test]
+    fn scrollbar_renders_thumb_for_overflow() {
+        let lines = render_scrollable_lines(0.0);
+        let thumb_rows = thumb_rows(&lines);
+        assert!(
+            !thumb_rows.is_empty(),
+            "expected thumb cells in {:?}",
+            lines
+        );
+        assert_eq!(thumb_rows.first().copied().unwrap(), 0);
+    }
+
+    #[test]
+    fn scrollbar_thumb_moves_with_scroll() {
+        let top_lines = render_scrollable_lines(0.0);
+        let bottom_lines = render_scrollable_lines(15.0);
+
+        let top_rows = thumb_rows(&top_lines);
+        let bottom_rows = thumb_rows(&bottom_lines);
+        assert!(
+            !top_rows.is_empty() && !bottom_rows.is_empty(),
+            "expected thumb rows top={:?} bottom={:?}",
+            top_lines,
+            bottom_lines
+        );
+
+        let top_center = average(&top_rows);
+        let bottom_center = average(&bottom_rows);
+        assert!(
+            bottom_center > top_center,
+            "expected thumb center to increase: top={top_center}, bottom={bottom_center}"
+        );
+        assert!(
+            bottom_rows
+                .last()
+                .copied()
+                .unwrap()
+                >= bottom_lines.len().saturating_sub(2),
+            "expected thumb near bottom: {:?}",
+            bottom_rows
         );
     }
 }

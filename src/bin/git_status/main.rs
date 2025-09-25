@@ -48,38 +48,47 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
             }
             Transition::Continue
         }
-        Msg::ActivateFile(staged, index) => {
-            if staged {
-                model.selected_staged = index;
-                model.focus = Focus::Staged
-            } else {
-                model.selected_unstaged = index;
-                model.focus = Focus::Unstaged
-            };
-            model.update_diff();
-            Transition::Continue
-        }
-        Msg::ToggleStageEntry { staged, index } => {
-            if staged {
-                model.selected_staged = index;
-                model.focus = Focus::Staged;
-            } else {
-                model.selected_unstaged = index;
-                model.focus = Focus::Unstaged;
-            }
-            model.toggle_stage_selected();
-            Transition::Continue
-        }
+        Msg::Staged(msg) => handle_section_msg(model, Focus::Staged, msg),
+        Msg::Unstaged(msg) => handle_section_msg(model, Focus::Unstaged, msg),
         Msg::ScrollPreview(diff) => {
             model.scroll_diff(diff);
             Transition::Continue
         }
-        Msg::ScrollFiles(staged, diff) => {
-            if staged {
-                model.scroll_files(Focus::Staged, diff);
-            } else {
-                model.scroll_files(Focus::Unstaged, diff);
+    }
+}
+
+fn handle_section_msg(model: &mut Model, focus: Focus, msg: SectionMsg) -> Transition {
+    match msg {
+        SectionMsg::ActivateFile(index) => {
+            match focus {
+                Focus::Unstaged => {
+                    model.selected_unstaged = index;
+                    model.focus = Focus::Unstaged;
+                }
+                Focus::Staged => {
+                    model.selected_staged = index;
+                    model.focus = Focus::Staged;
+                }
             }
+            model.update_diff();
+            Transition::Continue
+        }
+        SectionMsg::ToggleStageEntry(index) => {
+            match focus {
+                Focus::Unstaged => {
+                    model.selected_unstaged = index;
+                    model.focus = Focus::Unstaged;
+                }
+                Focus::Staged => {
+                    model.selected_staged = index;
+                    model.focus = Focus::Staged;
+                }
+            }
+            model.toggle_stage_selected();
+            Transition::Continue
+        }
+        SectionMsg::ScrollFiles(diff) => {
+            model.scroll_files(focus, diff);
             Transition::Continue
         }
     }
@@ -185,10 +194,9 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
     .with_scroll(model.unstaged_scroll)
     .on_mouse(|e| {
         if e.buttons.vert_wheel {
-            Some(Msg::ScrollFiles(
-                false,
+            Some(Msg::Unstaged(SectionMsg::ScrollFiles(
                 if e.buttons.wheel_positive { 1 } else { -1 },
-            ))
+            )))
         } else {
             None
         }
@@ -206,10 +214,9 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
     .with_scroll(model.staged_scroll)
     .on_mouse(|e| {
         if e.buttons.vert_wheel {
-            Some(Msg::ScrollFiles(
-                true,
+            Some(Msg::Staged(SectionMsg::ScrollFiles(
                 if e.buttons.wheel_positive { 1 } else { -1 },
-            ))
+            )))
         } else {
             None
         }
@@ -257,12 +264,17 @@ fn render_file_list(
         for (idx, entry) in entries.iter().enumerate() {
             let mut node = text::<Msg>(&entry.display).on_mouse(move |event| {
                 if event.is_double_click() {
-                    Some(Msg::ToggleStageEntry {
-                        staged: is_staged,
-                        index: idx,
+                    Some(if is_staged {
+                        Msg::Staged(SectionMsg::ToggleStageEntry(idx))
+                    } else {
+                        Msg::Unstaged(SectionMsg::ToggleStageEntry(idx))
                     })
                 } else if event.is_single_click() {
-                    Some(Msg::ActivateFile(is_staged, idx))
+                    Some(if is_staged {
+                        Msg::Staged(SectionMsg::ActivateFile(idx))
+                    } else {
+                        Msg::Unstaged(SectionMsg::ActivateFile(idx))
+                    })
                 } else {
                     None
                 }
@@ -301,9 +313,9 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
         .on_mouse(|e| {
             if e.buttons.vert_wheel {
                 Some(Msg::ScrollPreview(if e.buttons.wheel_positive {
-                    1
+                    3
                 } else {
-                    -1
+                    -3
                 }))
             } else {
                 None
@@ -655,12 +667,15 @@ impl Model {
 enum Msg {
     KeyPressed(Key),
     ReloadStatus,
-    // true if its the staged list
-    ActivateFile(bool, usize),
-    ToggleStageEntry { staged: bool, index: usize },
+    Staged(SectionMsg),
+    Unstaged(SectionMsg),
     ScrollPreview(i32),
-    // true if its the staged list
-    ScrollFiles(bool, i32),
+}
+
+enum SectionMsg {
+    ActivateFile(usize),
+    ToggleStageEntry(usize),
+    ScrollFiles(i32),
 }
 
 #[derive(Clone, Debug)]
