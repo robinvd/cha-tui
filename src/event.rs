@@ -46,7 +46,7 @@ pub enum KeyCode {
     Down,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub struct Size {
     pub width: u16,
     pub height: u16,

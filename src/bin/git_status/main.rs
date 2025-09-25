@@ -6,7 +6,7 @@ use std::process::Command;
 
 use chatui::dom::{Node, TextSpan};
 use chatui::event::{Event, Key, KeyCode};
-use chatui::{Program, Style, Transition, block_with_title, column, rich_text, row, text};
+use chatui::{Program, Size, Style, Transition, block_with_title, column, rich_text, row, text};
 use color_eyre::eyre::{Context, Result, eyre};
 use taffy::Dimension;
 use taffy::prelude::{FromLength, TaffyZero};
@@ -50,8 +50,13 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
         }
         Msg::Staged(msg) => handle_section_msg(model, Focus::Staged, msg),
         Msg::Unstaged(msg) => handle_section_msg(model, Focus::Unstaged, msg),
-        Msg::ScrollPreview(diff) => {
+        Msg::Preview(PreviewMsg::Scroll(diff)) => {
             model.scroll_diff(diff);
+            Transition::Continue
+        }
+        Msg::Preview(PreviewMsg::Resize { container, content }) => {
+            model.diff_size = container;
+            model.diff_content_size = content;
             Transition::Continue
         }
     }
@@ -312,14 +317,24 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
         .with_scroll(model.diff_scroll)
         .on_mouse(|e| {
             if e.buttons.vert_wheel {
-                Some(Msg::ScrollPreview(if e.buttons.wheel_positive {
-                    3
-                } else {
-                    -3
-                }))
+                Some(Msg::Preview(PreviewMsg::Scroll(
+                    if e.buttons.wheel_positive { 3 } else { -3 },
+                )))
             } else {
                 None
             }
+        })
+        .on_resize(|layout| {
+            Some(Msg::Preview(PreviewMsg::Resize {
+                container: Size {
+                    width: layout.size.width as u16,
+                    height: layout.size.height as u16,
+                },
+                content: Size {
+                    width: layout.content_size.width as u16,
+                    height: layout.content_size.height as u16,
+                },
+            }))
         });
 
     block_with_title(
@@ -417,10 +432,13 @@ struct Model {
     selected_unstaged: usize,
     selected_staged: usize,
     diff_lines: Vec<DiffLine>,
-    error: Option<String>,
     diff_scroll: f32,
+    diff_size: Size,
+    diff_content_size: Size,
     unstaged_scroll: f32,
     staged_scroll: f32,
+
+    error: Option<String>,
 }
 
 impl Model {
@@ -592,7 +610,9 @@ impl Model {
         if next < 0 {
             next = 0;
         }
-        let max_offset = (self.diff_lines.len() as i32).saturating_sub(1);
+        let max_offset = (self.diff_content_size.height as i32)
+            .saturating_sub(1)
+            .saturating_sub(self.diff_size.height as i32);
         if next > max_offset {
             next = max_offset;
         }
@@ -669,7 +689,12 @@ enum Msg {
     ReloadStatus,
     Staged(SectionMsg),
     Unstaged(SectionMsg),
-    ScrollPreview(i32),
+    Preview(PreviewMsg),
+}
+
+enum PreviewMsg {
+    Scroll(i32),
+    Resize { container: Size, content: Size },
 }
 
 enum SectionMsg {

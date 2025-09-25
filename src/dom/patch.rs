@@ -55,7 +55,7 @@ pub fn patch<Msg>(existing: &mut Node<Msg>, new_node: Node<Msg>) -> PatchResult<
     }
 
     if layout_changed {
-        existing.layout_state.cache = new_layout_state.cache;
+        existing.layout_state.cache.clear();
     }
 
     PatchResult::Patched { layout_changed }

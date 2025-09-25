@@ -21,12 +21,15 @@ use termwiz::cell::unicode_column_width;
 
 #[derive(Clone)]
 pub struct Node<Msg> {
-    pub content: NodeContent<Msg>,
     classname: &'static str,
     id: u64,
-    pub layout_state: LayoutState,
-    on_mouse: Option<Rc<dyn Fn(MouseEvent) -> Option<Msg>>>,
+
+    pub(crate) content: NodeContent<Msg>,
+    pub(crate) layout_state: LayoutState,
     pub(crate) scroll_y: f32,
+
+    pub(crate) on_mouse: Option<Rc<dyn Fn(MouseEvent) -> Option<Msg>>>,
+    pub(crate) on_resize: Option<Rc<dyn Fn(&TaffyLayout) -> Option<Msg>>>,
 }
 
 impl<Msg: fmt::Debug> fmt::Debug for Node<Msg> {
@@ -83,6 +86,7 @@ pub struct LayoutState {
     pub cache: TaffyCache,
     pub unrounded_layout: TaffyLayout,
     pub layout: TaffyLayout,
+    size_dirty: bool,
 }
 
 impl Default for LayoutState {
@@ -92,6 +96,7 @@ impl Default for LayoutState {
             cache: TaffyCache::new(),
             unrounded_layout: TaffyLayout::new(),
             layout: TaffyLayout::new(),
+            size_dirty: false,
         };
         new.style.overflow.x = Overflow::Clip;
         new.style.overflow.y = Overflow::Clip;
@@ -260,6 +265,7 @@ impl<Msg> Node<Msg> {
             classname: "",
             id: 0,
             on_mouse: None,
+            on_resize: None,
             scroll_y: 0.0,
         }
     }
@@ -313,6 +319,11 @@ impl<Msg> Node<Msg> {
 
     pub fn on_mouse(mut self, handler: impl Fn(MouseEvent) -> Option<Msg> + 'static) -> Self {
         self.on_mouse = Some(Rc::new(handler));
+        self
+    }
+
+    pub fn on_resize(mut self, handler: impl Fn(&TaffyLayout) -> Option<Msg> + 'static) -> Self {
+        self.on_resize = Some(Rc::new(handler));
         self
     }
 
@@ -449,7 +460,27 @@ impl<Msg> Node<Msg> {
     }
 
     pub(crate) fn set_final_layout(&mut self, layout: &TaffyLayout) {
-        self.layout_state.layout = *layout
+        if &self.layout_state.layout != layout {
+            self.layout_state.layout = *layout;
+            // Or only on size != newsize?
+            self.layout_state.size_dirty = true
+        }
+    }
+
+    pub(crate) fn report_changed(&mut self, callback: &mut impl FnMut(&Self)) {
+        if self.layout_state.size_dirty {
+            callback(self);
+            self.layout_state.size_dirty = false;
+        }
+
+        match &mut self.content {
+            NodeContent::Element(element_node) => {
+                for child in &mut element_node.children {
+                    child.report_changed(callback);
+                }
+            }
+            NodeContent::Text(_) => {}
+        }
     }
 
     pub(crate) fn mouse_message(&self, event: MouseEvent) -> Option<Msg> {
