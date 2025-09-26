@@ -11,6 +11,7 @@ use color_eyre::eyre::Result;
 pub enum LanguageKind {
     Rust,
     Markdown,
+    Python,
 }
 
 const HIGHLIGHT_NAMES: &[&str] = &[
@@ -86,6 +87,10 @@ const MARKDOWN_INLINE_HIGHLIGHTS_QUERY: &str =
 const MARKDOWN_INLINE_INJECTIONS_QUERY: &str =
     include_str!("queries/markdown_inline_injections.scm");
 
+const PYTHON_HIGHLIGHTS_QUERY: &str = include_str!("/nix/store/hnkvggm7815dshjjxbfk3gsfkx8ayhi6-runtime/queries/python/highlights.scm");
+const PYTHON_INJECTIONS_QUERY: &str = include_str!("/nix/store/hnkvggm7815dshjjxbfk3gsfkx8ayhi6-runtime/queries/python/injections.scm");
+const PYTHON_LOCALS_QUERY: &str = include_str!("/nix/store/hnkvggm7815dshjjxbfk3gsfkx8ayhi6-runtime/queries/python/locals.scm");
+
 pub(crate) const EVERFOREST_FG: Color = Color::rgb(0xd3, 0xc6, 0xaa);
 pub(crate) const EVERFOREST_RED: Color = Color::rgb(0xe6, 0x7e, 0x80);
 pub(crate) const EVERFOREST_ORANGE: Color = Color::rgb(0xe6, 0x98, 0x75);
@@ -103,6 +108,7 @@ pub fn language_for_path(path: &Path) -> Option<LanguageKind> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     match ext.as_str() {
         "rs" => Some(LanguageKind::Rust),
+        "py" => Some(LanguageKind::Python),
         "md" | "markdown" | "mdown" | "mkd" => Some(LanguageKind::Markdown),
         _ => None,
     }
@@ -117,6 +123,7 @@ struct HighlightRegistry {
     rust: HighlightConfiguration,
     markdown: HighlightConfiguration,
     markdown_inline: HighlightConfiguration,
+    python: HighlightConfiguration,
     styles: Vec<Style>,
 }
 
@@ -149,12 +156,22 @@ impl HighlightRegistry {
         )?;
         markdown_inline.configure(HIGHLIGHT_NAMES);
 
+        let mut python = HighlightConfiguration::new(
+            tree_sitter_python::LANGUAGE.into(),
+            "python",
+            PYTHON_HIGHLIGHTS_QUERY,
+            PYTHON_INJECTIONS_QUERY,
+            PYTHON_LOCALS_QUERY,
+        )?;
+        python.configure(HIGHLIGHT_NAMES);
+
         let styles = HIGHLIGHT_NAMES.iter().map(|name| style_for(name)).collect();
 
         Ok(Self {
             rust,
             markdown,
             markdown_inline,
+            python,
             styles,
         })
     }
@@ -165,6 +182,11 @@ impl HighlightRegistry {
             LanguageKind::Rust => {
                 let iterator =
                     highlighter.highlight(&self.rust, source.as_bytes(), None, |_| None)?;
+                events_to_lines(iterator, source, &self.styles)
+            }
+            LanguageKind::Python => {
+                let iterator =
+                    highlighter.highlight(&self.python, source.as_bytes(), None, |_| None)?;
                 events_to_lines(iterator, source, &self.styles)
             }
             LanguageKind::Markdown => {
