@@ -402,6 +402,16 @@ impl<Msg> Node<Msg> {
         self
     }
 
+    pub fn with_padding(mut self, val: u32) -> Self {
+        self.layout_state.style.padding = Rect {
+            top: LengthPercentage::length(val as f32),
+            bottom: LengthPercentage::length(val as f32),
+            left: LengthPercentage::length(val as f32),
+            right: LengthPercentage::length(val as f32),
+        };
+        self
+    }
+
     pub fn with_style(mut self, style: Style) -> Self {
         match &mut self.content {
             NodeContent::Element(element) => {
