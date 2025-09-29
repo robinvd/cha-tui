@@ -11,6 +11,7 @@ use chatui::{Program, Style, Transition, block_with_title, column, modal, rich_t
 use color_eyre::eyre::{Context, Result, eyre};
 use taffy::Dimension;
 use taffy::prelude::{FromLength, TaffyZero};
+use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod highlight;
@@ -37,12 +38,13 @@ fn map_event(event: Event) -> Option<Msg> {
 }
 
 fn update(model: &mut Model, msg: Msg) -> Transition {
+    info!("update {msg:?}");
     match msg {
         Msg::KeyPressed(key) => handle_key(model, key),
         Msg::Staged(msg) => handle_section_msg(model, Focus::Staged, msg),
         Msg::Unstaged(msg) => handle_section_msg(model, Focus::Unstaged, msg),
         Msg::DiffScroll(scroll_msg) => {
-            model.update_diff_scroll(scroll_msg);
+            model.diff_scroll.update(scroll_msg);
             Transition::Continue
         }
         Msg::UnstagedScroll(scroll_msg) => {
@@ -198,9 +200,7 @@ fn view(model: &Model) -> Node<Msg> {
             .with_flex_grow(3.)
             .with_flex_basis(Dimension::ZERO)
             .with_min_height(Dimension::ZERO)
-            .with_min_width(Dimension::ZERO)
-            .with_overflow_y(taffy::Overflow::Scroll)
-            .with_overflow_x(taffy::Overflow::Clip),
+            .with_min_width(Dimension::ZERO),
     ])
     .with_width(Dimension::percent(1.))
     .with_flex_basis(Dimension::ZERO)
@@ -360,13 +360,13 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
         &model.diff_scroll,
         3,
         Msg::DiffScroll,
-        render_diff_lines(&model.diff_lines),
+        block_with_title(diff_title, vec![render_diff_lines(&model.diff_lines)]),
     )
     .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
     .with_flex_basis(Dimension::ZERO);
 
-    block_with_title(diff_title, vec![content])
+    column(vec![content])
         .with_min_height(Dimension::ZERO)
         .with_flex_grow(1.)
         .with_flex_basis(Dimension::ZERO)
@@ -388,10 +388,7 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
         .map(|line| rich_text::<Msg>(line.spans.clone()).with_overflow_x(taffy::Overflow::Clip))
         .collect();
 
-    column(rendered)
-        .with_min_height(Dimension::ZERO)
-        .with_flex_grow(1.)
-        .with_flex_basis(Dimension::ZERO)
+    column(rendered).with_id("diff_lines")
 }
 
 fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
@@ -719,21 +716,7 @@ impl Model {
     }
 
     fn scroll_diff(&mut self, delta: i32) {
-        self.update_diff_scroll(ScrollMsg::Delta(delta));
-    }
-
-    fn update_diff_scroll(&mut self, msg: ScrollMsg) {
-        match msg {
-            ScrollMsg::Delta(delta) => {
-                if self.diff_lines.is_empty() {
-                    return;
-                }
-                self.diff_scroll.update(ScrollMsg::Delta(delta));
-            }
-            ScrollMsg::Resize { .. } => {
-                self.diff_scroll.update(msg);
-            }
-        }
+        self.diff_scroll.update(ScrollMsg::Delta(delta));
     }
 
     fn scroll_files(&mut self, focus: Focus, delta: i32) {
@@ -786,6 +769,7 @@ impl Model {
     }
 }
 
+#[derive(Debug)]
 enum Msg {
     KeyPressed(Key),
     Staged(SectionMsg),
@@ -795,6 +779,7 @@ enum Msg {
     StagedScroll(ScrollMsg),
 }
 
+#[derive(Debug)]
 enum SectionMsg {
     ActivateFile(usize),
     ToggleStageEntry(usize),

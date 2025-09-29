@@ -254,12 +254,12 @@ impl<Model, Msg> Program<Model, Msg> {
             // TODO early exit if Transition::Quit
             let mut quit = false;
             view.report_changed(&mut |node: &Node<Msg>| {
-                if let Some(resize_callback) = &node.on_resize {
-                    if let Some(msg) = resize_callback(&node.layout_state.layout) {
-                        match (self.update)(&mut self.model, msg) {
-                            Transition::Quit => quit = true,
-                            Transition::Continue => {}
-                        }
+                if let Some(resize_callback) = &node.on_resize
+                    && let Some(msg) = resize_callback(&node.layout_state.layout)
+                {
+                    match (self.update)(&mut self.model, msg) {
+                        Transition::Quit => quit = true,
+                        Transition::Continue => {}
                     }
                 }
             });

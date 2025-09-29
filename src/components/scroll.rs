@@ -2,6 +2,7 @@ use std::rc::Rc;
 
 use crate::{dom::Node, event::Size};
 use taffy::Overflow;
+use tracing::info;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct ScrollState {
@@ -35,6 +36,7 @@ impl ScrollState {
                 self.clamp_offset();
             }
         }
+        info!("scroll state update {self:?}");
     }
 
     pub fn reset(&mut self) {
@@ -82,6 +84,8 @@ pub fn scrollable_content<Msg>(
     let mouse_handler = Rc::clone(&map_msg);
     let resize_handler = Rc::clone(&map_msg);
     let step = wheel_step.abs().max(1);
+
+    info!("scoll offset {} {}", id, state.offset());
 
     child
         .with_id(id)

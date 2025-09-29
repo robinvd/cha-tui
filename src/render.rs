@@ -74,62 +74,74 @@ impl<'a> Renderer<'a> {
         self.surface
             .add_change(Change::ClearScreen(ColorAttribute::Default));
 
-        let origin = Rect {
+        let clip = Rect {
             x: 0,
             y: 0,
             width,
             height,
         };
-        self.render_node(root, origin, 0.0);
+        self.render_node(root, Point { x: 0, y: 0 }, clip, 0.0);
         self.surface
             .add_change(Change::CursorVisibility(CursorVisibility::Hidden));
 
         Ok(())
     }
 
-    fn render_node<Msg>(&mut self, node: &Node<Msg>, parent_origin: Rect, inherited_scroll_y: f32) {
+    fn render_node<Msg>(
+        &mut self,
+        node: &Node<Msg>,
+        parent_origin: Point,
+        clip: Rect,
+        inherited_scroll_y: f32,
+    ) {
         let layout = node.layout_state.layout;
         let node_origin = Point {
             x: parent_origin.x + layout.location.x as usize,
             y: parent_origin.y + (layout.location.y - inherited_scroll_y).max(0.0) as usize,
         };
 
-        let Some(area) = rect_from_layout(&layout, node_origin) else {
+        let Some(mut area) = rect_from_layout(&layout, node_origin) else {
             return;
         };
         if !area.has_area() {
             return;
         }
 
-        let area = area.intersection(parent_origin);
+        area = area.intersection(clip);
         if !area.has_area() {
             return;
         }
 
         match &node.content {
-            NodeContent::Text(text) => self.render_text(text, area),
+            NodeContent::Text(text) => self.render_text(text, node_origin, area),
             NodeContent::Element(element) => {
                 let is_scroll = node.layout_state.style.overflow.y == taffy::Overflow::Scroll;
+                let border_style =
+                    if matches!(element.kind, ElementKind::Block) && element.attrs.style.border {
+                        Some(&element.attrs.style)
+                    } else {
+                        None
+                    };
                 let next_scroll = if is_scroll {
                     inherited_scroll_y + node.scroll_y
                 } else {
                     inherited_scroll_y
                 };
-                self.render_element(element, area, next_scroll);
+                self.render_element(element, node_origin, area, next_scroll);
                 if is_scroll {
-                    self.render_scrollbar(area, &layout, node.scroll_y);
+                    self.render_scrollbar(node_origin, area, &layout, node.scroll_y, border_style);
                 }
             }
         }
     }
 
-    fn render_text<Msg>(&mut self, text: &TextNode<Msg>, area: Rect) {
-        let mut remaining = area.width;
+    fn render_text<Msg>(&mut self, text: &TextNode<Msg>, _parent_origin: Point, clip: Rect) {
+        let mut remaining = clip.width;
         if remaining == 0 {
             return;
         }
 
-        let mut cursor_x = area.x;
+        let mut cursor_x = clip.x;
 
         let mut fill_style: Option<Style> = None;
         for span in text.spans() {
@@ -158,7 +170,7 @@ impl<'a> Renderer<'a> {
 
             self.surface.add_change(Change::CursorPosition {
                 x: Position::Absolute(cursor_x),
-                y: Position::Absolute(area.y),
+                y: Position::Absolute(clip.y),
             });
             self.surface
                 .add_change(Change::AllAttributes(style_to_attributes(&span.style)));
@@ -173,7 +185,7 @@ impl<'a> Renderer<'a> {
         {
             self.surface.add_change(Change::CursorPosition {
                 x: Position::Absolute(cursor_x),
-                y: Position::Absolute(area.y),
+                y: Position::Absolute(clip.y),
             });
             self.surface
                 .add_change(Change::AllAttributes(style_to_attributes(&style)));
@@ -181,28 +193,48 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    fn render_element<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, scroll_y: f32) {
+    fn render_element<Msg>(
+        &mut self,
+        element: &ElementNode<Msg>,
+        parent_origin: Point,
+        clip: Rect,
+        scroll_y: f32,
+    ) {
         match element.kind {
-            ElementKind::Block => self.render_block(element, area, scroll_y),
-            ElementKind::Modal => self.render_modal(element, area, scroll_y),
+            ElementKind::Block => self.render_block(element, parent_origin, clip, scroll_y),
+            ElementKind::Modal => self.render_modal(element, parent_origin, clip, scroll_y),
             ElementKind::Column | ElementKind::Row => {
-                self.render_children(&element.children, area, scroll_y)
+                self.render_children(&element.children, parent_origin, clip, scroll_y)
             }
         }
     }
 
-    fn render_children<Msg>(&mut self, children: &[Node<Msg>], clip: Rect, scroll_y: f32) {
+    fn render_children<Msg>(
+        &mut self,
+        children: &[Node<Msg>],
+        parent_origin: Point,
+        clip: Rect,
+        scroll_y: f32,
+    ) {
         for child in children {
-            self.render_node(child, clip, scroll_y);
+            self.render_node(child, parent_origin, clip, scroll_y);
         }
     }
 
-    fn render_scrollbar(&mut self, area: Rect, layout: &TaffyLayout, scroll_offset: f32) {
+    fn render_scrollbar(
+        &mut self,
+        parent_origin: Point,
+        clip: Rect,
+        layout: &TaffyLayout,
+        scroll_offset: f32,
+        block_border_style: Option<&Style>,
+    ) {
+        let _ = parent_origin;
         let scrollbar_width = layout.scrollbar_size.width.max(0.0).round() as usize;
-        if scrollbar_width == 0 || area.width == 0 || area.height == 0 {
+        if scrollbar_width == 0 || clip.width == 0 || clip.height == 0 {
             return;
         }
-        if area.width < scrollbar_width {
+        if clip.width < scrollbar_width {
             return;
         }
 
@@ -216,16 +248,28 @@ impl<'a> Renderer<'a> {
             return;
         }
 
-        let track_height = area.height;
+        let share_border_column = block_border_style.is_some() && scrollbar_width == 1;
+        let track_top = if share_border_column {
+            clip.y.saturating_add(1)
+        } else {
+            clip.y
+        };
+        let track_height = if share_border_column {
+            clip.height.saturating_sub(2)
+        } else {
+            clip.height
+        };
         if track_height == 0 {
             return;
         }
 
-        let scrollbar_x = area.x + area.width - scrollbar_width;
-        let track_attrs = CellAttributes::default();
-        for y in area.y..(area.y + track_height) {
-            for x in scrollbar_x..(scrollbar_x + scrollbar_width) {
-                self.write_char(x, y, SCROLLBAR_TRACK_CHAR, &track_attrs);
+        let scrollbar_x = clip.x + clip.width - scrollbar_width;
+        if !share_border_column {
+            let track_attrs = CellAttributes::default();
+            for y in clip.y..(clip.y + track_height) {
+                for x in scrollbar_x..(scrollbar_x + scrollbar_width) {
+                    self.write_char(x, y, SCROLLBAR_TRACK_CHAR, &track_attrs);
+                }
             }
         }
 
@@ -248,12 +292,15 @@ impl<'a> Renderer<'a> {
         } else {
             ((clamped_scroll / max_scroll) * travel as f32).round() as usize
         };
-        let thumb_top = area.y + thumb_top_offset;
+        let thumb_top = track_top + thumb_top_offset;
         let thumb_bottom = thumb_top
             .saturating_add(thumb_height)
-            .min(area.y + track_height);
+            .min(track_top + track_height);
 
-        let mut thumb_attrs = CellAttributes::default();
+        let mut thumb_attrs = match block_border_style {
+            Some(style) => style_to_attributes(style),
+            None => CellAttributes::default(),
+        };
         thumb_attrs.set_intensity(Intensity::Bold);
 
         for y in thumb_top..thumb_bottom {
@@ -263,26 +310,42 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    fn render_modal<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, scroll_y: f32) {
-        self.apply_overlay_style(area, &element.attrs.style);
-        self.render_children(&element.children, area, scroll_y);
+    fn render_modal<Msg>(
+        &mut self,
+        element: &ElementNode<Msg>,
+        parent_origin: Point,
+        clip: Rect,
+        scroll_y: f32,
+    ) {
+        self.apply_overlay_style(clip, &element.attrs.style);
+        self.render_children(&element.children, parent_origin, clip, scroll_y);
     }
 
-    fn render_block<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, scroll_y: f32) {
-        self.draw_border(area, &element.attrs.style);
+    fn render_block<Msg>(
+        &mut self,
+        element: &ElementNode<Msg>,
+        parent_origin: Point,
+        clip: Rect,
+        scroll_y: f32,
+    ) {
+        self.draw_border(clip, &element.attrs.style);
         if let Some(title) = &element.title {
-            self.render_block_title(title, area, &element.attrs.style);
+            self.render_block_title(title, parent_origin, clip, &element.attrs.style);
         }
-        self.render_children(
-            &element.children,
-            Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width.saturating_sub(1),
-                height: area.height.saturating_sub(1),
-            },
-            scroll_y,
-        );
+        if clip.width <= 1 || clip.height <= 2 {
+            return;
+        }
+        let child_origin = Point {
+            x: parent_origin.x,
+            y: parent_origin.y,
+        };
+        let child_area = Rect {
+            x: clip.x,
+            y: clip.y + 1,
+            width: clip.width.saturating_sub(1),
+            height: clip.height.saturating_sub(1),
+        };
+        self.render_children(&element.children, child_origin, child_area, scroll_y);
     }
 
     fn draw_border(&mut self, area: Rect, style: &Style) {
@@ -322,13 +385,19 @@ impl<'a> Renderer<'a> {
         }
     }
 
-    fn render_block_title(&mut self, title: &str, area: Rect, style: &Style) {
-        if area.width <= 2 {
+    fn render_block_title(
+        &mut self,
+        title: &str,
+        _parent_origin: Point,
+        clip: Rect,
+        style: &Style,
+    ) {
+        if clip.width <= 2 {
             return;
         }
 
         let mut rendered = String::new();
-        let mut available_columns = area.width.saturating_sub(2);
+        let mut available_columns = clip.width.saturating_sub(2);
 
         for ch in title.chars() {
             let mut buf = [0u8; 4];
@@ -351,8 +420,8 @@ impl<'a> Renderer<'a> {
 
         let attrs = style_to_attributes(style);
         self.surface.add_change(Change::CursorPosition {
-            x: Position::Absolute(area.x + 1),
-            y: Position::Absolute(area.y),
+            x: Position::Absolute(clip.x + 1),
+            y: Position::Absolute(clip.y),
         });
         self.surface
             .add_change(Change::AllAttributes(attrs.clone()));
@@ -504,6 +573,31 @@ mod tests {
         let mut renderer = Renderer::new(&mut surface);
         renderer
             .render(&root, Size::new(6, 5))
+            .expect("render should succeed");
+
+        renderer
+            .surface()
+            .screen_chars_to_string()
+            .lines()
+            .map(|line| line.to_string())
+            .collect()
+    }
+
+    fn render_scrollable_block_lines(scroll_offset: f32) -> Vec<String> {
+        let mut surface = Surface::new(8, 7);
+        let lines: Vec<Node<()>> = (0..20)
+            .map(|idx| text::<()>(format!("Item {idx}")))
+            .collect();
+        let scrollable = block::<()>(vec![column(lines)])
+            .with_scroll(scroll_offset)
+            .with_width(Dimension::percent(1.0))
+            .with_height(Dimension::percent(1.0));
+        let mut root = scrollable;
+        prepare_layout(&mut root, Size::new(8, 7));
+
+        let mut renderer = Renderer::new(&mut surface);
+        renderer
+            .render(&root, Size::new(8, 7))
             .expect("render should succeed");
 
         renderer
@@ -845,7 +939,12 @@ mod tests {
         let lines: Vec<&str> = screen.lines().collect();
 
         assert!(lines[0].starts_with("┌"));
-        assert!(lines[1].starts_with("│TODOs"));
+        assert!(
+            lines
+                .get(2)
+                .map(|line| line.starts_with("│TODOs"))
+                .unwrap_or(false)
+        );
         assert!(
             lines.iter().any(|line| line.starts_with("│┌")),
             "expected nested block border"
@@ -853,7 +952,7 @@ mod tests {
         assert!(
             lines
                 .iter()
-                .any(|line| line.contains("[ ] Add focus styles"))
+                .any(|line| line.contains("[ ] Polish TODO example"))
         );
     }
 
@@ -925,6 +1024,44 @@ mod tests {
             bottom_rows.last().copied().unwrap() >= bottom_lines.len().saturating_sub(2),
             "expected thumb near bottom: {:?}",
             bottom_rows
+        );
+    }
+
+    #[test]
+    fn scrollbar_shares_block_border_column() {
+        let lines = render_scrollable_block_lines(5.0);
+        assert!(!lines.is_empty(), "expected rendered lines");
+
+        let right_column: Vec<char> = lines
+            .iter()
+            .filter_map(|line| line.chars().nth(7))
+            .collect();
+
+        assert_eq!(right_column.first().copied(), Some('┐'));
+        assert_eq!(right_column.last().copied(), Some('┘'));
+
+        let interior = &right_column[1..right_column.len().saturating_sub(1)];
+        assert!(
+            interior.iter().any(|&ch| ch == '│'),
+            "expected shared border track in {:?}",
+            interior
+        );
+        assert!(
+            interior.iter().any(|&ch| ch == SCROLLBAR_THUMB_CHAR),
+            "expected thumb to reuse border column in {:?}",
+            interior
+        );
+    }
+
+    #[test]
+    fn scrollbar_preserves_block_top_border() {
+        let lines = render_scrollable_block_lines(8.0);
+        assert!(!lines.is_empty(), "expected rendered lines");
+        let top = lines.first().expect("expected top line");
+        assert_eq!(top, "┌──────┐");
+        assert_eq!(
+            lines.get(1).expect("expected first content row"),
+            "│Item  │"
         );
     }
 }

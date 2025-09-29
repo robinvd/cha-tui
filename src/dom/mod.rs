@@ -22,6 +22,8 @@ use taffy::{
 };
 use termwiz::cell::unicode_column_width;
 
+type ResizeHandler<Msg> = Rc<dyn Fn(&TaffyLayout) -> Option<Msg>>;
+
 #[derive(Clone)]
 pub struct Node<Msg> {
     classname: &'static str,
@@ -32,7 +34,7 @@ pub struct Node<Msg> {
     pub(crate) scroll_y: f32,
 
     pub(crate) on_mouse: Option<Rc<dyn Fn(MouseEvent) -> Option<Msg>>>,
-    pub(crate) on_resize: Option<Rc<dyn Fn(&TaffyLayout) -> Option<Msg>>>,
+    pub(crate) on_resize: Option<ResizeHandler<Msg>>,
 }
 
 impl<Msg: fmt::Debug> fmt::Debug for Node<Msg> {
@@ -531,9 +533,8 @@ impl<Msg> Node<Msg> {
         y: u16,
         callback: &mut impl FnMut(&Node<Msg>) -> Option<T>,
     ) -> Option<T> {
-        let result = Self::hit_test_inner(self, x, y, 0.0, 0.0, 0.0, callback);
-        // info!("hit test: {:?}", result.map(|n| n.classname));
-        result
+        // info!("hit test: {:?}", Self::hit_test_inner(self, x, y, 0.0, 0.0, 0.0, callback).map(|n| n.classname));
+        Self::hit_test_inner(self, x, y, 0.0, 0.0, 0.0, callback)
     }
 
     fn hit_test_inner<T>(
