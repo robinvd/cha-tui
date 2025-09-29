@@ -343,7 +343,7 @@ impl<'a> Renderer<'a> {
             x: clip.x,
             y: clip.y + 1,
             width: clip.width.saturating_sub(1),
-            height: clip.height.saturating_sub(1),
+            height: clip.height.saturating_sub(2),
         };
         self.render_children(&element.children, child_origin, child_area, scroll_y);
     }
@@ -939,16 +939,8 @@ mod tests {
         let lines: Vec<&str> = screen.lines().collect();
 
         assert!(lines[0].starts_with("┌"));
-        assert!(
-            lines
-                .get(2)
-                .map(|line| line.starts_with("│TODOs"))
-                .unwrap_or(false)
-        );
-        assert!(
-            lines.iter().any(|line| line.starts_with("│┌")),
-            "expected nested block border"
-        );
+        assert_eq!(&lines.get(1).unwrap()[..8], "│TODOs");
+        assert_eq!(&lines.get(2).unwrap()[..6], "│┌");
         assert!(
             lines
                 .iter()

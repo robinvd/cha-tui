@@ -15,8 +15,8 @@ use taffy::{
     LayoutPartialTree,
     geometry::Rect,
     style::{
-        AlignItems, FlexDirection, JustifyContent, LengthPercentage, LengthPercentageAuto,
-        Position, Style as TaffyStyle,
+        AlignItems, FlexDirection, FlexWrap, JustifyContent, LengthPercentage,
+        LengthPercentageAuto, Position, Style as TaffyStyle,
     },
     tree::{Cache as TaffyCache, Layout as TaffyLayout, NodeId, TraversePartialTree},
 };
@@ -369,6 +369,11 @@ impl<Msg> Node<Msg> {
         self
     }
 
+    pub fn with_flex_wrap(mut self, val: FlexWrap) -> Self {
+        self.layout_state.style.flex_wrap = val;
+        self
+    }
+
     pub fn with_height(mut self, val: taffy::Dimension) -> Self {
         self.layout_state.style.size.height = val;
         self
@@ -410,6 +415,16 @@ impl<Msg> Node<Msg> {
             bottom: LengthPercentage::length(val as f32),
             left: LengthPercentage::length(val as f32),
             right: LengthPercentage::length(val as f32),
+        };
+        self
+    }
+
+    pub fn with_padding_2d(mut self, x: u32, y: u32) -> Self {
+        self.layout_state.style.padding = Rect {
+            top: LengthPercentage::length(y as f32),
+            bottom: LengthPercentage::length(y as f32),
+            left: LengthPercentage::length(x as f32),
+            right: LengthPercentage::length(x as f32),
         };
         self
     }

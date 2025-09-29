@@ -11,6 +11,7 @@ use chatui::{Program, Style, Transition, block_with_title, column, modal, rich_t
 use color_eyre::eyre::{Context, Result, eyre};
 use taffy::Dimension;
 use taffy::prelude::{FromLength, TaffyZero};
+use taffy::style::FlexWrap;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
@@ -135,6 +136,12 @@ fn handle_key(model: &mut Model, key: Key) -> Transition {
             model.scroll_diff(-1);
             Transition::Continue
         }
+        KeyCode::Char('?') => {
+            if !key.alt && !key.ctrl {
+                model.toggle_shortcuts_help();
+            }
+            Transition::Continue
+        }
         KeyCode::Char('j') => {
             model.scroll_files(model.focus, 1);
             Transition::Continue
@@ -180,7 +187,13 @@ fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition {
                 return Transition::Continue;
             }
 
-            if !key.alt {
+            if key.alt {
+                return Transition::Continue;
+            }
+
+            if ch == '?' {
+                model.toggle_shortcuts_help();
+            } else {
                 model.append_commit_char(ch);
             }
             Transition::Continue
@@ -219,7 +232,9 @@ fn view(model: &Model) -> Node<Msg> {
 
     let header = rich_text::<Msg>(header_spans);
 
-    let base = column(vec![header, layout]).with_fill().with_id("root");
+    let base = column(vec![header, layout, render_shortcuts_bar(model)])
+        .with_fill()
+        .with_id("root");
 
     match &model.commit_modal {
         Some(modal) => column(vec![base, render_commit_modal(modal)])
@@ -373,6 +388,63 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
         .with_id("diff-pane")
 }
 
+fn render_shortcuts_bar(model: &Model) -> Node<Msg> {
+    let shortcuts: Vec<(&str, &str)> = if model.commit_modal.is_some() {
+        vec![
+            ("Ctrl-D", "Commit"),
+            ("Esc", "Cancel"),
+            ("Backspace", "Delete character"),
+            ("Ctrl-C", "Quit app"),
+            // ("?", "Hide shortcuts"),
+        ]
+    } else {
+        vec![
+            ("Esc / q", "Quit"),
+            ("Ctrl-C", "Quit immediately"),
+            ("Enter", "Stage / Unstage"),
+            ("Double-click", "Stage / Unstage"),
+            ("Left / Right", "Change focus"),
+            ("Up / Down", "Move selection"),
+            ("j / k", "Scroll files"),
+            ("J / K", "Scroll diff"),
+            ("r", "Refresh status"),
+            ("c", "Open commit"),
+            // ("?", "Hide shortcuts"),
+        ]
+    };
+    let items: Vec<Node<Msg>> = shortcuts
+        .into_iter()
+        .enumerate()
+        .map(|(idx, (key, description))| {
+            let spans = vec![
+                TextSpan::new(key, shortcut_key_style()),
+                TextSpan::new(" ", Style::default()),
+                TextSpan::new(description, shortcut_description_style()),
+            ];
+
+            row(vec![rich_text::<Msg>(spans)])
+                .with_padding_2d(1, 0)
+                .with_flex_grow(0.)
+                .with_flex_shrink(0.)
+                .with_id_mixin("shortcut-item", idx as u64)
+        })
+        .collect();
+
+    let mut shortcuts_row = row(items)
+        .with_width(Dimension::percent(1.))
+        .with_id("shortcuts-items");
+
+    if model.show_all_shortcuts {
+        shortcuts_row = shortcuts_row.with_flex_wrap(FlexWrap::Wrap);
+    }
+
+    block_with_title("Shortcuts", vec![shortcuts_row])
+        .with_min_height(Dimension::ZERO)
+        .with_flex_grow(0.)
+        .with_flex_shrink(0.)
+        .with_id("shortcuts-bar")
+}
+
 fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
     if lines.is_empty() {
         return column(vec![
@@ -437,6 +509,16 @@ fn inactive_selection_style() -> Style {
     }
 }
 
+fn shortcut_key_style() -> Style {
+    let mut style = Style::bold();
+    style.fg = Some(highlight::EVERFOREST_BLUE);
+    style
+}
+
+fn shortcut_description_style() -> Style {
+    Style::dim()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum Focus {
     #[default]
@@ -492,6 +574,7 @@ struct Model {
 
     error: Option<String>,
     commit_modal: Option<CommitModal>,
+    show_all_shortcuts: bool,
 }
 
 impl Model {
@@ -520,6 +603,10 @@ impl Model {
 
     fn close_commit_modal(&mut self) {
         self.commit_modal = None;
+    }
+
+    fn toggle_shortcuts_help(&mut self) {
+        self.show_all_shortcuts = !self.show_all_shortcuts;
     }
 
     fn append_commit_char(&mut self, ch: char) {
