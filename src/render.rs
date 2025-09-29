@@ -184,6 +184,7 @@ impl<'a> Renderer<'a> {
     fn render_element<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, scroll_y: f32) {
         match element.kind {
             ElementKind::Block => self.render_block(element, area, scroll_y),
+            ElementKind::Modal => self.render_modal(element, area, scroll_y),
             ElementKind::Column | ElementKind::Row => {
                 self.render_children(&element.children, area, scroll_y)
             }
@@ -260,6 +261,11 @@ impl<'a> Renderer<'a> {
                 self.write_char(x, y, SCROLLBAR_THUMB_CHAR, &thumb_attrs);
             }
         }
+    }
+
+    fn render_modal<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, scroll_y: f32) {
+        self.apply_overlay_style(area, &element.attrs.style);
+        self.render_children(&element.children, area, scroll_y);
     }
 
     fn render_block<Msg>(&mut self, element: &ElementNode<Msg>, area: Rect, scroll_y: f32) {
@@ -368,6 +374,34 @@ impl<'a> Renderer<'a> {
         self.surface.add_change(Change::Text(ch.to_string()));
     }
 
+    fn apply_overlay_style(&mut self, area: Rect, style: &Style) {
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let mut rows = self.surface.screen_cells();
+
+        for row in rows.iter_mut().skip(area.y).take(area.height) {
+            let start = area.x.min(row.len());
+            let end = (area.x + area.width).min(row.len());
+
+            for cell in &mut row[start..end] {
+                let attrs = cell.attrs_mut();
+                if let Some(fg) = style.fg {
+                    attrs.set_foreground(color_to_attribute(fg));
+                }
+                if let Some(bg) = style.bg {
+                    attrs.set_background(color_to_attribute(bg));
+                }
+                if style.bold {
+                    attrs.set_intensity(Intensity::Bold);
+                } else if style.dim {
+                    attrs.set_intensity(Intensity::Half);
+                }
+            }
+        }
+    }
+
     pub fn surface(&self) -> &Surface {
         &*self.surface
     }
@@ -436,7 +470,7 @@ mod tests {
     use super::*;
     use crate::dom::rounding::round_layout;
     use crate::dom::{
-        Color, Style, TextSpan, block, block_with_title, column, rich_text, row, text,
+        Color, Style, TextSpan, block, block_with_title, column, modal, rich_text, row, text,
     };
     use taffy::{AvailableSpace, Dimension, compute_root_layout};
     use termwiz::surface::CursorVisibility;
@@ -680,6 +714,48 @@ mod tests {
         assert_eq!(chars.last(), Some(&'┐'));
         let rendered_title: String = chars[1..1 + TITLE.len()].iter().collect();
         assert_eq!(rendered_title, TITLE);
+    }
+
+    #[test]
+    fn modal_renders_dim_overlay() {
+        let mut surface = Surface::new(12, 6);
+        let mut renderer = Renderer::new(&mut surface);
+
+        let base = column(vec![
+            text::<()>("Base content"),
+            text::<()>("stays underneath"),
+        ])
+        .with_fill();
+
+        let modal_content = block::<()>(vec![column(vec![text::<()>("Confirm commit")])])
+            .with_min_width(Dimension::length(8.0))
+            .with_min_height(Dimension::length(4.0));
+
+        let overlay = modal(vec![modal_content]);
+
+        let mut root = column(vec![base, overlay]).with_fill();
+        prepare_layout(&mut root, Size::new(12, 6));
+
+        renderer
+            .render(&root, Size::new(12, 6))
+            .expect("render should succeed");
+
+        let screen = renderer.surface().screen_chars_to_string();
+        let lines: Vec<&str> = screen.lines().collect();
+        assert!(lines.len() >= 2);
+        assert!(lines[0].contains("Base content"));
+
+        let block_row = lines
+            .iter()
+            .position(|line| line.contains('┌'))
+            .expect("expected modal border");
+        assert!(block_row > 0);
+        let block_col = lines[block_row].find('┌').expect("expected border char");
+        assert!(block_col < lines[block_row].len());
+
+        let rows = renderer.surface_mut().screen_cells();
+        let first_attrs = rows[0][0].attrs().clone();
+        assert_eq!(first_attrs.intensity(), Intensity::Half);
     }
 
     #[test]

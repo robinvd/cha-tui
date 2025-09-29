@@ -7,7 +7,7 @@ use std::process::Command;
 use chatui::components::scroll::{ScrollMsg, ScrollState, scrollable_content};
 use chatui::dom::{Node, TextSpan};
 use chatui::event::{Event, Key, KeyCode};
-use chatui::{Program, Style, Transition, block_with_title, column, rich_text, row, text};
+use chatui::{Program, Style, Transition, block_with_title, column, modal, rich_text, row, text};
 use color_eyre::eyre::{Context, Result, eyre};
 use taffy::Dimension;
 use taffy::prelude::{FromLength, TaffyZero};
@@ -30,11 +30,7 @@ fn main() -> Result<()> {
 
 fn map_event(event: Event) -> Option<Msg> {
     if let Event::Key(key) = event {
-        if matches!(key.code, KeyCode::Char('r') | KeyCode::Char('R')) {
-            Some(Msg::ReloadStatus)
-        } else {
-            Some(Msg::KeyPressed(key))
-        }
+        Some(Msg::KeyPressed(key))
     } else {
         None
     }
@@ -43,12 +39,6 @@ fn map_event(event: Event) -> Option<Msg> {
 fn update(model: &mut Model, msg: Msg) -> Transition {
     match msg {
         Msg::KeyPressed(key) => handle_key(model, key),
-        Msg::ReloadStatus => {
-            if let Err(err) = model.refresh_status() {
-                model.set_error(err);
-            }
-            Transition::Continue
-        }
         Msg::Staged(msg) => handle_section_msg(model, Focus::Staged, msg),
         Msg::Unstaged(msg) => handle_section_msg(model, Focus::Unstaged, msg),
         Msg::DiffScroll(scroll_msg) => {
@@ -104,6 +94,10 @@ fn handle_key(model: &mut Model, key: Key) -> Transition {
         return Transition::Quit;
     }
 
+    if model.commit_modal.is_some() {
+        return handle_commit_modal_key(model, key);
+    }
+
     match key.code {
         KeyCode::Esc => Transition::Quit,
         KeyCode::Char('q') | KeyCode::Char('Q') => Transition::Quit,
@@ -147,6 +141,48 @@ fn handle_key(model: &mut Model, key: Key) -> Transition {
             model.scroll_files(model.focus, -1);
             Transition::Continue
         }
+        KeyCode::Char('c') | KeyCode::Char('C') => {
+            if !key.alt && !key.ctrl {
+                model.open_commit_modal();
+            }
+            Transition::Continue
+        }
+        KeyCode::Char('r') | KeyCode::Char('R') => {
+            if !key.alt
+                && !key.ctrl
+                && let Err(err) = model.refresh_status()
+            {
+                model.set_error(err);
+            }
+            Transition::Continue
+        }
+        _ => Transition::Continue,
+    }
+}
+
+fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition {
+    match key.code {
+        KeyCode::Esc => {
+            model.close_commit_modal();
+            Transition::Continue
+        }
+        KeyCode::Backspace => {
+            model.backspace_commit_message();
+            Transition::Continue
+        }
+        KeyCode::Char(ch) => {
+            if key.ctrl {
+                if matches!(ch, 'd' | 'D') {
+                    return model.submit_commit();
+                }
+                return Transition::Continue;
+            }
+
+            if !key.alt {
+                model.append_commit_char(ch);
+            }
+            Transition::Continue
+        }
         _ => Transition::Continue,
     }
 }
@@ -183,7 +219,14 @@ fn view(model: &Model) -> Node<Msg> {
 
     let header = rich_text::<Msg>(header_spans);
 
-    column(vec![header, layout]).with_fill().with_id("root")
+    let base = column(vec![header, layout]).with_fill().with_id("root");
+
+    match &model.commit_modal {
+        Some(modal) => column(vec![base, render_commit_modal(modal)])
+            .with_fill()
+            .with_id("root-with-modal"),
+        None => base,
+    }
 }
 
 fn render_left_pane(model: &Model) -> Node<Msg> {
@@ -351,6 +394,25 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
         .with_flex_basis(Dimension::ZERO)
 }
 
+fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
+    let title = text::<Msg>("Commit staged changes").with_style(Style::bold());
+    let instructions = text::<Msg>("Ctrl-D commits, Esc cancels").with_style(Style::dim());
+    let input_value = format!("> {}", state.display_value());
+    let input = text::<Msg>(input_value).with_style(Style::fg(highlight::EVERFOREST_GREEN));
+
+    let content = column(vec![title, instructions, input])
+        .with_min_width(Dimension::length(30.0))
+        .with_min_height(Dimension::length(3.0));
+
+    modal(vec![
+        block_with_title("Commit", vec![content])
+            .with_min_width(Dimension::length(42.0))
+            .with_min_height(Dimension::length(5.0))
+            .with_id("commit-modal-block"),
+    ])
+    .with_id("commit-modal")
+}
+
 fn title_style() -> Style {
     let mut style = Style::bold();
     style.fg = Some(highlight::EVERFOREST_BLUE);
@@ -403,6 +465,23 @@ impl FileEntry {
 }
 
 #[derive(Default)]
+struct CommitModal {
+    message: String,
+}
+
+impl CommitModal {
+    fn display_value(&self) -> String {
+        if self.message.is_empty() {
+            String::from("_")
+        } else {
+            let mut rendered = self.message.clone();
+            rendered.push('_');
+            rendered
+        }
+    }
+}
+
+#[derive(Default)]
 struct Model {
     unstaged: Vec<FileEntry>,
     staged: Vec<FileEntry>,
@@ -415,6 +494,7 @@ struct Model {
     staged_scroll: ScrollState,
 
     error: Option<String>,
+    commit_modal: Option<CommitModal>,
 }
 
 impl Model {
@@ -435,6 +515,52 @@ impl Model {
 
     fn clear_error(&mut self) {
         self.error = None;
+    }
+
+    fn open_commit_modal(&mut self) {
+        self.commit_modal = Some(CommitModal::default());
+    }
+
+    fn close_commit_modal(&mut self) {
+        self.commit_modal = None;
+    }
+
+    fn append_commit_char(&mut self, ch: char) {
+        if let Some(modal) = self.commit_modal.as_mut() {
+            modal.message.push(ch);
+        }
+    }
+
+    fn backspace_commit_message(&mut self) {
+        if let Some(modal) = self.commit_modal.as_mut() {
+            modal.message.pop();
+        }
+    }
+
+    fn submit_commit(&mut self) -> Transition {
+        let message = match self.commit_modal.as_ref() {
+            Some(modal) => modal.message.clone(),
+            None => return Transition::Continue,
+        };
+
+        if message.trim().is_empty() {
+            self.set_error(eyre!("Commit message cannot be empty"));
+            return Transition::Continue;
+        }
+
+        match run_git(["commit", "-m", message.as_str()]) {
+            Ok(_) => {
+                self.commit_modal = None;
+                if let Err(err) = self.refresh_status() {
+                    self.set_error(err);
+                }
+            }
+            Err(err) => {
+                self.set_error(err);
+            }
+        }
+
+        Transition::Continue
     }
 
     fn refresh_status(&mut self) -> Result<()> {
@@ -662,7 +788,6 @@ impl Model {
 
 enum Msg {
     KeyPressed(Key),
-    ReloadStatus,
     Staged(SectionMsg),
     Unstaged(SectionMsg),
     DiffScroll(ScrollMsg),

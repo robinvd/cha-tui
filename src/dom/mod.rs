@@ -14,7 +14,10 @@ use taffy::{
 use taffy::{
     LayoutPartialTree,
     geometry::Rect,
-    style::{FlexDirection, LengthPercentage, Style as TaffyStyle},
+    style::{
+        AlignItems, FlexDirection, JustifyContent, LengthPercentage, LengthPercentageAuto,
+        Position, Style as TaffyStyle,
+    },
     tree::{Cache as TaffyCache, Layout as TaffyLayout, NodeId, TraversePartialTree},
 };
 use termwiz::cell::unicode_column_width;
@@ -159,6 +162,7 @@ pub enum ElementKind {
     Column,
     Row,
     Block,
+    Modal,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -234,6 +238,26 @@ pub fn row<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
     node
 }
 
+pub fn modal<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
+    let mut element = ElementNode::new(ElementKind::Modal, children);
+    element.attrs.style = Style::dim();
+
+    let mut node = Node::new(NodeContent::Element(element));
+    node.layout_state.style.flex_direction = FlexDirection::Column;
+    node.layout_state.style.align_items = Some(AlignItems::Center);
+    node.layout_state.style.justify_content = Some(JustifyContent::Center);
+    node.layout_state.style.position = Position::Absolute;
+    node.layout_state.style.inset = Rect {
+        left: LengthPercentageAuto::length(0.0),
+        right: LengthPercentageAuto::length(0.0),
+        top: LengthPercentageAuto::length(0.0),
+        bottom: LengthPercentageAuto::length(0.0),
+    };
+    node.layout_state.style.size.width = taffy::Dimension::percent(1.0);
+    node.layout_state.style.size.height = taffy::Dimension::percent(1.0);
+    node
+}
+
 fn block_node_with_title<Msg>(title: Option<String>, children: Vec<Node<Msg>>) -> Node<Msg> {
     let mut element = ElementNode::new(ElementKind::Block, children);
     element.attrs.style.border = true;
@@ -279,6 +303,7 @@ impl<Msg> Node<Msg> {
                 ElementKind::Column => "col",
                 ElementKind::Row => "row",
                 ElementKind::Block => "block",
+                ElementKind::Modal => "modal",
             },
             NodeContent::Text(_text_node) => "text",
         }
@@ -789,6 +814,7 @@ impl<Msg> LayoutFlexboxContainer for Node<Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use taffy::style::{AlignItems, JustifyContent, LengthPercentageAuto, Position};
 
     #[test]
     fn text_node_preserves_content() {
@@ -845,6 +871,28 @@ mod tests {
             }
             None => panic!("expected element node"),
         }
+    }
+
+    #[test]
+    fn modal_node_configures_overlay() {
+        let child: Node<()> = text("modal child");
+        let node = modal(vec![child.clone()]);
+
+        let element = node.as_element().expect("expected element node");
+        assert_eq!(element.kind, ElementKind::Modal);
+        assert_eq!(element.children, vec![child]);
+        assert!(element.attrs.style.dim);
+
+        let style = node.layout_state().style.clone();
+        assert_eq!(style.position, Position::Absolute);
+        assert_eq!(style.align_items, Some(AlignItems::Center));
+        assert_eq!(style.justify_content, Some(JustifyContent::Center));
+        assert_eq!(style.inset.left, LengthPercentageAuto::length(0.0));
+        assert_eq!(style.inset.right, LengthPercentageAuto::length(0.0));
+        assert_eq!(style.inset.top, LengthPercentageAuto::length(0.0));
+        assert_eq!(style.inset.bottom, LengthPercentageAuto::length(0.0));
+        assert_eq!(style.size.width, taffy::Dimension::percent(1.0));
+        assert_eq!(style.size.height, taffy::Dimension::percent(1.0));
     }
 
     #[test]

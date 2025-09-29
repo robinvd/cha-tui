@@ -87,9 +87,14 @@ const MARKDOWN_INLINE_HIGHLIGHTS_QUERY: &str =
 const MARKDOWN_INLINE_INJECTIONS_QUERY: &str =
     include_str!("queries/markdown_inline_injections.scm");
 
-const PYTHON_HIGHLIGHTS_QUERY: &str = include_str!("/nix/store/hnkvggm7815dshjjxbfk3gsfkx8ayhi6-runtime/queries/python/highlights.scm");
-const PYTHON_INJECTIONS_QUERY: &str = include_str!("/nix/store/hnkvggm7815dshjjxbfk3gsfkx8ayhi6-runtime/queries/python/injections.scm");
-const PYTHON_LOCALS_QUERY: &str = include_str!("/nix/store/hnkvggm7815dshjjxbfk3gsfkx8ayhi6-runtime/queries/python/locals.scm");
+const PYTHON_HIGHLIGHTS_QUERY: &str = include_str!(
+    "/nix/store/hnkvggm7815dshjjxbfk3gsfkx8ayhi6-runtime/queries/python/highlights.scm"
+);
+const PYTHON_INJECTIONS_QUERY: &str = include_str!(
+    "/nix/store/hnkvggm7815dshjjxbfk3gsfkx8ayhi6-runtime/queries/python/injections.scm"
+);
+const PYTHON_LOCALS_QUERY: &str =
+    include_str!("/nix/store/hnkvggm7815dshjjxbfk3gsfkx8ayhi6-runtime/queries/python/locals.scm");
 
 pub(crate) const EVERFOREST_FG: Color = Color::rgb(0xd3, 0xc6, 0xaa);
 pub(crate) const EVERFOREST_RED: Color = Color::rgb(0xe6, 0x7e, 0x80);
