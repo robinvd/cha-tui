@@ -2,14 +2,15 @@ use crate::buffer::{CellAttributes, DoubleBuffer};
 use crate::dom::{ElementKind, ElementNode, Node, NodeContent, Style, TextNode};
 use crate::error::ProgramError;
 use crate::event::Size;
+use crate::palette::{Palette, Rgba};
 
-use termina::style::{ColorSpec, Intensity, RgbaColor};
 use termwiz::cell::unicode_column_width;
 
 use taffy::Layout as TaffyLayout;
 
 pub struct Renderer<'a> {
     buffer: &'a mut DoubleBuffer,
+    palette: &'a Palette,
 }
 
 #[derive(Clone, Copy)]
@@ -56,8 +57,8 @@ const SCROLLBAR_TRACK_CHAR: char = ' ';
 const SCROLLBAR_THUMB_CHAR: char = '█';
 
 impl<'a> Renderer<'a> {
-    pub fn new(buffer: &'a mut DoubleBuffer) -> Self {
-        Self { buffer }
+    pub fn new(buffer: &'a mut DoubleBuffer, palette: &'a Palette) -> Self {
+        Self { buffer, palette }
     }
 
     pub fn render<Msg>(&mut self, root: &Node<Msg>, size: Size) -> Result<(), ProgramError> {
@@ -159,7 +160,7 @@ impl<'a> Renderer<'a> {
                 fill_style = Some(span.style.clone());
             }
 
-            let attrs = style_to_attributes(&span.style);
+            let attrs = self.style_to_attributes(&span.style);
             self.buffer.write_text(cursor_x, clip.y, &collected, &attrs);
 
             cursor_x += taken;
@@ -169,9 +170,32 @@ impl<'a> Renderer<'a> {
         if remaining > 0
             && let Some(style) = fill_style
         {
-            let attrs = style_to_attributes(&style);
+            let attrs = self.style_to_attributes(&style);
             let padding = " ".repeat(remaining);
             self.buffer.write_text(cursor_x, clip.y, &padding, &attrs);
+        }
+    }
+
+    fn style_to_attributes(&self, style: &Style) -> CellAttributes {
+        let mut attrs = CellAttributes::default();
+        if let Some(fg) = style.fg {
+            attrs.set_foreground(self.color_to_rgba(fg));
+        }
+        if let Some(bg) = style.bg {
+            attrs.set_background(self.color_to_rgba(bg));
+        }
+        if style.bold {
+            attrs.set_bold(true);
+        } else if style.dim {
+            attrs.set_dim(true);
+        }
+        attrs
+    }
+
+    fn color_to_rgba(&self, color: crate::dom::Color) -> Rgba {
+        match color {
+            crate::dom::Color::Reset => self.palette.foreground,
+            crate::dom::Color::Rgba { r, g, b, a } => Rgba::new(r, g, b, a),
         }
     }
 
@@ -287,10 +311,10 @@ impl<'a> Renderer<'a> {
             .min(track_top + track_height);
 
         let mut thumb_attrs = match block_border_style {
-            Some(style) => style_to_attributes(style),
+            Some(style) => self.style_to_attributes(style),
             None => CellAttributes::default(),
         };
-        thumb_attrs.set_intensity(Intensity::Bold);
+        thumb_attrs.set_bold(true);
 
         for y in thumb_top..thumb_bottom {
             for x in scrollbar_x..(scrollbar_x + scrollbar_width) {
@@ -342,7 +366,7 @@ impl<'a> Renderer<'a> {
             return;
         }
 
-        let attrs = style_to_attributes(style);
+        let attrs = self.style_to_attributes(style);
 
         // Top border
         self.write_char(area.x, area.y, '┌', &attrs);
@@ -407,7 +431,7 @@ impl<'a> Renderer<'a> {
             return;
         }
 
-        let attrs = style_to_attributes(style);
+        let attrs = self.style_to_attributes(style);
         self.buffer.write_text(clip.x + 1, clip.y, &rendered, &attrs);
     }
 
@@ -420,19 +444,23 @@ impl<'a> Renderer<'a> {
             return;
         }
 
+        // Convert colors before the loop to avoid borrow checker issues
+        let fg_color = style.fg.map(|c| self.color_to_rgba(c));
+        let bg_color = style.bg.map(|c| self.color_to_rgba(c));
+
         for y in area.y..(area.y + area.height).min(self.buffer.dimensions().1) {
             for x in area.x..(area.x + area.width).min(self.buffer.dimensions().0) {
                 if let Some(cell) = self.buffer.get_cell_mut(x, y) {
-                    if let Some(fg) = style.fg {
-                        cell.attrs.set_foreground(color_to_colorspec(fg));
+                    if let Some(fg) = fg_color {
+                        cell.attrs.set_foreground(fg);
                     }
-                    if let Some(bg) = style.bg {
-                        cell.attrs.set_background(color_to_colorspec(bg));
+                    if let Some(bg) = bg_color {
+                        cell.attrs.set_background(bg);
                     }
                     if style.bold {
-                        cell.attrs.set_intensity(Intensity::Bold);
+                        cell.attrs.set_bold(true);
                     } else if style.dim {
-                        cell.attrs.set_intensity(Intensity::Dim);
+                        cell.attrs.set_dim(true);
                     }
                 }
             }
@@ -467,45 +495,6 @@ fn rect_from_layout(layout: &TaffyLayout, origin: Point) -> Option<Rect> {
     })
 }
 
-fn style_to_attributes(style: &Style) -> CellAttributes {
-    let mut attrs = CellAttributes::default();
-    if let Some(fg) = style.fg {
-        attrs.set_foreground(color_to_colorspec(fg));
-    }
-    if let Some(bg) = style.bg {
-        attrs.set_background(color_to_colorspec(bg));
-    }
-    if style.bold {
-        attrs.set_intensity(Intensity::Bold);
-    } else if style.dim {
-        attrs.set_intensity(Intensity::Dim);
-    }
-    attrs
-}
-
-fn color_to_colorspec(color: crate::dom::Color) -> ColorSpec {
-    match color {
-        crate::dom::Color::Reset => ColorSpec::Reset,
-        crate::dom::Color::Black => ColorSpec::PaletteIndex(0),
-        crate::dom::Color::Red => ColorSpec::PaletteIndex(1),
-        crate::dom::Color::Green => ColorSpec::PaletteIndex(2),
-        crate::dom::Color::Yellow => ColorSpec::PaletteIndex(3),
-        crate::dom::Color::Blue => ColorSpec::PaletteIndex(4),
-        crate::dom::Color::Magenta => ColorSpec::PaletteIndex(5),
-        crate::dom::Color::Cyan => ColorSpec::PaletteIndex(6),
-        crate::dom::Color::White => ColorSpec::PaletteIndex(7),
-        crate::dom::Color::Indexed(idx) => ColorSpec::PaletteIndex(idx),
-        crate::dom::Color::Rgb { r, g, b } => {
-            ColorSpec::TrueColor(RgbaColor {
-                red: r,
-                green: g,
-                blue: b,
-                alpha: 255,
-            })
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -513,6 +502,7 @@ mod tests {
     use crate::dom::{
         Color, Style, TextSpan, block, block_with_title, column, modal, rich_text, row, text,
     };
+    use crate::palette::Palette;
     use taffy::{AvailableSpace, Dimension, compute_root_layout};
 
     fn prepare_layout<Msg>(node: &mut Node<Msg>, size: Size) {
@@ -529,6 +519,7 @@ mod tests {
 
     fn render_scrollable_lines(scroll_offset: f32) -> Vec<String> {
         let mut buffer = DoubleBuffer::new(6, 5);
+        let palette = Palette::default();
         let lines: Vec<Node<()>> = (0..20)
             .map(|idx| text::<()>(format!("Line {idx}")))
             .collect();
@@ -541,7 +532,7 @@ mod tests {
             .with_height(Dimension::percent(1.0));
         prepare_layout(&mut root, Size::new(6, 5));
 
-        let mut renderer = Renderer::new(&mut buffer);
+        let mut renderer = Renderer::new(&mut buffer, &palette);
         renderer
             .render(&root, Size::new(6, 5))
             .expect("render should succeed");
@@ -556,6 +547,7 @@ mod tests {
 
     fn render_scrollable_block_lines(scroll_offset: f32) -> Vec<String> {
         let mut buffer = DoubleBuffer::new(8, 7);
+        let palette = Palette::default();
         let lines: Vec<Node<()>> = (0..20)
             .map(|idx| text::<()>(format!("Item {idx}")))
             .collect();
@@ -566,7 +558,7 @@ mod tests {
         let mut root = scrollable;
         prepare_layout(&mut root, Size::new(8, 7));
 
-        let mut renderer = Renderer::new(&mut buffer);
+        let mut renderer = Renderer::new(&mut buffer, &palette);
         renderer
             .render(&root, Size::new(8, 7))
             .expect("render should succeed");
@@ -600,7 +592,8 @@ mod tests {
     #[test]
     fn renders_text_node() {
         let mut buffer = DoubleBuffer::new(10, 4);
-        let mut renderer = Renderer::new(&mut buffer);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
         let mut node = text::<()>("hello");
         prepare_layout(&mut node, Size::new(10, 4));
 
@@ -615,7 +608,8 @@ mod tests {
     #[test]
     fn renders_rich_text_spans_with_styles() {
         let mut buffer = DoubleBuffer::new(10, 2);
-        let mut renderer = Renderer::new(&mut buffer);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
         let spans = vec![
             TextSpan::new("+", Style::fg(Color::Green)),
             TextSpan::new("fn", Style::fg(Color::Cyan)),
@@ -630,16 +624,19 @@ mod tests {
         let back_buffer = renderer.buffer().back_buffer();
         let prefix = &back_buffer[0][0];
         assert_eq!(prefix.ch, '+');
-        assert_eq!(prefix.attrs.foreground(), ColorSpec::PaletteIndex(2)); // Green
+        // Green color (0, 205, 0)
+        assert_eq!(prefix.attrs.foreground(), Some(Rgba::opaque(0, 205, 0)));
         let keyword = &back_buffer[0][1];
         assert_eq!(keyword.ch, 'f');
-        assert_eq!(keyword.attrs.foreground(), ColorSpec::PaletteIndex(6)); // Cyan
+        // Cyan color (0, 205, 205)
+        assert_eq!(keyword.attrs.foreground(), Some(Rgba::opaque(0, 205, 205)));
     }
 
     #[test]
     fn rich_text_respects_width_clipping() {
         let mut buffer = DoubleBuffer::new(4, 2);
-        let mut renderer = Renderer::new(&mut buffer);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
         let spans = vec![
             TextSpan::new("abc", Style::fg(Color::Red)),
             TextSpan::new("def", Style::fg(Color::Green)),
@@ -705,7 +702,8 @@ mod tests {
     #[test]
     fn column_stacks_children_vertically() {
         let mut buffer = DoubleBuffer::new(6, 4);
-        let mut renderer = Renderer::new(&mut buffer);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
         let mut node = column(vec![text::<()>("top"), text::<()>("bottom")]);
         prepare_layout(&mut node, Size::new(6, 4));
 
@@ -722,7 +720,8 @@ mod tests {
     #[test]
     fn row_places_children_horizontally() {
         let mut buffer = DoubleBuffer::new(10, 2);
-        let mut renderer = Renderer::new(&mut buffer);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
         let mut node = row(vec![text::<()>("left"), text::<()>("right")]);
         prepare_layout(&mut node, Size::new(10, 2));
 
@@ -738,7 +737,8 @@ mod tests {
     #[test]
     fn block_draws_border() {
         let mut buffer = DoubleBuffer::new(4, 3);
-        let mut renderer = Renderer::new(&mut buffer);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
         let mut node = block::<()>(Vec::new());
         prepare_layout(&mut node, Size::new(4, 3));
 
@@ -761,7 +761,8 @@ mod tests {
     fn block_renders_title() {
         const TITLE: &str = "Title";
         let mut buffer = DoubleBuffer::new(10, 4);
-        let mut renderer = Renderer::new(&mut buffer);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
         let mut node = block_with_title::<()>(TITLE, Vec::new())
             .with_min_width(Dimension::length(10.))
             .with_min_height(Dimension::length(3.));
@@ -784,7 +785,8 @@ mod tests {
     #[test]
     fn modal_renders_dim_overlay() {
         let mut buffer = DoubleBuffer::new(12, 6);
-        let mut renderer = Renderer::new(&mut buffer);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
 
         let base = column(vec![
             text::<()>("Base content"),
@@ -820,13 +822,14 @@ mod tests {
 
         let back_buffer = renderer.buffer().back_buffer();
         let first_cell = &back_buffer[0][0];
-        assert_eq!(first_cell.attrs.intensity(), Intensity::Dim);
+        assert!(first_cell.attrs.is_dim());
     }
 
     #[test]
     fn style_applies_foreground_color() {
         let mut buffer = DoubleBuffer::new(10, 2);
-        let mut renderer = Renderer::new(&mut buffer);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
         let mut node = text::<()>("color").with_style(Style::fg(Color::Blue));
         prepare_layout(&mut node, Size::new(10, 2));
 
@@ -836,31 +839,27 @@ mod tests {
 
         let back_buffer = renderer.buffer().back_buffer();
         let cell = &back_buffer[0][0];
-        assert_eq!(cell.attrs.foreground(), ColorSpec::PaletteIndex(4)); // Blue
+        // Blue color (0, 0, 238)
+        assert_eq!(cell.attrs.foreground(), Some(Rgba::opaque(0, 0, 238)));
     }
 
     #[test]
-    fn dim_style_sets_dim_intensity() {
-        let attrs = style_to_attributes(&Style::dim());
-        assert_eq!(attrs.intensity(), Intensity::Dim);
-    }
-
-    #[test]
-    fn translates_indexed_color() {
-        let spec = color_to_colorspec(Color::indexed(42));
-        assert_eq!(spec, ColorSpec::PaletteIndex(42));
+    fn dim_style_sets_dim() {
+        let mut buffer = DoubleBuffer::new(10, 2);
+        let palette = Palette::default();
+        let renderer = Renderer::new(&mut buffer, &palette);
+        let attrs = renderer.style_to_attributes(&Style::dim());
+        assert!(attrs.is_dim());
     }
 
     #[test]
     fn translates_rgb_color() {
-        let spec = color_to_colorspec(Color::rgb(10, 20, 30));
-        let expected = ColorSpec::TrueColor(RgbaColor {
-            red: 10,
-            green: 20,
-            blue: 30,
-            alpha: 255,
-        });
-        assert_eq!(spec, expected);
+        let mut buffer = DoubleBuffer::new(10, 2);
+        let palette = Palette::default();
+        let renderer = Renderer::new(&mut buffer, &palette);
+        let rgba = renderer.color_to_rgba(Color::rgb(10, 20, 30));
+        let expected = Rgba::opaque(10, 20, 30);
+        assert_eq!(rgba, expected);
     }
 
     #[test]
@@ -885,7 +884,8 @@ mod tests {
         let mut root = block::<()>(vec![column(vec![header, input_block, items])]);
 
         let mut buffer = DoubleBuffer::new(90, 12);
-        let mut renderer = Renderer::new(&mut buffer);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
         prepare_layout(&mut root, Size::new(90, 12));
 
         renderer
@@ -924,7 +924,8 @@ mod tests {
             },
         );
         round_layout(&mut root);
-        let mut renderer = Renderer::new(&mut buffer);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
         renderer
             .render(&root, Size::new(10, 6))
             .expect("render should succeed");

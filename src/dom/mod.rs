@@ -192,26 +192,51 @@ pub struct Style {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Color {
     Reset,
-    Black,
-    Red,
-    Green,
-    Yellow,
-    Blue,
-    Magenta,
-    Cyan,
-    White,
-    Indexed(u8),
-    Rgb { r: u8, g: u8, b: u8 },
+    Rgba { r: u8, g: u8, b: u8, a: u8 },
 }
 
 impl Color {
-    pub const fn indexed(value: u8) -> Self {
-        Self::Indexed(value)
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self::Rgba { r, g, b, a }
     }
 
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
-        Self::Rgb { r, g, b }
+        Self::Rgba { r, g, b, a: 255 }
     }
+
+    // ANSI color constants (using standard xterm colors)
+    #[allow(non_upper_case_globals)]
+    pub const Black: Self = Self::rgb(0, 0, 0);
+    #[allow(non_upper_case_globals)]
+    pub const Red: Self = Self::rgb(205, 0, 0);
+    #[allow(non_upper_case_globals)]
+    pub const Green: Self = Self::rgb(0, 205, 0);
+    #[allow(non_upper_case_globals)]
+    pub const Yellow: Self = Self::rgb(205, 205, 0);
+    #[allow(non_upper_case_globals)]
+    pub const Blue: Self = Self::rgb(0, 0, 238);
+    #[allow(non_upper_case_globals)]
+    pub const Magenta: Self = Self::rgb(205, 0, 205);
+    #[allow(non_upper_case_globals)]
+    pub const Cyan: Self = Self::rgb(0, 205, 205);
+    #[allow(non_upper_case_globals)]
+    pub const White: Self = Self::rgb(229, 229, 229);
+    #[allow(non_upper_case_globals)]
+    pub const BrightBlack: Self = Self::rgb(127, 127, 127);
+    #[allow(non_upper_case_globals)]
+    pub const BrightRed: Self = Self::rgb(255, 0, 0);
+    #[allow(non_upper_case_globals)]
+    pub const BrightGreen: Self = Self::rgb(0, 255, 0);
+    #[allow(non_upper_case_globals)]
+    pub const BrightYellow: Self = Self::rgb(255, 255, 0);
+    #[allow(non_upper_case_globals)]
+    pub const BrightBlue: Self = Self::rgb(92, 92, 255);
+    #[allow(non_upper_case_globals)]
+    pub const BrightMagenta: Self = Self::rgb(255, 0, 255);
+    #[allow(non_upper_case_globals)]
+    pub const BrightCyan: Self = Self::rgb(0, 255, 255);
+    #[allow(non_upper_case_globals)]
+    pub const BrightWhite: Self = Self::rgb(255, 255, 255);
 }
 
 pub fn text<Msg>(content: impl Into<String>) -> Node<Msg> {

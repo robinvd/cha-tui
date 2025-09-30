@@ -1,15 +1,16 @@
 use std::fmt::Write as _;
 
-use termina::style::{ColorSpec, Intensity, RgbaColor};
-
 use crate::error::ProgramError;
+use crate::palette::Rgba;
 
 /// Cell attributes for styling terminal cells
 #[derive(Clone, Debug, PartialEq)]
+#[derive(Default)]
 pub struct CellAttributes {
-    pub foreground: ColorSpec,
-    pub background: ColorSpec,
-    pub intensity: Intensity,
+    pub foreground: Option<Rgba>,
+    pub background: Option<Rgba>,
+    pub bold: bool,
+    pub dim: bool,
 }
 
 impl CellAttributes {
@@ -17,40 +18,39 @@ impl CellAttributes {
         Self::default()
     }
 
-    pub fn foreground(&self) -> ColorSpec {
+    pub fn foreground(&self) -> Option<Rgba> {
         self.foreground
     }
 
-    pub fn background(&self) -> ColorSpec {
+    pub fn background(&self) -> Option<Rgba> {
         self.background
     }
 
-    pub fn set_foreground(&mut self, color: ColorSpec) {
-        self.foreground = color;
+    pub fn set_foreground(&mut self, color: Rgba) {
+        self.foreground = Some(color);
     }
 
-    pub fn set_background(&mut self, color: ColorSpec) {
-        self.background = color;
+    pub fn set_background(&mut self, color: Rgba) {
+        self.background = Some(color);
     }
 
-    pub fn set_intensity(&mut self, intensity: Intensity) {
-        self.intensity = intensity;
+    pub fn set_bold(&mut self, bold: bool) {
+        self.bold = bold;
     }
 
-    pub fn intensity(&self) -> Intensity {
-        self.intensity
+    pub fn set_dim(&mut self, dim: bool) {
+        self.dim = dim;
+    }
+
+    pub fn is_bold(&self) -> bool {
+        self.bold
+    }
+
+    pub fn is_dim(&self) -> bool {
+        self.dim
     }
 }
 
-impl Default for CellAttributes {
-    fn default() -> Self {
-        Self {
-            foreground: ColorSpec::Reset,
-            background: ColorSpec::Reset,
-            intensity: Intensity::Normal,
-        }
-    }
-}
 
 /// A cell in the buffer, representing a single character with its attributes
 #[derive(Clone, Debug, PartialEq)]
@@ -312,74 +312,53 @@ impl DoubleBuffer {
         
         let mut first = true;
 
-        // Write intensity
-        match attrs.intensity {
-            Intensity::Bold => {
-                if !first {
-                    write!(buffer, ";")?;
-                }
-                first = false;
-                write!(buffer, "1")?;
-            }
-            Intensity::Dim => {
-                if !first {
-                    write!(buffer, ";")?;
-                }
-                first = false;
-                write!(buffer, "2")?;
-            }
-            Intensity::Normal => {
-                // Don't write anything for normal intensity
-            }
-        }
-
-        // Write foreground
-        if attrs.foreground != ColorSpec::Reset {
+        // Write bold/dim
+        if attrs.bold {
             if !first {
                 write!(buffer, ";")?;
             }
             first = false;
-            Self::write_color_spec(buffer, attrs.foreground, true)?;
-        }
-
-        // Write background
-        if attrs.background != ColorSpec::Reset {
+            write!(buffer, "1")?;
+        } else if attrs.dim {
             if !first {
                 write!(buffer, ";")?;
             }
-            Self::write_color_spec(buffer, attrs.background, false)?;
+            first = false;
+            write!(buffer, "2")?;
+        }
+
+        // Write foreground
+        if let Some(fg) = attrs.foreground {
+            if !first {
+                write!(buffer, ";")?;
+            }
+            first = false;
+            Self::write_rgba_color(buffer, fg, true)?;
+        }
+
+        // Write background
+        if let Some(bg) = attrs.background {
+            if !first {
+                write!(buffer, ";")?;
+            }
+            Self::write_rgba_color(buffer, bg, false)?;
         }
 
         write!(buffer, "m")?;
         Ok(())
     }
 
-    fn write_color_spec(
+    fn write_rgba_color(
         buffer: &mut String,
-        color: ColorSpec,
+        color: Rgba,
         is_foreground: bool,
     ) -> Result<(), ProgramError> {
-        match color {
-            ColorSpec::Reset => {
-                write!(buffer, "{}", if is_foreground { 39 } else { 49 })?;
-            }
-            ColorSpec::PaletteIndex(idx) => {
-                let base = if is_foreground { 38 } else { 48 };
-                write!(buffer, "{};5;{}", base, idx)?;
-            }
-            ColorSpec::TrueColor(RgbaColor {
-                red,
-                green,
-                blue,
-                alpha,
-            }) => {
-                let base = if is_foreground { 38 } else { 48 };
-                if alpha == 255 {
-                    write!(buffer, "{};2;{};{};{}", base, red, green, blue)?;
-                } else {
-                    write!(buffer, "{}:6::{}:{}:{}:{}", base, red, green, blue, alpha)?;
-                }
-            }
+        let base = if is_foreground { 38 } else { 48 };
+        if color.a == 255 {
+            write!(buffer, "{};2;{};{};{}", base, color.r, color.g, color.b)?;
+        } else {
+            // Use colon-separated format for alpha channel (less widely supported)
+            write!(buffer, "{}:2::{}:{}:{}:{}", base, color.r, color.g, color.b, color.a)?;
         }
         Ok(())
     }
@@ -522,7 +501,7 @@ mod tests {
         buffer.write_char(5, 1, 'X', &default_attrs);
         
         let mut blue_attrs = CellAttributes::default();
-        blue_attrs.set_foreground(ColorSpec::PaletteIndex(4)); // Blue color
+        blue_attrs.set_foreground(Rgba::opaque(0, 0, 255)); // Blue color
         buffer.set_attrs(5, 1, &blue_attrs);
         
         let cell = buffer.get_cell(5, 1).unwrap();

@@ -6,6 +6,7 @@ use crate::buffer::DoubleBuffer;
 use crate::dom::Node;
 use crate::error::ProgramError;
 use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};
+use crate::palette::Palette;
 use crate::render::Renderer;
 
 use taffy::compute_root_layout;
@@ -31,6 +32,7 @@ pub struct Program<Model, Msg> {
     current_view: Option<Node<Msg>>,
     last_mouse_buttons: MouseButtons,
     last_click: Option<LastClick>,
+    palette: Palette,
 }
 
 impl<Model, Msg> Program<Model, Msg> {
@@ -48,6 +50,7 @@ impl<Model, Msg> Program<Model, Msg> {
             current_view: None,
             last_mouse_buttons: MouseButtons::default(),
             last_click: None,
+            palette: Palette::default(),
         }
     }
 
@@ -242,7 +245,7 @@ impl<Model, Msg> Program<Model, Msg> {
     fn render_view(&mut self, buffer: &mut DoubleBuffer) -> Result<(), ProgramError> {
         self.rebuild_view();
         if let Some(current_view) = self.current_view.as_ref() {
-            Renderer::new(buffer).render(current_view, self.current_size)
+            Renderer::new(buffer, &self.palette).render(current_view, self.current_size)
         } else {
             Ok(())
         }
