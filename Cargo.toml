@@ -7,7 +7,8 @@ edition = "2024"
 color-eyre = "0.6.5"
 once_cell = "1.19"
 taffy = "0.9.1"
-termwiz = "0.23.3"
+termina = "0.1.1"
+termwiz = { version = "0.23.3", default-features = false, features = [] }
 tree-sitter = "0.25"
 tree-sitter-highlight = "0.25"
 tree-sitter-rust = "0.24"
@@ -16,6 +17,3 @@ tree-sitter-python = "0.25"
 tree-sitter-go = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-
-[target.'cfg(unix)'.dependencies]
-termios = "0.3"

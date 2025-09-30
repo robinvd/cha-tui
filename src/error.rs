@@ -1,15 +1,14 @@
-use termwiz::Error as TermwizError;
-
 #[derive(Debug)]
 pub enum ProgramError {
-    Terminal(TermwizError),
+    Terminal(String),
     Render(String),
     Event(String),
+    Io(std::io::Error),
 }
 
 impl ProgramError {
-    pub fn terminal(error: TermwizError) -> Self {
-        Self::Terminal(error)
+    pub fn terminal(message: impl Into<String>) -> Self {
+        Self::Terminal(message.into())
     }
 
     pub fn render(message: impl Into<String>) -> Self {
@@ -21,8 +20,14 @@ impl ProgramError {
     }
 }
 
-impl From<TermwizError> for ProgramError {
-    fn from(error: TermwizError) -> Self {
-        ProgramError::Terminal(error)
+impl From<std::io::Error> for ProgramError {
+    fn from(error: std::io::Error) -> Self {
+        ProgramError::Io(error)
+    }
+}
+
+impl From<std::fmt::Error> for ProgramError {
+    fn from(error: std::fmt::Error) -> Self {
+        ProgramError::Render(format!("Format error: {}", error))
     }
 }

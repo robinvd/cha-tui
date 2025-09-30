@@ -1,4 +1,5 @@
 use std::boxed::Box;
+use std::io::Write;
 use std::time::{Duration, Instant};
 
 use crate::buffer::DoubleBuffer;
@@ -8,10 +9,7 @@ use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};
 use crate::render::Renderer;
 
 use taffy::compute_root_layout;
-use termwiz::caps::Capabilities;
-use termwiz::input::{InputEvent, KeyEvent, Modifiers as TwModifiers, MouseEvent as TwMouseEvent};
-use termwiz::surface::Change;
-use termwiz::terminal::{Terminal, new_terminal};
+use termina::{PlatformTerminal, Terminal};
 use tracing::info;
 
 pub type UpdateFn<Model, Msg> = Box<dyn FnMut(&mut Model, Msg) -> Transition>;
@@ -59,18 +57,31 @@ impl<Model, Msg> Program<Model, Msg> {
     }
 
     pub fn run(mut self) -> Result<(), ProgramError> {
-        let caps = Capabilities::new_from_env().map_err(ProgramError::from)?;
-        let mut terminal = new_terminal(caps).map_err(ProgramError::from)?;
+        let mut terminal = PlatformTerminal::new().map_err(|e| {
+            ProgramError::terminal(format!("Failed to create terminal: {}", e))
+        })?;
 
-        // Enter alternate screen and raw mode for the duration of the loop.
-        terminal.enter_alternate_screen().map_err(ProgramError::from)?;
-        terminal.set_raw_mode().map_err(ProgramError::from)?;
+        // Enter raw mode for the duration of the loop.
+        terminal.enter_raw_mode().map_err(|e| {
+            ProgramError::terminal(format!("Failed to enter raw mode: {}", e))
+        })?;
+
+        // Enter alternate screen and enable mouse tracking
+        write!(terminal, "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h",    // Enable SGR mouse mode
+        ).map_err(|e| {
+            ProgramError::terminal(format!("Failed to setup terminal: {}", e))
+        })?;
+        terminal.flush().map_err(|e| {
+            ProgramError::terminal(format!("Failed to flush terminal: {}", e))
+        })?;
 
         let result = self.event_loop(&mut terminal);
 
         // Always attempt to restore terminal state.
-        let _ = terminal.set_cooked_mode();
-        let _ = terminal.exit_alternate_screen();
+        let _ = write!(terminal, "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l",    // Exit alternate screen
+        );
+        let _ = terminal.flush();
+        let _ = terminal.enter_cooked_mode();
 
         result
     }
@@ -79,30 +90,38 @@ impl<Model, Msg> Program<Model, Msg> {
         self.process_event(event, None)
     }
 
-    fn event_loop<T: Terminal>(
+    fn event_loop(
         &mut self,
-        terminal: &mut T,
+        terminal: &mut PlatformTerminal,
     ) -> Result<(), ProgramError> {
-        let screen_size = terminal.get_screen_size()?;
-        let mut buffer = DoubleBuffer::new(screen_size.cols, screen_size.rows);
+        let dimensions = terminal.get_dimensions().map_err(|e| {
+            ProgramError::terminal(format!("Failed to get dimensions: {}", e))
+        })?;
+        let mut buffer = DoubleBuffer::new(dimensions.cols as usize, dimensions.rows as usize);
         
         self.render_view(&mut buffer)?;
-        buffer.flush(terminal)?;
+        buffer.flush(terminal).map_err(|e| {
+            ProgramError::terminal(format!("Failed to flush buffer: {:?}", e))
+        })?;
 
-        terminal
-            .render(&[Change::CursorVisibility(
-                termwiz::surface::CursorVisibility::Hidden,
-            )])
-            .unwrap();
+        // Hide cursor
+        write!(terminal, "\x1b[?25l").map_err(|e| {
+            ProgramError::terminal(format!("Failed to hide cursor: {}", e))
+        })?;
+        terminal.flush().map_err(|e| {
+            ProgramError::terminal(format!("Failed to flush terminal: {}", e))
+        })?;
 
         loop {
             // Check for terminal resize
-            let new_size = terminal.get_screen_size()?;
+            let new_dimensions = terminal.get_dimensions().map_err(|e| {
+                ProgramError::terminal(format!("Failed to get dimensions: {}", e))
+            })?;
             let (old_cols, old_rows) = buffer.dimensions();
-            if new_size.cols != old_cols || new_size.rows != old_rows {
+            if new_dimensions.cols as usize != old_cols || new_dimensions.rows as usize != old_rows {
                 let (transition, needs_render) = self.handle_event(Event::Resize(Size {
-                    width: new_size.cols as u16,
-                    height: new_size.rows as u16,
+                    width: new_dimensions.cols,
+                    height: new_dimensions.rows,
                 }));
                 if needs_render {
                     self.render_view(&mut buffer)?;
@@ -113,51 +132,62 @@ impl<Model, Msg> Program<Model, Msg> {
                 }
             }
 
-            let first_input = terminal
-                .poll_input(None)
-                .map_err(ProgramError::from)?;
+            // Poll for events with no timeout (blocking read)
+            if terminal.poll(|_| true, None).map_err(|e| {
+                ProgramError::event(format!("Failed to poll events: {}", e))
+            })? {
+                let event = terminal.read(|_| true).map_err(|e| {
+                    ProgramError::event(format!("Failed to read event: {}", e))
+                })?;
 
-            let mut needs_render = false;
-            let mut should_quit = false;
+                let mut needs_render = false;
+                let mut should_quit = false;
 
-            if let Some(input) = first_input
-                && let Some(event) = convert_input_event(input)
-            {
-                let (transition, render_flag) = self.handle_event(event);
-                needs_render |= render_flag;
-                if matches!(transition, Transition::Quit) {
-                    should_quit = true;
-                }
-            }
-
-            while let Some(input) = terminal
-                .poll_input(Some(Duration::from_millis(0)))
-                .map_err(ProgramError::from)?
-            {
-                if let Some(event) = convert_input_event(input) {
-                    let (transition, render_flag) = self.handle_event(event);
+                if let Some(converted_event) = convert_input_event(event) {
+                    let (transition, render_flag) = self.handle_event(converted_event);
                     needs_render |= render_flag;
                     if matches!(transition, Transition::Quit) {
                         should_quit = true;
-                        break;
                     }
                 }
-            }
 
-            if needs_render {
-                self.render_view(&mut buffer)?;
-                // raw escape codes for `Synchronized Output` start
-                // TODO add a detection step on startup if this is supported.
-                terminal
-                    .render(&[Change::Text("\x1b[?2026h".to_owned())])?;
-                buffer.flush(terminal)?;
-                // raw escape codes for `Synchronized Output` end
-                terminal
-                    .render(&[Change::Text("\x1b[?2026l".to_owned())])?;
-            }
+                // Read any additional pending events with zero timeout
+                while terminal.poll(|_| true, Some(Duration::from_millis(0))).map_err(|e| {
+                    ProgramError::event(format!("Failed to poll events: {}", e))
+                })? {
+                    let event = terminal.read(|_| true).map_err(|e| {
+                        ProgramError::event(format!("Failed to read event: {}", e))
+                    })?;
 
-            if should_quit {
-                break;
+                    if let Some(converted_event) = convert_input_event(event) {
+                        let (transition, render_flag) = self.handle_event(converted_event);
+                        needs_render |= render_flag;
+                        if matches!(transition, Transition::Quit) {
+                            should_quit = true;
+                            break;
+                        }
+                    }
+                }
+
+                if needs_render {
+                    self.render_view(&mut buffer)?;
+                    // raw escape codes for `Synchronized Output` start
+                    write!(terminal, "\x1b[?2026h").map_err(|e| {
+                        ProgramError::terminal(format!("Failed to write sync start: {}", e))
+                    })?;
+                    buffer.flush(terminal)?;
+                    // raw escape codes for `Synchronized Output` end
+                    write!(terminal, "\x1b[?2026l").map_err(|e| {
+                        ProgramError::terminal(format!("Failed to write sync end: {}", e))
+                    })?;
+                    terminal.flush().map_err(|e| {
+                        ProgramError::terminal(format!("Failed to flush terminal: {}", e))
+                    })?;
+                }
+
+                if should_quit {
+                    break;
+                }
             }
         }
 
@@ -308,75 +338,110 @@ struct LastClick {
     y: u16,
 }
 
-fn convert_input_event(input: InputEvent) -> Option<Event> {
-    tracing::debug!("termwiz input event: {:?}", input);
+fn convert_input_event(input: termina::Event) -> Option<Event> {
+    tracing::debug!("termina input event: {:?}", input);
     match input {
-        InputEvent::Key(key) => map_key_event(key),
-        InputEvent::Mouse(mouse) => map_mouse_event(mouse),
-        InputEvent::Resized { cols, rows } => Some(Event::Resize(Size::new(
-            clamp_to_u16(cols),
-            clamp_to_u16(rows),
+        termina::Event::Key(key) => map_key_event(key),
+        termina::Event::Mouse(mouse) => map_mouse_event(mouse),
+        termina::Event::WindowResized(size) => Some(Event::Resize(Size::new(
+            size.cols,
+            size.rows,
         ))),
         _ => None,
     }
 }
 
-fn map_mouse_event(mouse: TwMouseEvent) -> Option<Event> {
-    use termwiz::input::MouseButtons as TwButtons;
-    let mut buttons = MouseButtons::new(
-        mouse.mouse_buttons.contains(TwButtons::LEFT),
-        mouse.mouse_buttons.contains(TwButtons::RIGHT),
-        mouse.mouse_buttons.contains(TwButtons::MIDDLE),
-    );
-    if mouse.mouse_buttons.contains(TwButtons::VERT_WHEEL) {
-        buttons.vert_wheel = true;
-        buttons.wheel_positive = mouse.mouse_buttons.contains(TwButtons::WHEEL_POSITIVE);
+fn map_mouse_event(mouse: termina::event::MouseEvent) -> Option<Event> {
+    use termina::event::{MouseButton, MouseEventKind};
+    
+    let mut buttons = MouseButtons::default();
+    
+    match mouse.kind {
+        MouseEventKind::Down(btn) => {
+            // Button press - set the button as pressed
+            match btn {
+                MouseButton::Left => buttons.left = true,
+                MouseButton::Right => buttons.right = true,
+                MouseButton::Middle => buttons.middle = true,
+            }
+        }
+        MouseEventKind::Up(btn) => {
+            // Button release - all buttons are now released
+            // We still need to report which button was released for the event
+            // but we'll keep buttons at default (all false)
+            match btn {
+                MouseButton::Left => {
+                    // Report this as a mouse event with left button having just been released
+                    // The program's handle_mouse_event will detect the state change
+                }
+                MouseButton::Right => {}
+                MouseButton::Middle => {}
+            }
+        }
+        MouseEventKind::Drag(btn) => {
+            // Dragging - the button is pressed
+            match btn {
+                MouseButton::Left => buttons.left = true,
+                MouseButton::Right => buttons.right = true,
+                MouseButton::Middle => buttons.middle = true,
+            }
+        }
+        MouseEventKind::Moved => {
+            // Just movement, no buttons
+        }
+        MouseEventKind::ScrollDown => {
+            buttons.vert_wheel = true;
+            buttons.wheel_positive = false;
+        }
+        MouseEventKind::ScrollUp => {
+            buttons.vert_wheel = true;
+            buttons.wheel_positive = true;
+        }
+        MouseEventKind::ScrollLeft => {
+            buttons.horz_wheel = true;
+            buttons.wheel_positive = false;
+        }
+        MouseEventKind::ScrollRight => {
+            buttons.horz_wheel = true;
+            buttons.wheel_positive = true;
+        }
     }
-    if mouse.mouse_buttons.contains(TwButtons::HORZ_WHEEL) {
-        buttons.horz_wheel = true;
-        buttons.wheel_positive = mouse.mouse_buttons.contains(TwButtons::WHEEL_POSITIVE);
-    }
+    
     Some(Event::Mouse(MouseEvent::with_modifiers(
-        // termwiz mouse x/y are 1 indexed
-        mouse.x - 1,
-        mouse.y - 1,
+        mouse.column,
+        mouse.row,
         buttons,
-        mouse.modifiers.contains(TwModifiers::CTRL),
-        mouse.modifiers.contains(TwModifiers::ALT),
-        mouse.modifiers.contains(TwModifiers::SHIFT),
+        mouse.modifiers.contains(termina::event::Modifiers::CONTROL),
+        mouse.modifiers.contains(termina::event::Modifiers::ALT),
+        mouse.modifiers.contains(termina::event::Modifiers::SHIFT),
     )))
 }
 
-fn map_key_event(key: KeyEvent) -> Option<Event> {
-    let code = map_key_code(key.key)?;
-    let modifiers = key.modifiers;
+fn map_key_event(key: termina::event::KeyEvent) -> Option<Event> {
+    let code = map_key_code(key.code)?;
     let event_key = Key {
         code,
-        ctrl: modifiers.contains(TwModifiers::CTRL),
-        alt: modifiers.contains(TwModifiers::ALT),
-        shift: modifiers.contains(TwModifiers::SHIFT),
+        ctrl: key.modifiers.contains(termina::event::Modifiers::CONTROL),
+        alt: key.modifiers.contains(termina::event::Modifiers::ALT),
+        shift: key.modifiers.contains(termina::event::Modifiers::SHIFT),
     };
     Some(Event::Key(event_key))
 }
 
-fn map_key_code(code: termwiz::input::KeyCode) -> Option<KeyCode> {
-    use termwiz::input::KeyCode as TwKeyCode;
+fn map_key_code(code: termina::event::KeyCode) -> Option<KeyCode> {
+    use termina::event::KeyCode as TnKeyCode;
 
     match code {
-        TwKeyCode::Char(c) => Some(KeyCode::Char(c)),
-        TwKeyCode::Enter => Some(KeyCode::Enter),
-        TwKeyCode::Escape => Some(KeyCode::Esc),
-        TwKeyCode::Backspace => Some(KeyCode::Backspace),
-        TwKeyCode::LeftArrow => Some(KeyCode::Left),
-        TwKeyCode::RightArrow => Some(KeyCode::Right),
-        TwKeyCode::UpArrow => Some(KeyCode::Up),
-        TwKeyCode::DownArrow => Some(KeyCode::Down),
+        TnKeyCode::Char(c) => Some(KeyCode::Char(c)),
+        TnKeyCode::Enter => Some(KeyCode::Enter),
+        TnKeyCode::Escape => Some(KeyCode::Esc),
+        TnKeyCode::Backspace => Some(KeyCode::Backspace),
+        TnKeyCode::Left => Some(KeyCode::Left),
+        TnKeyCode::Right => Some(KeyCode::Right),
+        TnKeyCode::Up => Some(KeyCode::Up),
+        TnKeyCode::Down => Some(KeyCode::Down),
         _ => None,
     }
-}
-
-fn clamp_to_u16(value: usize) -> u16 {
-    u16::try_from(value).unwrap_or(u16::MAX)
 }
 
 #[cfg(test)]

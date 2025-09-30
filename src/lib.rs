@@ -8,6 +8,9 @@ pub mod oklab;
 pub mod program;
 pub mod render;
 
+// Re-export termina's OneBased type
+pub use termina::OneBased;
+
 pub use crate::dom::{
     Attributes, ElementKind, ElementNode, Node, SizePolicy, Style, TextNode, TextSpan, block,
     block_with_title, column, modal, rich_text, row, text,

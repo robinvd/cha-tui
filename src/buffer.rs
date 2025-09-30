@@ -1,8 +1,56 @@
-use termwiz::cell::CellAttributes;
-use termwiz::surface::{Change, Position};
-use termwiz::terminal::Terminal;
+use std::fmt::Write as _;
+
+use termina::style::{ColorSpec, Intensity, RgbaColor};
 
 use crate::error::ProgramError;
+
+/// Cell attributes for styling terminal cells
+#[derive(Clone, Debug, PartialEq)]
+pub struct CellAttributes {
+    pub foreground: ColorSpec,
+    pub background: ColorSpec,
+    pub intensity: Intensity,
+}
+
+impl CellAttributes {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn foreground(&self) -> ColorSpec {
+        self.foreground
+    }
+
+    pub fn background(&self) -> ColorSpec {
+        self.background
+    }
+
+    pub fn set_foreground(&mut self, color: ColorSpec) {
+        self.foreground = color;
+    }
+
+    pub fn set_background(&mut self, color: ColorSpec) {
+        self.background = color;
+    }
+
+    pub fn set_intensity(&mut self, intensity: Intensity) {
+        self.intensity = intensity;
+    }
+
+    pub fn intensity(&self) -> Intensity {
+        self.intensity
+    }
+}
+
+impl Default for CellAttributes {
+    fn default() -> Self {
+        Self {
+            foreground: ColorSpec::Reset,
+            background: ColorSpec::Reset,
+            intensity: Intensity::Normal,
+        }
+    }
+}
 
 /// A cell in the buffer, representing a single character with its attributes
 #[derive(Clone, Debug, PartialEq)]
@@ -172,8 +220,8 @@ impl DoubleBuffer {
     }
 
     /// Compute the diff between front and back buffers and render to terminal
-    pub fn flush<T: Terminal>(&mut self, terminal: &mut T) -> Result<(), ProgramError> {
-        let mut changes = Vec::new();
+    pub fn flush<W: std::io::Write>(&mut self, writer: &mut W) -> Result<(), ProgramError> {
+        let mut buffer = String::new();
         let mut current_attrs = CellAttributes::default();
         let mut needs_attr_reset = false;
 
@@ -191,15 +239,12 @@ impl DoubleBuffer {
                     // Flush any pending run
                     if let Some(start_x) = run_start {
                         if current_attrs != run_attrs {
-                            changes.push(Change::AllAttributes(run_attrs.clone()));
+                            Self::write_sgr_attrs(&mut buffer, &run_attrs)?;
                             current_attrs = run_attrs.clone();
                             needs_attr_reset = true;
                         }
-                        changes.push(Change::CursorPosition {
-                            x: Position::Absolute(start_x),
-                            y: Position::Absolute(y),
-                        });
-                        changes.push(Change::Text(run_text.clone()));
+                        // Move cursor and write text
+                        write!(buffer, "\x1b[{};{}H{}", y + 1, start_x + 1, run_text)?;
                         run_start = None;
                         run_text.clear();
                     }
@@ -212,16 +257,12 @@ impl DoubleBuffer {
                     if back_cell.attrs != run_attrs {
                         // Flush the current run
                         if current_attrs != run_attrs {
-                            changes.push(Change::AllAttributes(run_attrs.clone()));
+                            Self::write_sgr_attrs(&mut buffer, &run_attrs)?;
                             current_attrs = run_attrs.clone();
                             needs_attr_reset = true;
                         }
-                        changes.push(Change::CursorPosition {
-                            x: Position::Absolute(run_start.unwrap()),
-                            y: Position::Absolute(y),
-                        });
-                        changes.push(Change::Text(run_text.clone()));
-
+                        write!(buffer, "\x1b[{};{}H{}", y + 1, run_start.unwrap() + 1, run_text)?;
+                        
                         // Start a new run
                         run_start = Some(x);
                         run_text = String::from(back_cell.ch);
@@ -241,32 +282,105 @@ impl DoubleBuffer {
             // Flush any pending run at the end of the line
             if let Some(start_x) = run_start {
                 if current_attrs != run_attrs {
-                    changes.push(Change::AllAttributes(run_attrs.clone()));
+                    Self::write_sgr_attrs(&mut buffer, &run_attrs)?;
                     current_attrs = run_attrs.clone();
                     needs_attr_reset = true;
                 }
-                changes.push(Change::CursorPosition {
-                    x: Position::Absolute(start_x),
-                    y: Position::Absolute(y),
-                });
-                changes.push(Change::Text(run_text));
+                write!(buffer, "\x1b[{};{}H{}", y + 1, start_x + 1, run_text)?;
             }
         }
 
         // Reset attributes if we changed them
         if needs_attr_reset {
-            changes.push(Change::AllAttributes(CellAttributes::default()));
+            write!(buffer, "\x1b[0m")?;
         }
 
         // Send all changes to the terminal
-        if !changes.is_empty() {
-            terminal.render(&changes)?;
+        if !buffer.is_empty() {
+            writer.write_all(buffer.as_bytes())?;
+            writer.flush()?;
         }
 
         // Swap buffers - back becomes front
         std::mem::swap(&mut self.front, &mut self.back);
-        self.front_invalid = false;
 
+        Ok(())
+    }
+
+    fn write_sgr_attrs(buffer: &mut String, attrs: &CellAttributes) -> Result<(), ProgramError> {
+        write!(buffer, "\x1b[")?;
+        
+        let mut first = true;
+
+        // Write intensity
+        match attrs.intensity {
+            Intensity::Bold => {
+                if !first {
+                    write!(buffer, ";")?;
+                }
+                first = false;
+                write!(buffer, "1")?;
+            }
+            Intensity::Dim => {
+                if !first {
+                    write!(buffer, ";")?;
+                }
+                first = false;
+                write!(buffer, "2")?;
+            }
+            Intensity::Normal => {
+                // Don't write anything for normal intensity
+            }
+        }
+
+        // Write foreground
+        if attrs.foreground != ColorSpec::Reset {
+            if !first {
+                write!(buffer, ";")?;
+            }
+            first = false;
+            Self::write_color_spec(buffer, attrs.foreground, true)?;
+        }
+
+        // Write background
+        if attrs.background != ColorSpec::Reset {
+            if !first {
+                write!(buffer, ";")?;
+            }
+            Self::write_color_spec(buffer, attrs.background, false)?;
+        }
+
+        write!(buffer, "m")?;
+        Ok(())
+    }
+
+    fn write_color_spec(
+        buffer: &mut String,
+        color: ColorSpec,
+        is_foreground: bool,
+    ) -> Result<(), ProgramError> {
+        match color {
+            ColorSpec::Reset => {
+                write!(buffer, "{}", if is_foreground { 39 } else { 49 })?;
+            }
+            ColorSpec::PaletteIndex(idx) => {
+                let base = if is_foreground { 38 } else { 48 };
+                write!(buffer, "{};5;{}", base, idx)?;
+            }
+            ColorSpec::TrueColor(RgbaColor {
+                red,
+                green,
+                blue,
+                alpha,
+            }) => {
+                let base = if is_foreground { 38 } else { 48 };
+                if alpha == 255 {
+                    write!(buffer, "{};2;{};{};{}", base, red, green, blue)?;
+                } else {
+                    write!(buffer, "{}:6::{}:{}:{}:{}", base, red, green, blue, alpha)?;
+                }
+            }
+        }
         Ok(())
     }
 
@@ -294,13 +408,12 @@ impl DoubleBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use termwiz::color::ColorAttribute;
 
     #[test]
     fn new_buffer_is_blank() {
         let buffer = DoubleBuffer::new(10, 5);
         assert_eq!(buffer.dimensions(), (10, 5));
-
+        
         let text = buffer.to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 5);
@@ -312,10 +425,10 @@ mod tests {
     fn write_text_renders_to_back_buffer() {
         let mut buffer = DoubleBuffer::new(20, 3);
         let attrs = CellAttributes::default();
-
+        
         buffer.write_text(0, 0, "hello", &attrs);
         buffer.write_text(0, 1, "world", &attrs);
-
+        
         let text = buffer.to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with("hello"));
@@ -326,9 +439,9 @@ mod tests {
     fn write_char_sets_single_character() {
         let mut buffer = DoubleBuffer::new(10, 3);
         let attrs = CellAttributes::default();
-
+        
         buffer.write_char(5, 1, 'X', &attrs);
-
+        
         let cell = buffer.get_cell(5, 1).unwrap();
         assert_eq!(cell.ch, 'X');
     }
@@ -337,10 +450,10 @@ mod tests {
     fn clear_resets_back_buffer() {
         let mut buffer = DoubleBuffer::new(10, 3);
         let attrs = CellAttributes::default();
-
+        
         buffer.write_text(0, 0, "test", &attrs);
         buffer.clear();
-
+        
         let text = buffer.to_string();
         assert!(text.chars().all(|c| c == ' ' || c == '\n'));
     }
@@ -349,13 +462,13 @@ mod tests {
     fn clear_area_clears_rect() {
         let mut buffer = DoubleBuffer::new(10, 5);
         let attrs = CellAttributes::default();
-
+        
         buffer.write_text(0, 0, "0123456789", &attrs);
         buffer.write_text(0, 1, "abcdefghij", &attrs);
         buffer.write_text(0, 2, "ABCDEFGHIJ", &attrs);
-
+        
         buffer.clear_area(Rect::new(2, 1, 5, 1));
-
+        
         let text = buffer.to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "0123456789");
@@ -367,9 +480,9 @@ mod tests {
     fn fill_rect_fills_area() {
         let mut buffer = DoubleBuffer::new(10, 5);
         let attrs = CellAttributes::default();
-
+        
         buffer.fill_rect(Rect::new(2, 1, 4, 2), '#', &attrs);
-
+        
         let text = buffer.to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[1], "  ####    ");
@@ -380,9 +493,9 @@ mod tests {
     fn resize_changes_dimensions() {
         let mut buffer = DoubleBuffer::new(10, 5);
         buffer.resize(20, 10);
-
+        
         assert_eq!(buffer.dimensions(), (20, 10));
-
+        
         let text = buffer.to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 10);
@@ -393,9 +506,9 @@ mod tests {
     fn write_text_clips_at_boundary() {
         let mut buffer = DoubleBuffer::new(5, 3);
         let attrs = CellAttributes::default();
-
+        
         buffer.write_text(3, 0, "testing", &attrs);
-
+        
         let text = buffer.to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "   te");
@@ -405,13 +518,13 @@ mod tests {
     fn set_attrs_preserves_character() {
         let mut buffer = DoubleBuffer::new(10, 3);
         let default_attrs = CellAttributes::default();
-
+        
         buffer.write_char(5, 1, 'X', &default_attrs);
-
+        
         let mut blue_attrs = CellAttributes::default();
-        blue_attrs.set_foreground(ColorAttribute::PaletteIndex(4)); // Blue color
+        blue_attrs.set_foreground(ColorSpec::PaletteIndex(4)); // Blue color
         buffer.set_attrs(5, 1, &blue_attrs);
-
+        
         let cell = buffer.get_cell(5, 1).unwrap();
         assert_eq!(cell.ch, 'X');
         assert_eq!(cell.attrs.foreground(), blue_attrs.foreground());
@@ -420,11 +533,11 @@ mod tests {
     #[test]
     fn get_cell_mut_allows_modification() {
         let mut buffer = DoubleBuffer::new(10, 3);
-
+        
         if let Some(cell) = buffer.get_cell_mut(2, 1) {
             cell.ch = 'Z';
         }
-
+        
         assert_eq!(buffer.get_cell(2, 1).unwrap().ch, 'Z');
     }
 }

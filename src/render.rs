@@ -1,10 +1,10 @@
-use crate::buffer::DoubleBuffer;
+use crate::buffer::{CellAttributes, DoubleBuffer};
 use crate::dom::{ElementKind, ElementNode, Node, NodeContent, Style, TextNode};
 use crate::error::ProgramError;
 use crate::event::Size;
 
-use termwiz::cell::{CellAttributes, Intensity, unicode_column_width};
-use termwiz::color::{AnsiColor, ColorAttribute, RgbColor};
+use termina::style::{ColorSpec, Intensity, RgbaColor};
+use termwiz::cell::unicode_column_width;
 
 use taffy::Layout as TaffyLayout;
 
@@ -424,15 +424,15 @@ impl<'a> Renderer<'a> {
             for x in area.x..(area.x + area.width).min(self.buffer.dimensions().0) {
                 if let Some(cell) = self.buffer.get_cell_mut(x, y) {
                     if let Some(fg) = style.fg {
-                        cell.attrs.set_foreground(color_to_attribute(fg));
+                        cell.attrs.set_foreground(color_to_colorspec(fg));
                     }
                     if let Some(bg) = style.bg {
-                        cell.attrs.set_background(color_to_attribute(bg));
+                        cell.attrs.set_background(color_to_colorspec(bg));
                     }
                     if style.bold {
                         cell.attrs.set_intensity(Intensity::Bold);
                     } else if style.dim {
-                        cell.attrs.set_intensity(Intensity::Half);
+                        cell.attrs.set_intensity(Intensity::Dim);
                     }
                 }
             }
@@ -470,34 +470,38 @@ fn rect_from_layout(layout: &TaffyLayout, origin: Point) -> Option<Rect> {
 fn style_to_attributes(style: &Style) -> CellAttributes {
     let mut attrs = CellAttributes::default();
     if let Some(fg) = style.fg {
-        attrs.set_foreground(color_to_attribute(fg));
+        attrs.set_foreground(color_to_colorspec(fg));
     }
     if let Some(bg) = style.bg {
-        attrs.set_background(color_to_attribute(bg));
+        attrs.set_background(color_to_colorspec(bg));
     }
     if style.bold {
         attrs.set_intensity(Intensity::Bold);
     } else if style.dim {
-        attrs.set_intensity(Intensity::Half);
+        attrs.set_intensity(Intensity::Dim);
     }
     attrs
 }
 
-fn color_to_attribute(color: crate::dom::Color) -> ColorAttribute {
+fn color_to_colorspec(color: crate::dom::Color) -> ColorSpec {
     match color {
-        crate::dom::Color::Reset => ColorAttribute::Default,
-        crate::dom::Color::Black => AnsiColor::Black.into(),
-        crate::dom::Color::Red => AnsiColor::Red.into(),
-        crate::dom::Color::Green => AnsiColor::Green.into(),
-        crate::dom::Color::Yellow => AnsiColor::Yellow.into(),
-        crate::dom::Color::Blue => AnsiColor::Blue.into(),
-        crate::dom::Color::Magenta => AnsiColor::Fuchsia.into(),
-        crate::dom::Color::Cyan => AnsiColor::Aqua.into(),
-        crate::dom::Color::White => AnsiColor::White.into(),
-        crate::dom::Color::Indexed(idx) => ColorAttribute::PaletteIndex(idx),
+        crate::dom::Color::Reset => ColorSpec::Reset,
+        crate::dom::Color::Black => ColorSpec::PaletteIndex(0),
+        crate::dom::Color::Red => ColorSpec::PaletteIndex(1),
+        crate::dom::Color::Green => ColorSpec::PaletteIndex(2),
+        crate::dom::Color::Yellow => ColorSpec::PaletteIndex(3),
+        crate::dom::Color::Blue => ColorSpec::PaletteIndex(4),
+        crate::dom::Color::Magenta => ColorSpec::PaletteIndex(5),
+        crate::dom::Color::Cyan => ColorSpec::PaletteIndex(6),
+        crate::dom::Color::White => ColorSpec::PaletteIndex(7),
+        crate::dom::Color::Indexed(idx) => ColorSpec::PaletteIndex(idx),
         crate::dom::Color::Rgb { r, g, b } => {
-            let color = RgbColor::new_8bpc(r, g, b);
-            ColorAttribute::TrueColorWithDefaultFallback(color.into())
+            ColorSpec::TrueColor(RgbaColor {
+                red: r,
+                green: g,
+                blue: b,
+                alpha: 255,
+            })
         }
     }
 }
@@ -626,10 +630,10 @@ mod tests {
         let back_buffer = renderer.buffer().back_buffer();
         let prefix = &back_buffer[0][0];
         assert_eq!(prefix.ch, '+');
-        assert_eq!(prefix.attrs.foreground(), AnsiColor::Green.into());
+        assert_eq!(prefix.attrs.foreground(), ColorSpec::PaletteIndex(2)); // Green
         let keyword = &back_buffer[0][1];
         assert_eq!(keyword.ch, 'f');
-        assert_eq!(keyword.attrs.foreground(), AnsiColor::Aqua.into());
+        assert_eq!(keyword.attrs.foreground(), ColorSpec::PaletteIndex(6)); // Cyan
     }
 
     #[test]
@@ -816,7 +820,7 @@ mod tests {
 
         let back_buffer = renderer.buffer().back_buffer();
         let first_cell = &back_buffer[0][0];
-        assert_eq!(first_cell.attrs.intensity(), Intensity::Half);
+        assert_eq!(first_cell.attrs.intensity(), Intensity::Dim);
     }
 
     #[test]
@@ -832,27 +836,31 @@ mod tests {
 
         let back_buffer = renderer.buffer().back_buffer();
         let cell = &back_buffer[0][0];
-        assert_eq!(cell.attrs.foreground(), AnsiColor::Blue.into());
+        assert_eq!(cell.attrs.foreground(), ColorSpec::PaletteIndex(4)); // Blue
     }
 
     #[test]
-    fn dim_style_sets_half_intensity() {
+    fn dim_style_sets_dim_intensity() {
         let attrs = style_to_attributes(&Style::dim());
-        assert_eq!(attrs.intensity(), Intensity::Half);
+        assert_eq!(attrs.intensity(), Intensity::Dim);
     }
 
     #[test]
     fn translates_indexed_color() {
-        let attr = color_to_attribute(Color::indexed(42));
-        assert_eq!(attr, ColorAttribute::PaletteIndex(42));
+        let spec = color_to_colorspec(Color::indexed(42));
+        assert_eq!(spec, ColorSpec::PaletteIndex(42));
     }
 
     #[test]
     fn translates_rgb_color() {
-        let attr = color_to_attribute(Color::rgb(10, 20, 30));
-        let expected =
-            ColorAttribute::TrueColorWithDefaultFallback(RgbColor::new_8bpc(10, 20, 30).into());
-        assert_eq!(attr, expected);
+        let spec = color_to_colorspec(Color::rgb(10, 20, 30));
+        let expected = ColorSpec::TrueColor(RgbaColor {
+            red: 10,
+            green: 20,
+            blue: 30,
+            alpha: 255,
+        });
+        assert_eq!(spec, expected);
     }
 
     #[test]

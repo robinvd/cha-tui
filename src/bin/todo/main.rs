@@ -3,8 +3,6 @@ use std::panic;
 use chatui::dom::{Color, Node};
 use chatui::event::{Event, Key, KeyCode};
 use chatui::{Program, Style, Transition, block, column, row, text};
-use termwiz::escape::CSI;
-use termwiz::escape::csi::{DecPrivateMode, DecPrivateModeCode, Mode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum Focus {
@@ -279,33 +277,18 @@ fn init_tracing() -> color_eyre::Result<()> {
 #[cfg(unix)]
 fn install_panic_hook() -> color_eyre::Result<()> {
     use std::io::{self, Write};
-    use std::os::fd::AsRawFd;
-    use termios::{TCSANOW, Termios, tcsetattr};
-
-    let stdout = std::io::stdout();
-    let fd = stdout.as_raw_fd();
-    let base_termios = Termios::from_fd(fd)?;
 
     panic::set_hook(Box::new(move |panic| {
-        let _ = tcsetattr(fd, TCSANOW, &base_termios);
         let mut stderr = io::stderr();
 
+        // Reset terminal state with escape sequences
         let restore_sequences = [
-            CSI::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(
-                DecPrivateModeCode::ClearAndEnableAlternateScreen,
-            ))),
-            CSI::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(
-                DecPrivateModeCode::BracketedPaste,
-            ))),
-            CSI::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(
-                DecPrivateModeCode::AnyEventMouse,
-            ))),
-            CSI::Mode(Mode::ResetDecPrivateMode(DecPrivateMode::Code(
-                DecPrivateModeCode::SGRMouse,
-            ))),
-            CSI::Mode(Mode::SetDecPrivateMode(DecPrivateMode::Code(
-                DecPrivateModeCode::ShowCursor,
-            ))),
+            "\x1b[?1049l",  // Exit alternate screen
+            "\x1b[?2004l",  // Disable bracketed paste
+            "\x1b[?1000l",  // Disable mouse tracking
+            "\x1b[?1003l",  // Disable any event mouse
+            "\x1b[?1006l",  // Disable SGR mouse
+            "\x1b[?25h",    // Show cursor
         ];
 
         for sequence in restore_sequences {
