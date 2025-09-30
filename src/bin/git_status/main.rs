@@ -314,6 +314,18 @@ mod shortcuts {
             )),
             msg: Some(Msg::OpenCommitModal),
         },
+        Shortcut {
+            label: "Ctrl-D",
+            description: "Delete changes",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('d'),
+                ModifierRequirement::Enabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::OpenDeleteModal),
+        },
     ];
 
     const COMMIT_MODAL_SHORTCUTS: &[Shortcut] = &[
@@ -433,6 +445,15 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
             model.close_commit_modal();
             Transition::Continue
         }
+        Msg::OpenDeleteModal => {
+            model.open_delete_modal();
+            Transition::Continue
+        }
+        Msg::ConfirmDelete => model.confirm_delete(),
+        Msg::CancelDelete => {
+            model.close_delete_modal();
+            Transition::Continue
+        }
         Msg::BackspaceCommit => {
             model.backspace_commit_message();
             Transition::Continue
@@ -488,10 +509,18 @@ fn handle_section_msg(model: &mut Model, focus: Focus, msg: SectionMsg) -> Trans
 }
 
 fn handle_key(model: &mut Model, key: Key) -> Transition {
+    // If the delete modal is active, it consumes keys like Enter/Esc/Y/N.
+    if model.delete_modal.is_some() {
+        return handle_delete_modal_key(model, key);
+    }
+
+    // Global/context shortcuts (including commit modal actions) take precedence
+    // over raw character input handling inside modals.
     if let Some(msg) = shortcuts::message_for_key(model, key) {
         return update(model, msg);
     }
 
+    // When commit modal is open, feed non-modified character input to it.
     if model.commit_modal.is_some() {
         return handle_commit_modal_key(model, key);
     }
@@ -509,6 +538,16 @@ fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition {
             model.append_commit_char(ch);
             Transition::Continue
         }
+        _ => Transition::Continue,
+    }
+}
+
+fn handle_delete_modal_key(model: &mut Model, key: Key) -> Transition {
+    match key.code {
+        KeyCode::Enter => update(model, Msg::ConfirmDelete),
+        KeyCode::Esc => update(model, Msg::CancelDelete),
+        KeyCode::Char('y') | KeyCode::Char('Y') => update(model, Msg::ConfirmDelete),
+        KeyCode::Char('n') | KeyCode::Char('N') => update(model, Msg::CancelDelete),
         _ => Transition::Continue,
     }
 }
@@ -547,12 +586,20 @@ fn view(model: &Model) -> Node<Msg> {
         .with_fill()
         .with_id("root");
 
-    match &model.commit_modal {
-        Some(modal) => column(vec![base, render_commit_modal(modal)])
+    // Stack any active modal dialogs on top of the base UI.
+    let mut layered = base;
+    if let Some(modal) = &model.commit_modal {
+        layered = column(vec![layered, render_commit_modal(modal)])
             .with_fill()
-            .with_id("root-with-modal"),
-        None => base,
+            .with_id("root-with-commit-modal");
     }
+    if let Some(modal) = &model.delete_modal {
+        layered = column(vec![layered, render_delete_modal(modal)])
+            .with_fill()
+            .with_id("root-with-delete-modal");
+    }
+
+    layered
 }
 
 fn render_left_pane(model: &Model) -> Node<Msg> {
@@ -802,6 +849,24 @@ fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
     .with_id("commit-modal")
 }
 
+fn render_delete_modal(state: &DeleteModal) -> Node<Msg> {
+    let title = text::<Msg>("Delete unstaged changes?").with_style(Style::bold());
+    let details = text::<Msg>(&state.display_text()).with_style(Style::dim());
+    let instructions = text::<Msg>("y/Enter to confirm, n/Esc to cancel").with_style(Style::dim());
+
+    let content = column(vec![title, details, instructions])
+        .with_min_width(Dimension::length(36.0))
+        .with_min_height(Dimension::length(3.0));
+
+    modal(vec![
+        block_with_title("Confirm Delete", vec![content])
+            .with_min_width(Dimension::length(48.0))
+            .with_min_height(Dimension::length(5.0))
+            .with_id("delete-modal-block"),
+    ])
+    .with_id("delete-modal")
+}
+
 fn title_style() -> Style {
     let mut style = Style::bold();
     style.fg = Some(highlight::EVERFOREST_BLUE);
@@ -881,6 +946,21 @@ impl CommitModal {
 }
 
 #[derive(Default)]
+struct DeleteModal {
+    path: String,
+}
+
+impl DeleteModal {
+    fn new(path: String) -> Self {
+        Self { path }
+    }
+
+    fn display_text(&self) -> String {
+        format!("This will discard unstaged changes for: {}", self.path)
+    }
+}
+
+#[derive(Default)]
 struct Model {
     unstaged: Vec<FileEntry>,
     staged: Vec<FileEntry>,
@@ -894,6 +974,7 @@ struct Model {
 
     error: Option<String>,
     commit_modal: Option<CommitModal>,
+    delete_modal: Option<DeleteModal>,
     show_all_shortcuts: bool,
 }
 
@@ -923,6 +1004,18 @@ impl Model {
 
     fn close_commit_modal(&mut self) {
         self.commit_modal = None;
+    }
+
+    fn open_delete_modal(&mut self) {
+        if let Some(entry) = self.current_entry()
+            && self.focus == Focus::Unstaged
+        {
+            self.delete_modal = Some(DeleteModal::new(entry.path.clone()));
+        }
+    }
+
+    fn close_delete_modal(&mut self) {
+        self.delete_modal = None;
     }
 
     fn toggle_shortcuts_help(&mut self) {
@@ -962,6 +1055,33 @@ impl Model {
             Err(err) => {
                 self.set_error(err);
             }
+        }
+
+        Transition::Continue
+    }
+
+    fn confirm_delete(&mut self) -> Transition {
+        let path = match self.delete_modal.as_ref() {
+            Some(modal) => modal.path.clone(),
+            None => return Transition::Continue,
+        };
+
+        // Determine the selected entry code to decide how to discard.
+        let code = match self.focus {
+            Focus::Unstaged => self
+                .unstaged
+                .get(self.selected_unstaged)
+                .map(|e| e.code)
+                .unwrap_or(' '),
+            Focus::Staged => ' ',
+        };
+
+        let result = discard_unstaged_changes(&path, code);
+        self.delete_modal = None;
+
+        match result.and_then(|_| self.refresh_status()) {
+            Ok(_) => {}
+            Err(err) => self.set_error(err),
         }
 
         Transition::Continue
@@ -1194,9 +1314,12 @@ enum Msg {
     ScrollDiff(i32),
     RefreshStatus,
     OpenCommitModal,
+    OpenDeleteModal,
     ToggleShortcutsHelp,
     SubmitCommit,
     CancelCommit,
+    ConfirmDelete,
+    CancelDelete,
     BackspaceCommit,
     Staged(SectionMsg),
     Unstaged(SectionMsg),
@@ -1671,6 +1794,16 @@ where
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn discard_unstaged_changes(path: &str, code: char) -> Result<()> {
+    // Untracked files ('?') are removed; tracked files are restored from index/HEAD.
+    if code == '?' {
+        return run_git(["clean", "-f", "--", path]).map(|_| ());
+    }
+
+    // Restore the worktree copy to the index state (discarding unstaged changes).
+    run_git(["restore", "--worktree", "--", path]).map(|_| ())
 }
 
 fn clamp_index(index: &mut usize, len: usize) {
