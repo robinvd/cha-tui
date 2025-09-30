@@ -12,6 +12,7 @@ pub enum LanguageKind {
     Rust,
     Markdown,
     Python,
+    Go,
 }
 
 const HIGHLIGHT_NAMES: &[&str] = &[
@@ -87,14 +88,26 @@ const MARKDOWN_INLINE_HIGHLIGHTS_QUERY: &str =
 const MARKDOWN_INLINE_INJECTIONS_QUERY: &str =
     include_str!("queries/markdown_inline_injections.scm");
 
+// External language queries sourced from Helix runtime
 const PYTHON_HIGHLIGHTS_QUERY: &str = include_str!(
-    "/nix/store/hnkvggm7815dshjjxbfk3gsfkx8ayhi6-runtime/queries/python/highlights.scm"
+    "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/python/highlights.scm"
 );
 const PYTHON_INJECTIONS_QUERY: &str = include_str!(
-    "/nix/store/hnkvggm7815dshjjxbfk3gsfkx8ayhi6-runtime/queries/python/injections.scm"
+    "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/python/injections.scm"
 );
-const PYTHON_LOCALS_QUERY: &str =
-    include_str!("/nix/store/hnkvggm7815dshjjxbfk3gsfkx8ayhi6-runtime/queries/python/locals.scm");
+const PYTHON_LOCALS_QUERY: &str = include_str!(
+    "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/python/locals.scm"
+);
+
+const GO_HIGHLIGHTS_QUERY: &str = include_str!(
+    "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/go/highlights.scm"
+);
+const GO_INJECTIONS_QUERY: &str = include_str!(
+    "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/go/injections.scm"
+);
+const GO_LOCALS_QUERY: &str = include_str!(
+    "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/go/locals.scm"
+);
 
 pub(crate) const EVERFOREST_FG: Color = Color::rgb(0xd3, 0xc6, 0xaa);
 pub(crate) const EVERFOREST_RED: Color = Color::rgb(0xe6, 0x7e, 0x80);
@@ -114,6 +127,7 @@ pub fn language_for_path(path: &Path) -> Option<LanguageKind> {
     match ext.as_str() {
         "rs" => Some(LanguageKind::Rust),
         "py" => Some(LanguageKind::Python),
+        "go" => Some(LanguageKind::Go),
         "md" | "markdown" | "mdown" | "mkd" => Some(LanguageKind::Markdown),
         _ => None,
     }
@@ -129,6 +143,7 @@ struct HighlightRegistry {
     markdown: HighlightConfiguration,
     markdown_inline: HighlightConfiguration,
     python: HighlightConfiguration,
+    go: HighlightConfiguration,
     styles: Vec<Style>,
 }
 
@@ -170,6 +185,15 @@ impl HighlightRegistry {
         )?;
         python.configure(HIGHLIGHT_NAMES);
 
+        let mut go = HighlightConfiguration::new(
+            tree_sitter_go::LANGUAGE.into(),
+            "go",
+            GO_HIGHLIGHTS_QUERY,
+            GO_INJECTIONS_QUERY,
+            GO_LOCALS_QUERY,
+        )?;
+        go.configure(HIGHLIGHT_NAMES);
+
         let styles = HIGHLIGHT_NAMES.iter().map(|name| style_for(name)).collect();
 
         Ok(Self {
@@ -177,6 +201,7 @@ impl HighlightRegistry {
             markdown,
             markdown_inline,
             python,
+            go,
             styles,
         })
     }
@@ -192,6 +217,11 @@ impl HighlightRegistry {
             LanguageKind::Python => {
                 let iterator =
                     highlighter.highlight(&self.python, source.as_bytes(), None, |_| None)?;
+                events_to_lines(iterator, source, &self.styles)
+            }
+            LanguageKind::Go => {
+                let iterator =
+                    highlighter.highlight(&self.go, source.as_bytes(), None, |_| None)?;
                 events_to_lines(iterator, source, &self.styles)
             }
             LanguageKind::Markdown => {
