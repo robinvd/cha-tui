@@ -16,6 +16,345 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod highlight;
+mod shortcuts {
+    use super::{Key, KeyCode, Model, Msg};
+
+    #[derive(Clone)]
+    struct Shortcut {
+        label: &'static str,
+        description: &'static str,
+        show_in_bar: bool,
+        binding: Option<Binding>,
+        msg: Option<Msg>,
+    }
+
+    #[derive(Clone, Copy)]
+    struct Binding {
+        code: KeyCode,
+        ctrl: ModifierRequirement,
+        alt: ModifierRequirement,
+        shift: ModifierRequirement,
+    }
+
+    #[derive(Clone, Copy)]
+    enum ModifierRequirement {
+        Any,
+        Enabled,
+        Disabled,
+    }
+
+    impl ModifierRequirement {
+        const fn matches(self, value: bool) -> bool {
+            match self {
+                Self::Any => true,
+                Self::Enabled => value,
+                Self::Disabled => !value,
+            }
+        }
+    }
+
+    impl Binding {
+        const fn new(
+            code: KeyCode,
+            ctrl: ModifierRequirement,
+            alt: ModifierRequirement,
+            shift: ModifierRequirement,
+        ) -> Self {
+            Self {
+                code,
+                ctrl,
+                alt,
+                shift,
+            }
+        }
+
+        fn matches_key(self, key: Key) -> bool {
+            let code_matches = match (self.code, key.code) {
+                (KeyCode::Char(expected), KeyCode::Char(actual)) => {
+                    if key.ctrl {
+                        actual.eq_ignore_ascii_case(&expected)
+                    } else {
+                        actual == expected
+                    }
+                }
+                _ => self.code == key.code,
+            };
+
+            code_matches
+                && self.ctrl.matches(key.ctrl)
+                && self.alt.matches(key.alt)
+                && self.shift.matches(key.shift)
+        }
+    }
+
+    pub(super) struct ShortcutDisplay {
+        pub label: &'static str,
+        pub description: &'static str,
+        pub msg: Option<Msg>,
+    }
+
+    pub(super) fn message_for_key(model: &Model, key: Key) -> Option<Msg> {
+        context_shortcuts(model)
+            .iter()
+            .chain(GLOBAL_SHORTCUTS.iter())
+            .filter_map(|shortcut| shortcut.binding.map(|binding| (shortcut, binding)))
+            .find(|(_, binding)| binding.matches_key(key))
+            .and_then(|(shortcut, _)| shortcut.msg.as_ref().cloned())
+    }
+
+    pub(super) fn display_shortcuts(model: &Model) -> Vec<ShortcutDisplay> {
+        context_shortcuts(model)
+            .iter()
+            .chain(GLOBAL_SHORTCUTS.iter())
+            .filter(|shortcut| shortcut.show_in_bar)
+            .map(|shortcut| ShortcutDisplay {
+                label: shortcut.label,
+                description: shortcut.description,
+                msg: shortcut.msg.as_ref().cloned(),
+            })
+            .collect()
+    }
+
+    fn context_shortcuts(model: &Model) -> &'static [Shortcut] {
+        if model.commit_modal.is_some() {
+            COMMIT_MODAL_SHORTCUTS
+        } else {
+            NORMAL_SHORTCUTS
+        }
+    }
+
+    const GLOBAL_SHORTCUTS: &[Shortcut] = &[
+        Shortcut {
+            label: "Ctrl-C",
+            description: "Quit immediately",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('c'),
+                ModifierRequirement::Enabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::Quit),
+        },
+        Shortcut {
+            label: "?",
+            description: "Toggle shortcuts",
+            show_in_bar: false,
+            binding: Some(Binding::new(
+                KeyCode::Char('?'),
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::ToggleShortcutsHelp),
+        },
+    ];
+
+    const NORMAL_SHORTCUTS: &[Shortcut] = &[
+        Shortcut {
+            label: "Esc",
+            description: "Quit",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Esc,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::Quit),
+        },
+        Shortcut {
+            label: "q",
+            description: "Quit",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('q'),
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::Quit),
+        },
+        Shortcut {
+            label: "Enter",
+            description: "Stage / Unstage",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Enter,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::ToggleStage),
+        },
+        Shortcut {
+            label: "Double-click",
+            description: "Stage / Unstage",
+            show_in_bar: true,
+            binding: None,
+            msg: None,
+        },
+        Shortcut {
+            label: "Left",
+            description: "Focus unstaged",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Left,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::FocusUnstaged),
+        },
+        Shortcut {
+            label: "Right",
+            description: "Focus staged",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Right,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::FocusStaged),
+        },
+        Shortcut {
+            label: "Up",
+            description: "Move selection up",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Up,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::MoveSelectionUp),
+        },
+        Shortcut {
+            label: "Down",
+            description: "Move selection down",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Down,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::MoveSelectionDown),
+        },
+        Shortcut {
+            label: "j",
+            description: "Scroll files",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('j'),
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::ScrollFiles(1)),
+        },
+        Shortcut {
+            label: "k",
+            description: "Scroll files",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('k'),
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::ScrollFiles(-1)),
+        },
+        Shortcut {
+            label: "J",
+            description: "Scroll diff",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('J'),
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::ScrollDiff(1)),
+        },
+        Shortcut {
+            label: "K",
+            description: "Scroll diff",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('K'),
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::ScrollDiff(-1)),
+        },
+        Shortcut {
+            label: "r",
+            description: "Refresh status",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('r'),
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::RefreshStatus),
+        },
+        Shortcut {
+            label: "c",
+            description: "Open commit",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('c'),
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::OpenCommitModal),
+        },
+    ];
+
+    const COMMIT_MODAL_SHORTCUTS: &[Shortcut] = &[
+        Shortcut {
+            label: "Ctrl-D",
+            description: "Commit",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('d'),
+                ModifierRequirement::Enabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::SubmitCommit),
+        },
+        Shortcut {
+            label: "Esc",
+            description: "Cancel",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Esc,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::CancelCommit),
+        },
+        Shortcut {
+            label: "Backspace",
+            description: "Delete character",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Backspace,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::BackspaceCommit),
+        },
+    ];
+}
 
 fn main() -> Result<()> {
     color_eyre::install()?;
@@ -42,6 +381,62 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
     info!("update {msg:?}");
     match msg {
         Msg::KeyPressed(key) => handle_key(model, key),
+        Msg::Quit => Transition::Quit,
+        Msg::ToggleStage => {
+            model.toggle_stage_selected();
+            Transition::Continue
+        }
+        Msg::FocusUnstaged => {
+            model.focus_unstaged();
+            model.update_diff();
+            Transition::Continue
+        }
+        Msg::FocusStaged => {
+            model.focus_staged();
+            model.update_diff();
+            Transition::Continue
+        }
+        Msg::MoveSelectionUp => {
+            model.move_selection_up();
+            model.update_diff();
+            Transition::Continue
+        }
+        Msg::MoveSelectionDown => {
+            model.move_selection_down();
+            model.update_diff();
+            Transition::Continue
+        }
+        Msg::ScrollFiles(delta) => {
+            model.scroll_files_in_focus(delta);
+            Transition::Continue
+        }
+        Msg::ScrollDiff(delta) => {
+            model.scroll_diff(delta);
+            Transition::Continue
+        }
+        Msg::RefreshStatus => {
+            if let Err(err) = model.refresh_status() {
+                model.set_error(err);
+            }
+            Transition::Continue
+        }
+        Msg::OpenCommitModal => {
+            model.open_commit_modal();
+            Transition::Continue
+        }
+        Msg::ToggleShortcutsHelp => {
+            model.toggle_shortcuts_help();
+            Transition::Continue
+        }
+        Msg::SubmitCommit => model.submit_commit(),
+        Msg::CancelCommit => {
+            model.close_commit_modal();
+            Transition::Continue
+        }
+        Msg::BackspaceCommit => {
+            model.backspace_commit_message();
+            Transition::Continue
+        }
         Msg::Staged(msg) => handle_section_msg(model, Focus::Staged, msg),
         Msg::Unstaged(msg) => handle_section_msg(model, Focus::Unstaged, msg),
         Msg::DiffScroll(scroll_msg) => {
@@ -93,109 +488,25 @@ fn handle_section_msg(model: &mut Model, focus: Focus, msg: SectionMsg) -> Trans
 }
 
 fn handle_key(model: &mut Model, key: Key) -> Transition {
-    if key.ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('C')) {
-        return Transition::Quit;
+    if let Some(msg) = shortcuts::message_for_key(model, key) {
+        return update(model, msg);
     }
 
     if model.commit_modal.is_some() {
         return handle_commit_modal_key(model, key);
     }
 
-    match key.code {
-        KeyCode::Esc => Transition::Quit,
-        KeyCode::Char('q') | KeyCode::Char('Q') => Transition::Quit,
-        KeyCode::Up => {
-            model.move_selection_up();
-            model.update_diff();
-            Transition::Continue
-        }
-        KeyCode::Down => {
-            model.move_selection_down();
-            model.update_diff();
-            Transition::Continue
-        }
-        KeyCode::Left => {
-            model.focus_unstaged();
-            model.update_diff();
-            Transition::Continue
-        }
-        KeyCode::Right => {
-            model.focus_staged();
-            model.update_diff();
-            Transition::Continue
-        }
-        KeyCode::Enter => {
-            model.toggle_stage_selected();
-            Transition::Continue
-        }
-        KeyCode::Char('J') => {
-            model.scroll_diff(1);
-            Transition::Continue
-        }
-        KeyCode::Char('K') => {
-            model.scroll_diff(-1);
-            Transition::Continue
-        }
-        KeyCode::Char('?') => {
-            if !key.alt && !key.ctrl {
-                model.toggle_shortcuts_help();
-            }
-            Transition::Continue
-        }
-        KeyCode::Char('j') => {
-            model.scroll_files(model.focus, 1);
-            Transition::Continue
-        }
-        KeyCode::Char('k') => {
-            model.scroll_files(model.focus, -1);
-            Transition::Continue
-        }
-        KeyCode::Char('c') | KeyCode::Char('C') => {
-            if !key.alt && !key.ctrl {
-                model.open_commit_modal();
-            }
-            Transition::Continue
-        }
-        KeyCode::Char('r') | KeyCode::Char('R') => {
-            if !key.alt
-                && !key.ctrl
-                && let Err(err) = model.refresh_status()
-            {
-                model.set_error(err);
-            }
-            Transition::Continue
-        }
-        _ => Transition::Continue,
-    }
+    Transition::Continue
 }
 
 fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition {
     match key.code {
-        KeyCode::Esc => {
-            model.close_commit_modal();
-            Transition::Continue
-        }
-        KeyCode::Backspace => {
-            model.backspace_commit_message();
-            Transition::Continue
-        }
         KeyCode::Char(ch) => {
-            if key.ctrl {
-                if matches!(ch, 'd' | 'D') {
-                    return model.submit_commit();
-                }
+            if key.ctrl || key.alt {
                 return Transition::Continue;
             }
 
-            if key.alt {
-                return Transition::Continue;
-            }
-
-            if ch == '?' {
-                model.toggle_shortcuts_help();
-            } else {
-                model.append_commit_char(ch);
-            }
+            model.append_commit_char(ch);
             Transition::Continue
         }
         _ => Transition::Continue,
@@ -389,44 +700,28 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
 }
 
 fn render_shortcuts_bar(model: &Model) -> Node<Msg> {
-    let shortcuts: Vec<(&str, &str)> = if model.commit_modal.is_some() {
-        vec![
-            ("Ctrl-D", "Commit"),
-            ("Esc", "Cancel"),
-            ("Backspace", "Delete character"),
-            ("Ctrl-C", "Quit app"),
-            // ("?", "Hide shortcuts"),
-        ]
-    } else {
-        vec![
-            ("Esc / q", "Quit"),
-            ("Ctrl-C", "Quit immediately"),
-            ("Enter", "Stage / Unstage"),
-            ("Double-click", "Stage / Unstage"),
-            ("Left / Right", "Change focus"),
-            ("Up / Down", "Move selection"),
-            ("j / k", "Scroll files"),
-            ("J / K", "Scroll diff"),
-            ("r", "Refresh status"),
-            ("c", "Open commit"),
-            // ("?", "Hide shortcuts"),
-        ]
-    };
+    let shortcuts = shortcuts::display_shortcuts(model);
     let items: Vec<Node<Msg>> = shortcuts
         .into_iter()
         .enumerate()
-        .map(|(idx, (key, description))| {
+        .map(|(idx, shortcut)| {
             let spans = vec![
-                TextSpan::new(key, shortcut_key_style()),
+                TextSpan::new(shortcut.label, shortcut_key_style()),
                 TextSpan::new(" ", Style::default()),
-                TextSpan::new(description, shortcut_description_style()),
+                TextSpan::new(shortcut.description, shortcut_description_style()),
             ];
 
-            row(vec![rich_text::<Msg>(spans)])
+            let item = row(vec![rich_text::<Msg>(spans)])
                 .with_padding_2d(1, 0)
                 .with_flex_grow(0.)
                 .with_flex_shrink(0.)
-                .with_id_mixin("shortcut-item", idx as u64)
+                .with_id_mixin("shortcut-item", idx as u64);
+
+            if let Some(msg) = shortcut.msg.clone() {
+                item.on_click(move || msg.clone())
+            } else {
+                item
+            }
         })
         .collect();
 
@@ -434,15 +729,40 @@ fn render_shortcuts_bar(model: &Model) -> Node<Msg> {
         .with_width(Dimension::percent(1.))
         .with_id("shortcuts-items");
 
-    if model.show_all_shortcuts {
-        shortcuts_row = shortcuts_row.with_flex_wrap(FlexWrap::Wrap);
+    // if model.show_all_shortcuts {
+    //     shortcuts_row = shortcuts_row.with_flex_wrap(FlexWrap::Wrap);
+    // }
+    shortcuts_row = shortcuts_row.with_flex_wrap(FlexWrap::Wrap);
+    if !model.show_all_shortcuts {
+        shortcuts_row = shortcuts_row.with_height(Dimension::length(1.));
     }
 
-    block_with_title("Shortcuts", vec![shortcuts_row])
-        .with_min_height(Dimension::ZERO)
-        .with_flex_grow(0.)
-        .with_flex_shrink(0.)
-        .with_id("shortcuts-bar")
+    block_with_title(
+        "Shortcuts",
+        vec![row(vec![
+            shortcuts_row
+                .with_flex_grow(1.)
+                .with_flex_shrink(1.)
+                .with_min_width(Dimension::from_length(0.0))
+                .with_overflow_x(taffy::Overflow::Clip),
+            // Make the help toggle in the shortcuts bar clickable so users can switch
+            // between the compact and expanded views via mouse.
+            rich_text(&[
+                TextSpan::new("?", shortcut_key_style()),
+                TextSpan::new(" ", Style::default()),
+                TextSpan::new(
+                    if model.show_all_shortcuts { "less" } else { "more" },
+                    shortcut_description_style(),
+                ),
+            ])
+            .on_click(|| Msg::ToggleShortcutsHelp)
+            .with_id("more-less-button"),
+        ])],
+    )
+    .with_min_height(Dimension::ZERO)
+    .with_flex_grow(0.)
+    .with_flex_shrink(0.)
+    .with_id("shortcuts-bar")
 }
 
 fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
@@ -810,6 +1130,11 @@ impl Model {
         self.update_section_scroll(focus, ScrollMsg::Delta(delta));
     }
 
+    fn scroll_files_in_focus(&mut self, delta: i32) {
+        let focus = self.focus;
+        self.scroll_files(focus, delta);
+    }
+
     fn ensure_selected_visible(&mut self) {
         match self.focus {
             Focus::Unstaged => {
@@ -856,9 +1181,23 @@ impl Model {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum Msg {
     KeyPressed(Key),
+    Quit,
+    ToggleStage,
+    FocusUnstaged,
+    FocusStaged,
+    MoveSelectionUp,
+    MoveSelectionDown,
+    ScrollFiles(i32),
+    ScrollDiff(i32),
+    RefreshStatus,
+    OpenCommitModal,
+    ToggleShortcutsHelp,
+    SubmitCommit,
+    CancelCommit,
+    BackspaceCommit,
     Staged(SectionMsg),
     Unstaged(SectionMsg),
     DiffScroll(ScrollMsg),
@@ -866,7 +1205,7 @@ enum Msg {
     StagedScroll(ScrollMsg),
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 enum SectionMsg {
     ActivateFile(usize),
     ToggleStageEntry(usize),
