@@ -230,13 +230,6 @@ impl<'a> Renderer<'a> {
         block_border_style: Option<&Style>,
     ) {
         let _ = parent_origin;
-        let scrollbar_width = layout.scrollbar_size.width.max(0.0).round() as usize;
-        if scrollbar_width == 0 || clip.width == 0 || clip.height == 0 {
-            return;
-        }
-        if clip.width < scrollbar_width {
-            return;
-        }
 
         let viewport_height = layout.size.height.max(0.0);
         if viewport_height <= 0.0 {
@@ -248,7 +241,21 @@ impl<'a> Renderer<'a> {
             return;
         }
 
-        let share_border_column = block_border_style.is_some() && scrollbar_width == 1;
+        let raw_scrollbar_width = layout.scrollbar_size.width.max(0.0).round() as usize;
+        let share_border_column = block_border_style.is_some() && raw_scrollbar_width <= 1;
+        let scrollbar_width = if share_border_column {
+            raw_scrollbar_width.max(1)
+        } else {
+            raw_scrollbar_width
+        };
+
+        if scrollbar_width == 0 || clip.width == 0 || clip.height == 0 {
+            return;
+        }
+        if clip.width < scrollbar_width {
+            return;
+        }
+
         let track_top = if share_border_column {
             clip.y.saturating_add(1)
         } else {
