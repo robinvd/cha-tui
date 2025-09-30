@@ -267,7 +267,9 @@ pub fn row<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
 
 pub fn modal<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
     let mut element = ElementNode::new(ElementKind::Modal, children);
-    element.attrs.style = Style::dim();
+    // Use a semi-transparent black background to dim the content behind the modal
+    element.attrs.style.bg = Some(Color::rgba(0, 0, 0, 8));
+    element.attrs.style.fg = Some(Color::rgba(0, 0, 0, 8));
 
     let mut node = Node::new(NodeContent::Element(element));
     node.layout_state.style.flex_direction = FlexDirection::Column;
@@ -932,7 +934,8 @@ mod tests {
         let element = node.as_element().expect("expected element node");
         assert_eq!(element.kind, ElementKind::Modal);
         assert_eq!(element.children, vec![child]);
-        assert!(element.attrs.style.dim);
+        // Check that modal has a semi-transparent background instead of dim
+        assert_eq!(element.attrs.style.bg, Some(Color::rgba(0, 0, 0, 128)));
 
         let style = node.layout_state().style.clone();
         assert_eq!(style.position, Position::Absolute);

@@ -2,6 +2,7 @@ use std::io::{Read, Write};
 use std::time::Duration;
 
 use crate::error::ProgramError;
+use crate::oklab::StraightRgba;
 
 /// RGBA color representation
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -19,6 +20,26 @@ impl Rgba {
 
     pub const fn opaque(r: u8, g: u8, b: u8) -> Self {
         Self::new(r, g, b, 255)
+    }
+
+    /// Convert to StraightRgba for color blending operations
+    pub const fn to_straight_rgba(self) -> StraightRgba {
+        let color = (self.r as u32) 
+            | ((self.g as u32) << 8) 
+            | ((self.b as u32) << 16) 
+            | ((self.a as u32) << 24);
+        StraightRgba::from_le(color)
+    }
+
+    /// Convert from StraightRgba after blending operations
+    pub const fn from_straight_rgba(rgba: StraightRgba) -> Self {
+        let color = rgba.to_ne();
+        Self {
+            r: (color & 0xff) as u8,
+            g: ((color >> 8) & 0xff) as u8,
+            b: ((color >> 16) & 0xff) as u8,
+            a: (color >> 24) as u8,
+        }
     }
 }
 
@@ -318,5 +339,27 @@ mod tests {
     fn rgba_opaque_sets_full_alpha() {
         let color = Rgba::opaque(100, 150, 200);
         assert_eq!(color.a, 255);
+    }
+
+    #[test]
+    fn rgba_to_straight_rgba_conversion() {
+        let rgba = Rgba::new(255, 128, 64, 200);
+        let straight = rgba.to_straight_rgba();
+        
+        // Check that the conversion preserves the color components
+        assert_eq!(straight.red(), 255);
+        assert_eq!(straight.green(), 128);
+        assert_eq!(straight.blue(), 64);
+        assert_eq!(straight.alpha(), 200);
+    }
+
+    #[test]
+    fn rgba_roundtrip_conversion() {
+        let original = Rgba::new(123, 45, 67, 89);
+        let straight = original.to_straight_rgba();
+        let back = Rgba::from_straight_rgba(straight);
+        
+        // Should be identical after roundtrip
+        assert_eq!(original, back);
     }
 }
