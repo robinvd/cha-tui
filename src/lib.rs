@@ -1,3 +1,4 @@
+pub mod buffer;
 pub mod components;
 pub mod dom;
 pub mod error;

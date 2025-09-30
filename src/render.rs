@@ -1,15 +1,15 @@
+use crate::buffer::DoubleBuffer;
 use crate::dom::{ElementKind, ElementNode, Node, NodeContent, Style, TextNode};
 use crate::error::ProgramError;
 use crate::event::Size;
 
 use termwiz::cell::{CellAttributes, Intensity, unicode_column_width};
 use termwiz::color::{AnsiColor, ColorAttribute, RgbColor};
-use termwiz::surface::{Change, CursorVisibility, Position, Surface};
 
 use taffy::Layout as TaffyLayout;
 
 pub struct Renderer<'a> {
-    surface: &'a mut Surface,
+    buffer: &'a mut DoubleBuffer,
 }
 
 #[derive(Clone, Copy)]
@@ -56,23 +56,16 @@ const SCROLLBAR_TRACK_CHAR: char = ' ';
 const SCROLLBAR_THUMB_CHAR: char = '█';
 
 impl<'a> Renderer<'a> {
-    pub fn new(surface: &'a mut Surface) -> Self {
-        Self { surface }
+    pub fn new(buffer: &'a mut DoubleBuffer) -> Self {
+        Self { buffer }
     }
 
     pub fn render<Msg>(&mut self, root: &Node<Msg>, size: Size) -> Result<(), ProgramError> {
         let width = size.width as usize;
         let height = size.height as usize;
 
-        self.surface.add_change(Change::CursorPosition {
-            x: Position::Absolute(0),
-            y: Position::Absolute(0),
-        });
-        self.surface
-            .add_change(Change::ClearScreen(ColorAttribute::Default));
-        self.surface.resize(width, height);
-        self.surface
-            .add_change(Change::ClearScreen(ColorAttribute::Default));
+        self.buffer.resize(width, height);
+        self.buffer.clear();
 
         let clip = Rect {
             x: 0,
@@ -81,8 +74,6 @@ impl<'a> Renderer<'a> {
             height,
         };
         self.render_node(root, Point { x: 0, y: 0 }, clip, 0.0);
-        self.surface
-            .add_change(Change::CursorVisibility(CursorVisibility::Hidden));
 
         Ok(())
     }
@@ -168,13 +159,8 @@ impl<'a> Renderer<'a> {
                 fill_style = Some(span.style.clone());
             }
 
-            self.surface.add_change(Change::CursorPosition {
-                x: Position::Absolute(cursor_x),
-                y: Position::Absolute(clip.y),
-            });
-            self.surface
-                .add_change(Change::AllAttributes(style_to_attributes(&span.style)));
-            self.surface.add_change(Change::Text(collected));
+            let attrs = style_to_attributes(&span.style);
+            self.buffer.write_text(cursor_x, clip.y, &collected, &attrs);
 
             cursor_x += taken;
             remaining = remaining.saturating_sub(taken);
@@ -183,13 +169,9 @@ impl<'a> Renderer<'a> {
         if remaining > 0
             && let Some(style) = fill_style
         {
-            self.surface.add_change(Change::CursorPosition {
-                x: Position::Absolute(cursor_x),
-                y: Position::Absolute(clip.y),
-            });
-            self.surface
-                .add_change(Change::AllAttributes(style_to_attributes(&style)));
-            self.surface.add_change(Change::Text(" ".repeat(remaining)));
+            let attrs = style_to_attributes(&style);
+            let padding = " ".repeat(remaining);
+            self.buffer.write_text(cursor_x, clip.y, &padding, &attrs);
         }
     }
 
@@ -426,28 +408,11 @@ impl<'a> Renderer<'a> {
         }
 
         let attrs = style_to_attributes(style);
-        self.surface.add_change(Change::CursorPosition {
-            x: Position::Absolute(clip.x + 1),
-            y: Position::Absolute(clip.y),
-        });
-        self.surface
-            .add_change(Change::AllAttributes(attrs.clone()));
-        self.surface.add_change(Change::Text(rendered));
+        self.buffer.write_text(clip.x + 1, clip.y, &rendered, &attrs);
     }
 
     fn write_char(&mut self, x: usize, y: usize, ch: char, attrs: &CellAttributes) {
-        let (width, height) = self.surface.dimensions();
-        if x >= width || y >= height {
-            return;
-        }
-
-        self.surface.add_change(Change::CursorPosition {
-            x: Position::Absolute(x),
-            y: Position::Absolute(y),
-        });
-        self.surface
-            .add_change(Change::AllAttributes(attrs.clone()));
-        self.surface.add_change(Change::Text(ch.to_string()));
+        self.buffer.write_char(x, y, ch, attrs);
     }
 
     fn apply_overlay_style(&mut self, area: Rect, style: &Style) {
@@ -455,35 +420,31 @@ impl<'a> Renderer<'a> {
             return;
         }
 
-        let mut rows = self.surface.screen_cells();
-
-        for row in rows.iter_mut().skip(area.y).take(area.height) {
-            let start = area.x.min(row.len());
-            let end = (area.x + area.width).min(row.len());
-
-            for cell in &mut row[start..end] {
-                let attrs = cell.attrs_mut();
-                if let Some(fg) = style.fg {
-                    attrs.set_foreground(color_to_attribute(fg));
-                }
-                if let Some(bg) = style.bg {
-                    attrs.set_background(color_to_attribute(bg));
-                }
-                if style.bold {
-                    attrs.set_intensity(Intensity::Bold);
-                } else if style.dim {
-                    attrs.set_intensity(Intensity::Half);
+        for y in area.y..(area.y + area.height).min(self.buffer.dimensions().1) {
+            for x in area.x..(area.x + area.width).min(self.buffer.dimensions().0) {
+                if let Some(cell) = self.buffer.get_cell_mut(x, y) {
+                    if let Some(fg) = style.fg {
+                        cell.attrs.set_foreground(color_to_attribute(fg));
+                    }
+                    if let Some(bg) = style.bg {
+                        cell.attrs.set_background(color_to_attribute(bg));
+                    }
+                    if style.bold {
+                        cell.attrs.set_intensity(Intensity::Bold);
+                    } else if style.dim {
+                        cell.attrs.set_intensity(Intensity::Half);
+                    }
                 }
             }
         }
     }
 
-    pub fn surface(&self) -> &Surface {
-        &*self.surface
+    pub fn buffer(&self) -> &DoubleBuffer {
+        self.buffer
     }
 
-    pub fn surface_mut(&mut self) -> &mut Surface {
-        &mut *self.surface
+    pub fn buffer_mut(&mut self) -> &mut DoubleBuffer {
+        self.buffer
     }
 }
 
@@ -549,7 +510,6 @@ mod tests {
         Color, Style, TextSpan, block, block_with_title, column, modal, rich_text, row, text,
     };
     use taffy::{AvailableSpace, Dimension, compute_root_layout};
-    use termwiz::surface::CursorVisibility;
 
     fn prepare_layout<Msg>(node: &mut Node<Msg>, size: Size) {
         compute_root_layout(
@@ -564,7 +524,7 @@ mod tests {
     }
 
     fn render_scrollable_lines(scroll_offset: f32) -> Vec<String> {
-        let mut surface = Surface::new(6, 5);
+        let mut buffer = DoubleBuffer::new(6, 5);
         let lines: Vec<Node<()>> = (0..20)
             .map(|idx| text::<()>(format!("Line {idx}")))
             .collect();
@@ -577,21 +537,21 @@ mod tests {
             .with_height(Dimension::percent(1.0));
         prepare_layout(&mut root, Size::new(6, 5));
 
-        let mut renderer = Renderer::new(&mut surface);
+        let mut renderer = Renderer::new(&mut buffer);
         renderer
             .render(&root, Size::new(6, 5))
             .expect("render should succeed");
 
         renderer
-            .surface()
-            .screen_chars_to_string()
+            .buffer()
+            .to_string()
             .lines()
             .map(|line| line.to_string())
             .collect()
     }
 
     fn render_scrollable_block_lines(scroll_offset: f32) -> Vec<String> {
-        let mut surface = Surface::new(8, 7);
+        let mut buffer = DoubleBuffer::new(8, 7);
         let lines: Vec<Node<()>> = (0..20)
             .map(|idx| text::<()>(format!("Item {idx}")))
             .collect();
@@ -602,14 +562,14 @@ mod tests {
         let mut root = scrollable;
         prepare_layout(&mut root, Size::new(8, 7));
 
-        let mut renderer = Renderer::new(&mut surface);
+        let mut renderer = Renderer::new(&mut buffer);
         renderer
             .render(&root, Size::new(8, 7))
             .expect("render should succeed");
 
         renderer
-            .surface()
-            .screen_chars_to_string()
+            .buffer()
+            .to_string()
             .lines()
             .map(|line| line.to_string())
             .collect()
@@ -620,7 +580,7 @@ mod tests {
             .iter()
             .enumerate()
             .filter_map(|(idx, line)| {
-                if line.chars().last() == Some(SCROLLBAR_THUMB_CHAR) {
+                if line.ends_with(SCROLLBAR_THUMB_CHAR) {
                     Some(idx)
                 } else {
                     None
@@ -635,8 +595,8 @@ mod tests {
 
     #[test]
     fn renders_text_node() {
-        let mut surface = Surface::new(10, 4);
-        let mut renderer = Renderer::new(&mut surface);
+        let mut buffer = DoubleBuffer::new(10, 4);
+        let mut renderer = Renderer::new(&mut buffer);
         let mut node = text::<()>("hello");
         prepare_layout(&mut node, Size::new(10, 4));
 
@@ -644,14 +604,14 @@ mod tests {
             .render(&node, Size::new(10, 4))
             .expect("render should succeed");
 
-        let contents = renderer.surface.screen_chars_to_string();
+        let contents = renderer.buffer.to_string();
         assert!(contents.starts_with("hello"));
     }
 
     #[test]
     fn renders_rich_text_spans_with_styles() {
-        let mut surface = Surface::new(10, 2);
-        let mut renderer = Renderer::new(&mut surface);
+        let mut buffer = DoubleBuffer::new(10, 2);
+        let mut renderer = Renderer::new(&mut buffer);
         let spans = vec![
             TextSpan::new("+", Style::fg(Color::Green)),
             TextSpan::new("fn", Style::fg(Color::Cyan)),
@@ -663,19 +623,19 @@ mod tests {
             .render(&node, Size::new(10, 2))
             .expect("render should succeed");
 
-        let mut lines = renderer.surface().screen_lines();
-        let line = lines.remove(0);
-        let mut cells = line.visible_cells();
-        let prefix = cells.next().expect("expected prefix cell");
-        assert_eq!(prefix.attrs().foreground(), AnsiColor::Green.into());
-        let keyword = cells.next().expect("expected keyword cell");
-        assert_eq!(keyword.attrs().foreground(), AnsiColor::Aqua.into());
+        let back_buffer = renderer.buffer().back_buffer();
+        let prefix = &back_buffer[0][0];
+        assert_eq!(prefix.ch, '+');
+        assert_eq!(prefix.attrs.foreground(), AnsiColor::Green.into());
+        let keyword = &back_buffer[0][1];
+        assert_eq!(keyword.ch, 'f');
+        assert_eq!(keyword.attrs.foreground(), AnsiColor::Aqua.into());
     }
 
     #[test]
     fn rich_text_respects_width_clipping() {
-        let mut surface = Surface::new(4, 2);
-        let mut renderer = Renderer::new(&mut surface);
+        let mut buffer = DoubleBuffer::new(4, 2);
+        let mut renderer = Renderer::new(&mut buffer);
         let spans = vec![
             TextSpan::new("abc", Style::fg(Color::Red)),
             TextSpan::new("def", Style::fg(Color::Green)),
@@ -687,7 +647,7 @@ mod tests {
             .render(&node, Size::new(4, 2))
             .expect("render should succeed");
 
-        let screen = renderer.surface().screen_chars_to_string();
+        let screen = renderer.buffer().to_string();
         let first_line = screen.lines().next().unwrap_or("");
         assert_eq!(first_line, "abcd");
     }
@@ -740,8 +700,8 @@ mod tests {
 
     #[test]
     fn column_stacks_children_vertically() {
-        let mut surface = Surface::new(6, 4);
-        let mut renderer = Renderer::new(&mut surface);
+        let mut buffer = DoubleBuffer::new(6, 4);
+        let mut renderer = Renderer::new(&mut buffer);
         let mut node = column(vec![text::<()>("top"), text::<()>("bottom")]);
         prepare_layout(&mut node, Size::new(6, 4));
 
@@ -749,7 +709,7 @@ mod tests {
             .render(&node, Size::new(6, 4))
             .expect("render should succeed");
 
-        let screen = renderer.surface().screen_chars_to_string();
+        let screen = renderer.buffer().to_string();
         let lines: Vec<&str> = screen.lines().collect();
         assert_eq!(lines[0].trim_end(), "top");
         assert_eq!(lines[1].trim_end(), "bottom");
@@ -757,8 +717,8 @@ mod tests {
 
     #[test]
     fn row_places_children_horizontally() {
-        let mut surface = Surface::new(10, 2);
-        let mut renderer = Renderer::new(&mut surface);
+        let mut buffer = DoubleBuffer::new(10, 2);
+        let mut renderer = Renderer::new(&mut buffer);
         let mut node = row(vec![text::<()>("left"), text::<()>("right")]);
         prepare_layout(&mut node, Size::new(10, 2));
 
@@ -766,15 +726,15 @@ mod tests {
             .render(&node, Size::new(10, 2))
             .expect("render should succeed");
 
-        let first_line = renderer.surface().screen_chars_to_string();
+        let first_line = renderer.buffer().to_string();
         let first = first_line.lines().next().unwrap();
         assert_eq!(first.trim_end(), "leftright");
     }
 
     #[test]
     fn block_draws_border() {
-        let mut surface = Surface::new(4, 3);
-        let mut renderer = Renderer::new(&mut surface);
+        let mut buffer = DoubleBuffer::new(4, 3);
+        let mut renderer = Renderer::new(&mut buffer);
         let mut node = block::<()>(Vec::new());
         prepare_layout(&mut node, Size::new(4, 3));
 
@@ -782,7 +742,7 @@ mod tests {
             .render(&node, Size::new(4, 3))
             .expect("render should succeed");
 
-        let screen = renderer.surface().screen_chars_to_string();
+        let screen = renderer.buffer().to_string();
         let lines: Vec<&str> = screen.lines().collect();
         assert_eq!(lines[0].chars().take(1).collect::<String>(), "┌");
         let last = lines
@@ -796,8 +756,8 @@ mod tests {
     #[test]
     fn block_renders_title() {
         const TITLE: &str = "Title";
-        let mut surface = Surface::new(10, 4);
-        let mut renderer = Renderer::new(&mut surface);
+        let mut buffer = DoubleBuffer::new(10, 4);
+        let mut renderer = Renderer::new(&mut buffer);
         let mut node = block_with_title::<()>(TITLE, Vec::new())
             .with_min_width(Dimension::length(10.))
             .with_min_height(Dimension::length(3.));
@@ -807,7 +767,7 @@ mod tests {
             .render(&node, Size::new(10, 4))
             .expect("render should succeed");
 
-        let screen = renderer.surface().screen_chars_to_string();
+        let screen = renderer.buffer().to_string();
         let top_line = screen.lines().next().unwrap();
         let chars: Vec<char> = top_line.chars().collect();
         assert!(chars.len() >= TITLE.len() + 2);
@@ -819,8 +779,8 @@ mod tests {
 
     #[test]
     fn modal_renders_dim_overlay() {
-        let mut surface = Surface::new(12, 6);
-        let mut renderer = Renderer::new(&mut surface);
+        let mut buffer = DoubleBuffer::new(12, 6);
+        let mut renderer = Renderer::new(&mut buffer);
 
         let base = column(vec![
             text::<()>("Base content"),
@@ -841,7 +801,7 @@ mod tests {
             .render(&root, Size::new(12, 6))
             .expect("render should succeed");
 
-        let screen = renderer.surface().screen_chars_to_string();
+        let screen = renderer.buffer().to_string();
         let lines: Vec<&str> = screen.lines().collect();
         assert!(lines.len() >= 2);
         assert!(lines[0].contains("Base content"));
@@ -854,15 +814,15 @@ mod tests {
         let block_col = lines[block_row].find('┌').expect("expected border char");
         assert!(block_col < lines[block_row].len());
 
-        let rows = renderer.surface_mut().screen_cells();
-        let first_attrs = rows[0][0].attrs().clone();
-        assert_eq!(first_attrs.intensity(), Intensity::Half);
+        let back_buffer = renderer.buffer().back_buffer();
+        let first_cell = &back_buffer[0][0];
+        assert_eq!(first_cell.attrs.intensity(), Intensity::Half);
     }
 
     #[test]
     fn style_applies_foreground_color() {
-        let mut surface = Surface::new(10, 2);
-        let mut renderer = Renderer::new(&mut surface);
+        let mut buffer = DoubleBuffer::new(10, 2);
+        let mut renderer = Renderer::new(&mut buffer);
         let mut node = text::<()>("color").with_style(Style::fg(Color::Blue));
         prepare_layout(&mut node, Size::new(10, 2));
 
@@ -870,10 +830,9 @@ mod tests {
             .render(&node, Size::new(10, 2))
             .expect("render should succeed");
 
-        let mut lines = renderer.surface().screen_lines();
-        let line = lines.remove(0);
-        let cell = line.visible_cells().next().unwrap();
-        assert_eq!(cell.attrs().foreground(), AnsiColor::Blue.into());
+        let back_buffer = renderer.buffer().back_buffer();
+        let cell = &back_buffer[0][0];
+        assert_eq!(cell.attrs.foreground(), AnsiColor::Blue.into());
     }
 
     #[test]
@@ -897,23 +856,6 @@ mod tests {
     }
 
     #[test]
-    fn render_hides_cursor() {
-        let mut surface = Surface::new(10, 2);
-        let mut renderer = Renderer::new(&mut surface);
-        let mut node = text::<()>("cursor");
-        prepare_layout(&mut node, Size::new(10, 2));
-
-        renderer
-            .render(&node, Size::new(10, 2))
-            .expect("render should succeed");
-
-        assert_eq!(
-            renderer.surface().cursor_visibility(),
-            CursorVisibility::Hidden
-        );
-    }
-
-    #[test]
     fn nested_blocks_render_with_borders() {
         let header = text::<()>(
             "TODOs (Esc/q quit from list, ↑/↓ move, space toggles, Tab focuses input, Enter adds)",
@@ -934,15 +876,15 @@ mod tests {
 
         let mut root = block::<()>(vec![column(vec![header, input_block, items])]);
 
-        let mut surface = Surface::new(90, 12);
-        let mut renderer = Renderer::new(&mut surface);
+        let mut buffer = DoubleBuffer::new(90, 12);
+        let mut renderer = Renderer::new(&mut buffer);
         prepare_layout(&mut root, Size::new(90, 12));
 
         renderer
             .render(&root, Size::new(90, 12))
             .expect("render should succeed");
 
-        let screen = renderer.surface().screen_chars_to_string();
+        let screen = renderer.buffer().to_string();
         let lines: Vec<&str> = screen.lines().collect();
 
         assert!(lines[0].starts_with("┌"));
@@ -957,7 +899,7 @@ mod tests {
 
     #[test]
     fn scroll_offset_shifts_children_up() {
-        let mut surface = Surface::new(10, 6);
+        let mut buffer = DoubleBuffer::new(10, 6);
         // Create a column with many lines and apply scroll
         let lines: Vec<Node<()>> = (0..10).map(|i| text::<()>(format!("L{}", i))).collect();
         let mut root = column(vec![
@@ -974,11 +916,11 @@ mod tests {
             },
         );
         round_layout(&mut root);
-        let mut renderer = Renderer::new(&mut surface);
+        let mut renderer = Renderer::new(&mut buffer);
         renderer
             .render(&root, Size::new(10, 6))
             .expect("render should succeed");
-        let screen = renderer.surface().screen_chars_to_string();
+        let screen = renderer.buffer().to_string();
         // After scrolling by 3, first visible should be L3
         assert!(
             screen.lines().next().unwrap().contains("L3"),
@@ -1041,12 +983,12 @@ mod tests {
 
         let interior = &right_column[1..right_column.len().saturating_sub(1)];
         assert!(
-            interior.iter().any(|&ch| ch == '│'),
+            interior.contains(&'│'),
             "expected shared border track in {:?}",
             interior
         );
         assert!(
-            interior.iter().any(|&ch| ch == SCROLLBAR_THUMB_CHAR),
+            interior.contains(&SCROLLBAR_THUMB_CHAR),
             "expected thumb to reuse border column in {:?}",
             interior
         );

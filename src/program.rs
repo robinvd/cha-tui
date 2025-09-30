@@ -1,6 +1,7 @@
 use std::boxed::Box;
 use std::time::{Duration, Instant};
 
+use crate::buffer::DoubleBuffer;
 use crate::dom::Node;
 use crate::error::ProgramError;
 use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};
@@ -9,8 +10,7 @@ use crate::render::Renderer;
 use taffy::compute_root_layout;
 use termwiz::caps::Capabilities;
 use termwiz::input::{InputEvent, KeyEvent, Modifiers as TwModifiers, MouseEvent as TwMouseEvent};
-use termwiz::surface::{Change, Surface};
-use termwiz::terminal::buffered::BufferedTerminal;
+use termwiz::surface::Change;
 use termwiz::terminal::{Terminal, new_terminal};
 use tracing::info;
 
@@ -60,24 +60,17 @@ impl<Model, Msg> Program<Model, Msg> {
 
     pub fn run(mut self) -> Result<(), ProgramError> {
         let caps = Capabilities::new_from_env().map_err(ProgramError::from)?;
-        let terminal = new_terminal(caps).map_err(ProgramError::from)?;
-        let mut terminal = BufferedTerminal::new(terminal).map_err(ProgramError::from)?;
+        let mut terminal = new_terminal(caps).map_err(ProgramError::from)?;
 
         // Enter alternate screen and raw mode for the duration of the loop.
-        {
-            let term = terminal.terminal();
-            term.enter_alternate_screen().map_err(ProgramError::from)?;
-            term.set_raw_mode().map_err(ProgramError::from)?;
-        }
+        terminal.enter_alternate_screen().map_err(ProgramError::from)?;
+        terminal.set_raw_mode().map_err(ProgramError::from)?;
 
         let result = self.event_loop(&mut terminal);
 
         // Always attempt to restore terminal state.
-        {
-            let term = terminal.terminal();
-            let _ = term.set_cooked_mode();
-            let _ = term.exit_alternate_screen();
-        }
+        let _ = terminal.set_cooked_mode();
+        let _ = terminal.exit_alternate_screen();
 
         result
     }
@@ -88,28 +81,32 @@ impl<Model, Msg> Program<Model, Msg> {
 
     fn event_loop<T: Terminal>(
         &mut self,
-        terminal: &mut BufferedTerminal<T>,
+        terminal: &mut T,
     ) -> Result<(), ProgramError> {
-        self.render_view(terminal)?;
-        terminal.flush()?;
+        let screen_size = terminal.get_screen_size()?;
+        let mut buffer = DoubleBuffer::new(screen_size.cols, screen_size.rows);
+        
+        self.render_view(&mut buffer)?;
+        buffer.flush(terminal)?;
 
         terminal
-            .terminal()
             .render(&[Change::CursorVisibility(
                 termwiz::surface::CursorVisibility::Hidden,
             )])
             .unwrap();
 
         loop {
-            if terminal.check_for_resize()? {
-                let size = terminal.dimensions();
+            // Check for terminal resize
+            let new_size = terminal.get_screen_size()?;
+            let (old_cols, old_rows) = buffer.dimensions();
+            if new_size.cols != old_cols || new_size.rows != old_rows {
                 let (transition, needs_render) = self.handle_event(Event::Resize(Size {
-                    width: size.0 as u16,
-                    height: size.1 as u16,
+                    width: new_size.cols as u16,
+                    height: new_size.rows as u16,
                 }));
                 if needs_render {
-                    self.render_view(terminal)?;
-                    terminal.flush()?;
+                    self.render_view(&mut buffer)?;
+                    buffer.flush(terminal)?;
                 }
                 if matches!(transition, Transition::Quit) {
                     break;
@@ -117,7 +114,6 @@ impl<Model, Msg> Program<Model, Msg> {
             }
 
             let first_input = terminal
-                .terminal()
                 .poll_input(None)
                 .map_err(ProgramError::from)?;
 
@@ -135,7 +131,6 @@ impl<Model, Msg> Program<Model, Msg> {
             }
 
             while let Some(input) = terminal
-                .terminal()
                 .poll_input(Some(Duration::from_millis(0)))
                 .map_err(ProgramError::from)?
             {
@@ -150,16 +145,14 @@ impl<Model, Msg> Program<Model, Msg> {
             }
 
             if needs_render {
-                self.render_view(terminal)?;
+                self.render_view(&mut buffer)?;
                 // raw escape codes for `Synchronized Output` start
                 // TODO add a detection step on startup if this is supported.
                 terminal
-                    .terminal()
                     .render(&[Change::Text("\x1b[?2026h".to_owned())])?;
-                terminal.flush()?;
+                buffer.flush(terminal)?;
                 // raw escape codes for `Synchronized Output` end
                 terminal
-                    .terminal()
                     .render(&[Change::Text("\x1b[?2026l".to_owned())])?;
             }
 
@@ -174,12 +167,12 @@ impl<Model, Msg> Program<Model, Msg> {
     fn process_event(
         &mut self,
         event: Event,
-        terminal: Option<&mut Surface>,
+        buffer: Option<&mut DoubleBuffer>,
     ) -> Result<Transition, ProgramError> {
         let (transition, needs_render) = self.handle_event(event);
         if needs_render {
-            if let Some(term) = terminal {
-                self.render_view(term)?;
+            if let Some(buf) = buffer {
+                self.render_view(buf)?;
             } else {
                 self.rebuild_view();
             }
@@ -216,10 +209,10 @@ impl<Model, Msg> Program<Model, Msg> {
         (transition, needs_render)
     }
 
-    fn render_view(&mut self, s: &mut Surface) -> Result<(), ProgramError> {
+    fn render_view(&mut self, buffer: &mut DoubleBuffer) -> Result<(), ProgramError> {
         self.rebuild_view();
         if let Some(current_view) = self.current_view.as_ref() {
-            Renderer::new(s).render(current_view, self.current_size)
+            Renderer::new(buffer).render(current_view, self.current_size)
         } else {
             Ok(())
         }
@@ -422,14 +415,14 @@ mod tests {
                 Event::Key(key) if matches!(key.code, KeyCode::Char('+')) => Some(Msg::Increment),
                 _ => None,
             });
-        let mut surface = Surface::new(10, 2);
+        let mut buffer = DoubleBuffer::new(10, 2);
 
         let transition = program
-            .process_event(Event::key(KeyCode::Char('+')), Some(&mut surface))
+            .process_event(Event::key(KeyCode::Char('+')), Some(&mut buffer))
             .expect("send should succeed");
         assert_eq!(transition, Transition::Continue);
 
-        let screen = surface.screen_chars_to_string();
+        let screen = buffer.to_string();
         assert!(screen.contains("count: 1"));
     }
 
@@ -472,16 +465,16 @@ mod tests {
     #[test]
     fn mouse_click_triggers_on_click_handler() {
         let mut program = Program::new(ClickModel::default(), click_update, click_view);
-        let mut surface = Surface::new(4, 2);
+        let mut buffer = DoubleBuffer::new(4, 2);
 
         program
-            .process_event(Event::resize(4, 2), Some(&mut surface))
+            .process_event(Event::resize(4, 2), Some(&mut buffer))
             .expect("resize should succeed");
 
         program
             .process_event(
                 Event::mouse(0, 0, MouseButtons::new(true, false, false)),
-                Some(&mut surface),
+                Some(&mut buffer),
             )
             .expect("mouse down should succeed");
         assert_eq!(program.model.clicks, 1);
@@ -489,14 +482,14 @@ mod tests {
         program
             .process_event(
                 Event::mouse(0, 0, MouseButtons::default()),
-                Some(&mut surface),
+                Some(&mut buffer),
             )
             .expect("mouse move up should succeed");
 
         program
             .process_event(
                 Event::mouse(0, 0, MouseButtons::new(true, false, false)),
-                Some(&mut surface),
+                Some(&mut buffer),
             )
             .expect("second click should succeed");
         assert_eq!(program.model.clicks, 1);
@@ -504,14 +497,14 @@ mod tests {
         program
             .process_event(
                 Event::mouse(0, 0, MouseButtons::default()),
-                Some(&mut surface),
+                Some(&mut buffer),
             )
             .expect("mouse up should succeed");
 
         program
             .process_event(
                 Event::mouse(1, 0, MouseButtons::new(true, false, false)),
-                Some(&mut surface),
+                Some(&mut buffer),
             )
             .expect("third click should succeed");
         assert_eq!(program.model.clicks, 2);
@@ -560,16 +553,16 @@ mod tests {
             double_click_update,
             double_click_view,
         );
-        let mut surface = Surface::new(4, 2);
+        let mut buffer = DoubleBuffer::new(4, 2);
 
         program
-            .process_event(Event::resize(4, 2), Some(&mut surface))
+            .process_event(Event::resize(4, 2), Some(&mut buffer))
             .expect("resize should succeed");
 
         program
             .process_event(
                 Event::mouse(0, 0, MouseButtons::new(true, false, false)),
-                Some(&mut surface),
+                Some(&mut buffer),
             )
             .expect("first click should succeed");
         assert_eq!(program.model.single, 1);
@@ -578,14 +571,14 @@ mod tests {
         program
             .process_event(
                 Event::mouse(0, 0, MouseButtons::default()),
-                Some(&mut surface),
+                Some(&mut buffer),
             )
             .expect("mouse up should succeed");
 
         program
             .process_event(
                 Event::mouse(0, 0, MouseButtons::new(true, false, false)),
-                Some(&mut surface),
+                Some(&mut buffer),
             )
             .expect("second click should succeed");
         assert_eq!(program.model.single, 1);
@@ -599,16 +592,16 @@ mod tests {
             double_click_update,
             double_click_view,
         );
-        let mut surface = Surface::new(4, 2);
+        let mut buffer = DoubleBuffer::new(4, 2);
 
         program
-            .process_event(Event::resize(4, 2), Some(&mut surface))
+            .process_event(Event::resize(4, 2), Some(&mut buffer))
             .expect("resize should succeed");
 
         program
             .process_event(
                 Event::mouse(0, 0, MouseButtons::new(true, false, false)),
-                Some(&mut surface),
+                Some(&mut buffer),
             )
             .expect("first click should succeed");
         assert_eq!(program.model.single, 1);
@@ -617,14 +610,14 @@ mod tests {
         program
             .process_event(
                 Event::mouse(0, 0, MouseButtons::default()),
-                Some(&mut surface),
+                Some(&mut buffer),
             )
             .expect("mouse up should succeed");
 
         program
             .process_event(
                 Event::mouse(1, 0, MouseButtons::new(true, false, false)),
-                Some(&mut surface),
+                Some(&mut buffer),
             )
             .expect("second click should succeed");
         assert_eq!(program.model.single, 2);
