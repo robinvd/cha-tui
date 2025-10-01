@@ -580,7 +580,27 @@ fn view(model: &Model) -> Node<Msg> {
         header_spans.push(TextSpan::new(error, error_style()));
     }
 
-    let header = rich_text::<Msg>(header_spans);
+    let header_left = rich_text::<Msg>(header_spans)
+        .with_flex_grow(1.)
+        .with_flex_shrink(1.)
+        .with_flex_basis(Dimension::ZERO)
+        .with_min_width(Dimension::ZERO)
+        .with_id("header-title");
+
+    let branch_label = model
+        .current_branch
+        .as_deref()
+        .filter(|branch| !branch.is_empty())
+        .unwrap_or("(unknown)");
+    let branch_spans = vec![
+        TextSpan::new("branch: ", Style::dim()),
+        TextSpan::new(branch_label, branch_name_style()),
+    ];
+    let branch_node = rich_text::<Msg>(branch_spans).with_id("header-branch");
+
+    let header = row(vec![header_left, branch_node])
+        .with_width(Dimension::percent(1.))
+        .with_id("header");
 
     let base = column(vec![header, layout, render_shortcuts_bar(model)])
         .with_fill()
@@ -881,6 +901,10 @@ fn inactive_style() -> Style {
     Style::fg(highlight::EVERFOREST_GREY2)
 }
 
+fn branch_name_style() -> Style {
+    Style::fg(highlight::EVERFOREST_AQUA)
+}
+
 fn active_selection_style() -> Style {
     let mut style = Style::bold();
     style.fg = Some(highlight::EVERFOREST_GREEN);
@@ -976,6 +1000,7 @@ struct Model {
     commit_modal: Option<CommitModal>,
     delete_modal: Option<DeleteModal>,
     show_all_shortcuts: bool,
+    current_branch: Option<String>,
 }
 
 impl Model {
@@ -1091,6 +1116,7 @@ impl Model {
         let status = load_git_status()?;
         self.unstaged = status.unstaged;
         self.staged = status.staged;
+        self.current_branch = status.branch;
         self.ensure_focus_valid();
         self.clear_error();
         self.update_diff();
@@ -1365,6 +1391,7 @@ impl DiffLine {
 struct GitStatus {
     unstaged: Vec<FileEntry>,
     staged: Vec<FileEntry>,
+    branch: Option<String>,
 }
 
 fn load_git_status() -> Result<GitStatus> {
@@ -1397,7 +1424,26 @@ fn load_git_status() -> Result<GitStatus> {
         }
     }
 
-    Ok(GitStatus { unstaged, staged })
+    let branch = load_current_branch();
+
+    Ok(GitStatus {
+        unstaged,
+        staged,
+        branch,
+    })
+}
+
+fn load_current_branch() -> Option<String> {
+    let branch = run_git(["symbolic-ref", "--short", "HEAD"])
+        .or_else(|_| run_git(["rev-parse", "--short", "HEAD"]))
+        .ok()?;
+
+    let trimmed = branch.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 struct ParsedStatus {
