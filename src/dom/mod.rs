@@ -935,7 +935,7 @@ mod tests {
         assert_eq!(element.kind, ElementKind::Modal);
         assert_eq!(element.children, vec![child]);
         // Check that modal has a semi-transparent background instead of dim
-        assert_eq!(element.attrs.style.bg, Some(Color::rgba(0, 0, 0, 128)));
+        assert_eq!(element.attrs.style.bg, Some(Color::rgba(0, 0, 0, 8)));
 
         let style = node.layout_state().style.clone();
         assert_eq!(style.position, Position::Absolute);
