@@ -4,8 +4,7 @@ use crate::error::ProgramError;
 use crate::palette::Rgba;
 
 /// Cell attributes for styling terminal cells
-#[derive(Clone, Debug, PartialEq)]
-#[derive(Default)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub struct CellAttributes {
     pub foreground: Option<Rgba>,
     pub background: Option<Rgba>,
@@ -50,7 +49,6 @@ impl CellAttributes {
         self.dim
     }
 }
-
 
 /// A cell in the buffer, representing a single character with its attributes
 #[derive(Clone, Debug, PartialEq)]
@@ -188,37 +186,41 @@ impl DoubleBuffer {
         if x < self.width && y < self.height {
             // Check if we need to blend colors due to transparency
             let mut final_attrs = attrs.clone();
-            
+
             // Blend background color if it has transparency
             if let Some(new_bg) = attrs.background
                 && new_bg.a < 255
             {
                 // Get the existing cell's background color
-                let existing_bg = self.back[y][x].attrs.background
+                let existing_bg = self.back[y][x]
+                    .attrs
+                    .background
                     .unwrap_or(Rgba::opaque(0, 0, 0)); // Default to black if no background
-                
+
                 // Blend using oklab
                 let bottom = existing_bg.to_straight_rgba();
                 let top = new_bg.to_straight_rgba();
                 let blended = bottom.oklab_blend(top);
                 final_attrs.background = Some(Rgba::from_straight_rgba(blended));
             }
-            
+
             // Blend foreground color if it has transparency
             if let Some(new_fg) = attrs.foreground
                 && new_fg.a < 255
             {
                 // Get the existing cell's foreground color
-                let existing_fg = self.back[y][x].attrs.foreground
+                let existing_fg = self.back[y][x]
+                    .attrs
+                    .foreground
                     .unwrap_or(Rgba::opaque(255, 255, 255)); // Default to white if no foreground
-                
+
                 // Blend using oklab
                 let bottom = existing_fg.to_straight_rgba();
                 let top = new_fg.to_straight_rgba();
                 let blended = bottom.oklab_blend(top);
                 final_attrs.foreground = Some(Rgba::from_straight_rgba(blended));
             }
-            
+
             self.back[y][x] = Cell::new(ch, final_attrs);
         }
     }
@@ -293,9 +295,15 @@ impl DoubleBuffer {
                             Self::write_sgr_attrs(&mut buffer, &run_attrs)?;
                             current_attrs = run_attrs.clone();
                         }
-                        write!(buffer, "\x1b[{};{}H{}", y + 1, run_start.unwrap() + 1, run_text)?;
+                        write!(
+                            buffer,
+                            "\x1b[{};{}H{}",
+                            y + 1,
+                            run_start.unwrap() + 1,
+                            run_text
+                        )?;
                         wrote_anything = true;
-                        
+
                         // Start a new run
                         run_start = Some(x);
                         run_text = String::from(back_cell.ch);
@@ -343,18 +351,19 @@ impl DoubleBuffer {
 
     fn write_sgr_attrs(buffer: &mut String, attrs: &CellAttributes) -> Result<(), ProgramError> {
         // Check if we need to write anything at all
-        let has_any_attrs = attrs.bold || attrs.dim || attrs.foreground.is_some() || attrs.background.is_some();
-        
+        let has_any_attrs =
+            attrs.bold || attrs.dim || attrs.foreground.is_some() || attrs.background.is_some();
+
         if !has_any_attrs {
             // Just reset to defaults
             write!(buffer, "\x1b[0m")?;
             return Ok(());
         }
-        
+
         // Always start with a reset to ensure clean state when transitioning
         // This ensures that if we had a background before and don't now, it gets cleared
         write!(buffer, "\x1b[0")?;
-        
+
         // Write bold/dim
         if attrs.bold {
             write!(buffer, ";1")?;
@@ -388,7 +397,11 @@ impl DoubleBuffer {
             write!(buffer, "{};2;{};{};{}", base, color.r, color.g, color.b)?;
         } else {
             // Use colon-separated format for alpha channel (less widely supported)
-            write!(buffer, "{}:2::{}:{}:{}:{}", base, color.r, color.g, color.b, color.a)?;
+            write!(
+                buffer,
+                "{}:2::{}:{}:{}:{}",
+                base, color.r, color.g, color.b, color.a
+            )?;
         }
         Ok(())
     }
@@ -422,7 +435,7 @@ mod tests {
     fn new_buffer_is_blank() {
         let buffer = DoubleBuffer::new(10, 5);
         assert_eq!(buffer.dimensions(), (10, 5));
-        
+
         let text = buffer.to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 5);
@@ -434,10 +447,10 @@ mod tests {
     fn write_text_renders_to_back_buffer() {
         let mut buffer = DoubleBuffer::new(20, 3);
         let attrs = CellAttributes::default();
-        
+
         buffer.write_text(0, 0, "hello", &attrs);
         buffer.write_text(0, 1, "world", &attrs);
-        
+
         let text = buffer.to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].starts_with("hello"));
@@ -448,9 +461,9 @@ mod tests {
     fn write_char_sets_single_character() {
         let mut buffer = DoubleBuffer::new(10, 3);
         let attrs = CellAttributes::default();
-        
+
         buffer.write_char(5, 1, 'X', &attrs);
-        
+
         let cell = buffer.get_cell(5, 1).unwrap();
         assert_eq!(cell.ch, 'X');
     }
@@ -459,10 +472,10 @@ mod tests {
     fn clear_resets_back_buffer() {
         let mut buffer = DoubleBuffer::new(10, 3);
         let attrs = CellAttributes::default();
-        
+
         buffer.write_text(0, 0, "test", &attrs);
         buffer.clear();
-        
+
         let text = buffer.to_string();
         assert!(text.chars().all(|c| c == ' ' || c == '\n'));
     }
@@ -471,13 +484,13 @@ mod tests {
     fn clear_area_clears_rect() {
         let mut buffer = DoubleBuffer::new(10, 5);
         let attrs = CellAttributes::default();
-        
+
         buffer.write_text(0, 0, "0123456789", &attrs);
         buffer.write_text(0, 1, "abcdefghij", &attrs);
         buffer.write_text(0, 2, "ABCDEFGHIJ", &attrs);
-        
+
         buffer.clear_area(Rect::new(2, 1, 5, 1));
-        
+
         let text = buffer.to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "0123456789");
@@ -489,9 +502,9 @@ mod tests {
     fn fill_rect_fills_area() {
         let mut buffer = DoubleBuffer::new(10, 5);
         let attrs = CellAttributes::default();
-        
+
         buffer.fill_rect(Rect::new(2, 1, 4, 2), '#', &attrs);
-        
+
         let text = buffer.to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[1], "  ####    ");
@@ -502,9 +515,9 @@ mod tests {
     fn resize_changes_dimensions() {
         let mut buffer = DoubleBuffer::new(10, 5);
         buffer.resize(20, 10);
-        
+
         assert_eq!(buffer.dimensions(), (20, 10));
-        
+
         let text = buffer.to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), 10);
@@ -515,9 +528,9 @@ mod tests {
     fn write_text_clips_at_boundary() {
         let mut buffer = DoubleBuffer::new(5, 3);
         let attrs = CellAttributes::default();
-        
+
         buffer.write_text(3, 0, "testing", &attrs);
-        
+
         let text = buffer.to_string();
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "   te");
@@ -527,13 +540,13 @@ mod tests {
     fn set_attrs_preserves_character() {
         let mut buffer = DoubleBuffer::new(10, 3);
         let default_attrs = CellAttributes::default();
-        
+
         buffer.write_char(5, 1, 'X', &default_attrs);
-        
+
         let mut blue_attrs = CellAttributes::default();
         blue_attrs.set_foreground(Rgba::opaque(0, 0, 255)); // Blue color
         buffer.set_attrs(5, 1, &blue_attrs);
-        
+
         let cell = buffer.get_cell(5, 1).unwrap();
         assert_eq!(cell.ch, 'X');
         assert_eq!(cell.attrs.foreground(), blue_attrs.foreground());
@@ -542,33 +555,33 @@ mod tests {
     #[test]
     fn get_cell_mut_allows_modification() {
         let mut buffer = DoubleBuffer::new(10, 3);
-        
+
         if let Some(cell) = buffer.get_cell_mut(2, 1) {
             cell.ch = 'Z';
         }
-        
+
         assert_eq!(buffer.get_cell(2, 1).unwrap().ch, 'Z');
     }
 
     #[test]
     fn write_char_blends_transparent_background() {
         let mut buffer = DoubleBuffer::new(10, 3);
-        
+
         // First, write a cell with a red background
         let mut attrs1 = CellAttributes::default();
         attrs1.set_background(Rgba::opaque(255, 0, 0)); // Red
         buffer.write_char(5, 1, 'X', &attrs1);
-        
+
         // Now write over it with a semi-transparent blue background
         let mut attrs2 = CellAttributes::default();
         attrs2.set_background(Rgba::new(0, 0, 255, 128)); // 50% transparent blue
         buffer.write_char(5, 1, 'Y', &attrs2);
-        
+
         // The resulting background should be a blend of red and blue
         let cell = buffer.get_cell(5, 1).unwrap();
         assert_eq!(cell.ch, 'Y');
         let bg = cell.attrs.background().expect("Background should be set");
-        
+
         // The blended color should not be pure red or pure blue
         assert_ne!(bg, Rgba::opaque(255, 0, 0), "Should not be pure red");
         assert_ne!(bg, Rgba::opaque(0, 0, 255), "Should not be pure blue");
@@ -580,12 +593,12 @@ mod tests {
     #[test]
     fn write_char_preserves_opaque_colors() {
         let mut buffer = DoubleBuffer::new(10, 3);
-        
+
         // Write with opaque color (should not blend)
         let mut attrs = CellAttributes::default();
         attrs.set_background(Rgba::opaque(100, 150, 200));
         buffer.write_char(3, 1, 'A', &attrs);
-        
+
         let cell = buffer.get_cell(3, 1).unwrap();
         assert_eq!(cell.ch, 'A');
         assert_eq!(cell.attrs.background(), Some(Rgba::opaque(100, 150, 200)));
@@ -594,23 +607,32 @@ mod tests {
     #[test]
     fn flush_generates_color_codes() {
         let mut buffer = DoubleBuffer::new(10, 3);
-        
+
         // Write with specific colors
         let mut attrs = CellAttributes::default();
         attrs.set_foreground(Rgba::opaque(255, 0, 0)); // Red
         attrs.set_background(Rgba::opaque(0, 255, 0)); // Green
         buffer.write_text(0, 0, "test", &attrs);
-        
+
         let mut output = Vec::new();
         buffer.flush(&mut output).expect("flush should succeed");
         let output_str = String::from_utf8(output).expect("output should be valid UTF-8");
-        
+
         // Should contain SGR codes for colors
-        assert!(output_str.contains("\x1b["), "Should contain SGR escape sequence");
+        assert!(
+            output_str.contains("\x1b["),
+            "Should contain SGR escape sequence"
+        );
         // Should contain 38;2 for foreground RGB
-        assert!(output_str.contains("38;2;255;0;0"), "Should contain red foreground");
+        assert!(
+            output_str.contains("38;2;255;0;0"),
+            "Should contain red foreground"
+        );
         // Should contain 48;2 for background RGB
-        assert!(output_str.contains("48;2;0;255;0"), "Should contain green background");
+        assert!(
+            output_str.contains("48;2;0;255;0"),
+            "Should contain green background"
+        );
         // Should contain the text
         assert!(output_str.contains("test"), "Should contain the text");
     }
@@ -618,25 +640,25 @@ mod tests {
     #[test]
     fn flush_handles_color_transitions() {
         let mut buffer = DoubleBuffer::new(10, 2);
-        
+
         // First cell: red foreground
         let mut red_attrs = CellAttributes::default();
         red_attrs.set_foreground(Rgba::opaque(255, 0, 0));
         buffer.write_char(0, 0, 'R', &red_attrs);
-        
+
         // Second cell: blue foreground
         let mut blue_attrs = CellAttributes::default();
         blue_attrs.set_foreground(Rgba::opaque(0, 0, 255));
         buffer.write_char(1, 0, 'B', &blue_attrs);
-        
+
         // Third cell: no color (default)
         let default_attrs = CellAttributes::default();
         buffer.write_char(2, 0, 'D', &default_attrs);
-        
+
         let mut output = Vec::new();
         buffer.flush(&mut output).expect("flush should succeed");
         let output_str = String::from_utf8(output).expect("output should be valid UTF-8");
-        
+
         // Should handle multiple color changes
         assert!(output_str.contains("38;2;255;0;0"), "Should have red");
         assert!(output_str.contains("38;2;0;0;255"), "Should have blue");
@@ -645,122 +667,155 @@ mod tests {
     #[test]
     fn flush_resets_attrs_at_end() {
         let mut buffer = DoubleBuffer::new(10, 2);
-        
+
         let mut attrs = CellAttributes::default();
         attrs.set_foreground(Rgba::opaque(255, 0, 0));
         buffer.write_text(0, 0, "test", &attrs);
-        
+
         let mut output = Vec::new();
         buffer.flush(&mut output).expect("flush should succeed");
         let output_str = String::from_utf8(output).expect("output should be valid UTF-8");
-        
+
         // Should reset attributes at the end
-        assert!(output_str.contains("\x1b[0m"), "Should contain reset code at end");
+        assert!(
+            output_str.contains("\x1b[0m"),
+            "Should contain reset code at end"
+        );
     }
 
     #[test]
     fn flush_only_updates_changed_cells() {
         let mut buffer = DoubleBuffer::new(10, 2);
-        
+
         let attrs = CellAttributes::default();
         buffer.write_text(0, 0, "hello", &attrs);
-        
+
         // First flush - will output everything
         let mut output1 = Vec::new();
-        buffer.flush(&mut output1).expect("first flush should succeed");
+        buffer
+            .flush(&mut output1)
+            .expect("first flush should succeed");
         assert!(!output1.is_empty(), "First flush should produce output");
-        
+
         // Write the same content to back buffer again
         buffer.write_text(0, 0, "hello", &attrs);
-        
+
         // Second flush - should produce no output because content hasn't changed
         let mut output2 = Vec::new();
-        buffer.flush(&mut output2).expect("second flush should succeed");
-        
-        assert!(output2.is_empty(), "Second flush should produce no output when content is identical");
+        buffer
+            .flush(&mut output2)
+            .expect("second flush should succeed");
+
+        assert!(
+            output2.is_empty(),
+            "Second flush should produce no output when content is identical"
+        );
     }
 
     #[test]
     fn flush_handles_bold_and_dim() {
         let mut buffer = DoubleBuffer::new(10, 2);
-        
+
         // Bold text
         let mut bold_attrs = CellAttributes::default();
         bold_attrs.set_bold(true);
         buffer.write_char(0, 0, 'B', &bold_attrs);
-        
+
         // Dim text
         let mut dim_attrs = CellAttributes::default();
         dim_attrs.set_dim(true);
         buffer.write_char(1, 0, 'D', &dim_attrs);
-        
+
         let mut output = Vec::new();
         buffer.flush(&mut output).expect("flush should succeed");
         let output_str = String::from_utf8(output).expect("output should be valid UTF-8");
-        
+
         // Should contain SGR codes with reset followed by bold/dim
         // Format is: ESC[0;1m for bold, ESC[0;2m for dim
-        assert!(output_str.contains(";1m") || output_str.contains(";1;"), "Should contain bold code (1)");
-        assert!(output_str.contains(";2m") || output_str.contains(";2;"), "Should contain dim code (2)");
+        assert!(
+            output_str.contains(";1m") || output_str.contains(";1;"),
+            "Should contain bold code (1)"
+        );
+        assert!(
+            output_str.contains(";2m") || output_str.contains(";2;"),
+            "Should contain dim code (2)"
+        );
     }
 
     #[test]
     fn flush_correctly_resets_partial_attributes() {
         let mut buffer = DoubleBuffer::new(10, 2);
-        
+
         // First cell: both foreground and background
         let mut full_attrs = CellAttributes::default();
         full_attrs.set_foreground(Rgba::opaque(255, 0, 0)); // Red
         full_attrs.set_background(Rgba::opaque(0, 255, 0)); // Green
         buffer.write_char(0, 0, 'A', &full_attrs);
-        
+
         // Second cell: only foreground (background should be reset)
         let mut partial_attrs = CellAttributes::default();
         partial_attrs.set_foreground(Rgba::opaque(0, 0, 255)); // Blue
         // No background
         buffer.write_char(1, 0, 'B', &partial_attrs);
-        
+
         let mut output = Vec::new();
         buffer.flush(&mut output).expect("flush should succeed");
         let output_str = String::from_utf8(output).expect("output should be valid UTF-8");
-        
+
         // First cell should have both foreground and background
-        assert!(output_str.contains("38;2;255;0;0"), "Should set red foreground");
-        assert!(output_str.contains("48;2;0;255;0"), "Should set green background");
-        
+        assert!(
+            output_str.contains("38;2;255;0;0"),
+            "Should set red foreground"
+        );
+        assert!(
+            output_str.contains("48;2;0;255;0"),
+            "Should set green background"
+        );
+
         // Second cell should have blue foreground
-        assert!(output_str.contains("38;2;0;0;255"), "Should set blue foreground");
-        
+        assert!(
+            output_str.contains("38;2;0;0;255"),
+            "Should set blue foreground"
+        );
+
         // The key test: verify that the second SGR sequence starts with a reset (0)
         // This ensures the green background is cleared
         // Format should be: ESC[0;38;2;0;0;255m (reset + blue foreground)
-        assert!(output_str.contains("\x1b[0;38;2;0;0;255m"), 
-            "Second SGR should reset (0) before setting blue foreground");
+        assert!(
+            output_str.contains("\x1b[0;38;2;0;0;255m"),
+            "Second SGR should reset (0) before setting blue foreground"
+        );
     }
 
     #[test]
     fn flush_handles_transition_from_colored_to_default() {
         let mut buffer = DoubleBuffer::new(10, 2);
-        
+
         // First cell: colored
         let mut colored_attrs = CellAttributes::default();
         colored_attrs.set_foreground(Rgba::opaque(255, 0, 0));
         buffer.write_char(0, 0, 'C', &colored_attrs);
-        
+
         // Second cell: default (no colors)
         let default_attrs = CellAttributes::default();
         buffer.write_char(1, 0, 'D', &default_attrs);
-        
+
         let mut output = Vec::new();
         buffer.flush(&mut output).expect("flush should succeed");
         let output_str = String::from_utf8(output).expect("output should be valid UTF-8");
-        
+
         // Should have colored attributes for first cell
-        assert!(output_str.contains("38;2;255;0;0"), "Should set red foreground");
-        
+        assert!(
+            output_str.contains("38;2;255;0;0"),
+            "Should set red foreground"
+        );
+
         // Should have a reset for second cell (ESC[0m)
         // Since default attrs just outputs ESC[0m
         let positions: Vec<_> = output_str.match_indices("\x1b[0m").collect();
-        assert!(!positions.is_empty(), "Should have at least one reset sequence");
+        assert!(
+            !positions.is_empty(),
+            "Should have at least one reset sequence"
+        );
     }
 }

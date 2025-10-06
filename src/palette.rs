@@ -24,9 +24,9 @@ impl Rgba {
 
     /// Convert to StraightRgba for color blending operations
     pub const fn to_straight_rgba(self) -> StraightRgba {
-        let color = (self.r as u32) 
-            | ((self.g as u32) << 8) 
-            | ((self.b as u32) << 16) 
+        let color = (self.r as u32)
+            | ((self.g as u32) << 8)
+            | ((self.b as u32) << 16)
             | ((self.a as u32) << 24);
         StraightRgba::from_le(color)
     }
@@ -84,11 +84,11 @@ impl Default for Palette {
 
 impl Palette {
     /// Query the terminal for its actual color palette
-    /// 
+    ///
     /// This sends OSC queries to the terminal to fetch the actual colors.
     /// Note: This requires raw terminal access and may not work with all terminals.
     /// The terminal must be in a state where it can send responses back.
-    /// 
+    ///
     /// For automatic palette detection during program initialization, consider
     /// querying before entering alternate screen mode.
     pub fn query_from_terminal<T>(terminal: &mut T) -> Result<Self, ProgramError>
@@ -99,17 +99,11 @@ impl Palette {
 
         // Query OSC 4 for colors 0-15
         // We split into two queries to avoid overwhelming the terminal
-        write!(
-            terminal,
-            "\x1b]4;0;?;1;?;2;?;3;?;4;?;5;?;6;?;7;?\x07"
-        )
-        .map_err(|e| ProgramError::terminal(format!("Failed to write color query: {}", e)))?;
-        
-        write!(
-            terminal,
-            "\x1b]4;8;?;9;?;10;?;11;?;12;?;13;?;14;?;15;?\x07"
-        )
-        .map_err(|e| ProgramError::terminal(format!("Failed to write color query: {}", e)))?;
+        write!(terminal, "\x1b]4;0;?;1;?;2;?;3;?;4;?;5;?;6;?;7;?\x07")
+            .map_err(|e| ProgramError::terminal(format!("Failed to write color query: {}", e)))?;
+
+        write!(terminal, "\x1b]4;8;?;9;?;10;?;11;?;12;?;13;?;14;?;15;?\x07")
+            .map_err(|e| ProgramError::terminal(format!("Failed to write color query: {}", e)))?;
 
         // Query OSC 10 and 11 for foreground and background
         write!(terminal, "\x1b]10;?\x07\x1b]11;?\x07")
@@ -123,9 +117,9 @@ impl Palette {
         // Responses come in the format: \x1b]4;INDEX;rgb:RRRR/GGGG/BBBB\x07
         // or \x1b]10;rgb:RRRR/GGGG/BBBB\x07 for foreground
         // or \x1b]11;rgb:RRRR/GGGG/BBBB\x07 for background
-        
+
         let responses = Self::read_responses(terminal, Duration::from_millis(100))?;
-        
+
         // Parse responses
         for response in responses {
             if let Some(parsed) = Self::parse_color_response(&response) {
@@ -153,16 +147,16 @@ impl Palette {
         T: Read,
     {
         use std::time::Instant;
-        
+
         let deadline = Instant::now() + timeout;
         let mut buffer = Vec::new();
         let mut responses = Vec::new();
-        
+
         loop {
             if Instant::now() >= deadline {
                 break;
             }
-            
+
             let mut byte = [0u8; 1];
             match terminal.read(&mut byte) {
                 Ok(0) => {
@@ -172,9 +166,13 @@ impl Palette {
                 }
                 Ok(_) => {
                     buffer.push(byte[0]);
-                    
+
                     // Check for end of response (BEL or ST)
-                    if byte[0] == 0x07 || (buffer.len() >= 2 && buffer[buffer.len() - 2] == 0x1b && buffer[buffer.len() - 1] == b'\\') {
+                    if byte[0] == 0x07
+                        || (buffer.len() >= 2
+                            && buffer[buffer.len() - 2] == 0x1b
+                            && buffer[buffer.len() - 1] == b'\\')
+                    {
                         if let Ok(response) = String::from_utf8(buffer.clone()) {
                             responses.push(response);
                         }
@@ -193,7 +191,7 @@ impl Palette {
                 }
             }
         }
-        
+
         Ok(responses)
     }
 
@@ -202,21 +200,21 @@ impl Palette {
         // \x1b]4;INDEX;rgb:RRRR/GGGG/BBBB\x07
         // \x1b]10;rgb:RRRR/GGGG/BBBB\x07
         // \x1b]11;rgb:RRRR/GGGG/BBBB\x07
-        
+
         if !response.starts_with("\x1b]") {
             return None;
         }
-        
+
         let content = response.trim_start_matches("\x1b]");
         let content = content.trim_end_matches('\x07').trim_end_matches("\x1b\\");
-        
+
         let parts: Vec<&str> = content.split(';').collect();
         if parts.is_empty() {
             return None;
         }
-        
+
         let osc_number = parts[0];
-        
+
         match osc_number {
             "4" => {
                 // Format: 4;INDEX;rgb:RRRR/GGGG/BBBB
@@ -250,24 +248,20 @@ impl Palette {
         if !rgb_part.starts_with("rgb:") {
             return None;
         }
-        
+
         let rgb_values = rgb_part.trim_start_matches("rgb:");
         let color_parts: Vec<&str> = rgb_values.split('/').collect();
         if color_parts.len() != 3 {
             return None;
         }
-        
+
         // Parse hex values (can be 1-4 digits, we'll use the high byte)
         let r = u16::from_str_radix(color_parts[0], 16).ok()?;
         let g = u16::from_str_radix(color_parts[1], 16).ok()?;
         let b = u16::from_str_radix(color_parts[2], 16).ok()?;
-        
+
         // Convert to 8-bit (take high byte if more than 8 bits)
-        Some(Rgba::opaque(
-            (r >> 8) as u8,
-            (g >> 8) as u8,
-            (b >> 8) as u8,
-        ))
+        Some(Rgba::opaque((r >> 8) as u8, (g >> 8) as u8, (b >> 8) as u8))
     }
 }
 
@@ -345,7 +339,7 @@ mod tests {
     fn rgba_to_straight_rgba_conversion() {
         let rgba = Rgba::new(255, 128, 64, 200);
         let straight = rgba.to_straight_rgba();
-        
+
         // Check that the conversion preserves the color components
         assert_eq!(straight.red(), 255);
         assert_eq!(straight.green(), 128);
@@ -358,7 +352,7 @@ mod tests {
         let original = Rgba::new(123, 45, 67, 89);
         let straight = original.to_straight_rgba();
         let back = Rgba::from_straight_rgba(straight);
-        
+
         // Should be identical after roundtrip
         assert_eq!(original, back);
     }

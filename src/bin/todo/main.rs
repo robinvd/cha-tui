@@ -283,12 +283,12 @@ fn install_panic_hook() -> color_eyre::Result<()> {
 
         // Reset terminal state with escape sequences
         let restore_sequences = [
-            "\x1b[?1049l",  // Exit alternate screen
-            "\x1b[?2004l",  // Disable bracketed paste
-            "\x1b[?1000l",  // Disable mouse tracking
-            "\x1b[?1003l",  // Disable any event mouse
-            "\x1b[?1006l",  // Disable SGR mouse
-            "\x1b[?25h",    // Show cursor
+            "\x1b[?1049l", // Exit alternate screen
+            "\x1b[?2004l", // Disable bracketed paste
+            "\x1b[?1000l", // Disable mouse tracking
+            "\x1b[?1003l", // Disable any event mouse
+            "\x1b[?1006l", // Disable SGR mouse
+            "\x1b[?25h",   // Show cursor
         ];
 
         for sequence in restore_sequences {

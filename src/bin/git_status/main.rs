@@ -1,6 +1,6 @@
 use std::ffi::OsStr;
-use std::fs;
-use std::io::ErrorKind;
+use std::fs::File;
+use std::io::{BufReader, ErrorKind, Read};
 use std::path::Path;
 use std::process::Command;
 
@@ -16,6 +16,8 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 mod highlight;
+
+const PREVIEW_BYTE_LIMIT: usize = 1_048_576;
 mod shortcuts {
     use super::{Key, KeyCode, Model, Msg};
 
@@ -745,7 +747,16 @@ fn render_file_list(
 
 fn render_diff_pane(model: &Model) -> Node<Msg> {
     let diff_title = match model.current_entry() {
-        Some(entry) => format!("Diff Preview - {}", entry.path),
+        Some(entry) => {
+            if model.diff_truncated {
+                format!(
+                    "Diff Preview - {} (file too large; showing first 1MB without highlighting)",
+                    entry.path
+                )
+            } else {
+                format!("Diff Preview - {}", entry.path)
+            }
+        }
         None => "Diff Preview".to_string(),
     };
     let content = scrollable_content(
@@ -818,7 +829,11 @@ fn render_shortcuts_bar(model: &Model) -> Node<Msg> {
                 TextSpan::new("?", shortcut_key_style()),
                 TextSpan::new(" ", Style::default()),
                 TextSpan::new(
-                    if model.show_all_shortcuts { "less" } else { "more" },
+                    if model.show_all_shortcuts {
+                        "less"
+                    } else {
+                        "more"
+                    },
                     shortcut_description_style(),
                 ),
             ])
@@ -992,6 +1007,7 @@ struct Model {
     selected_unstaged: usize,
     selected_staged: usize,
     diff_lines: Vec<DiffLine>,
+    diff_truncated: bool,
     diff_scroll: ScrollState,
     unstaged_scroll: ScrollState,
     staged_scroll: ScrollState,
@@ -1010,6 +1026,7 @@ impl Model {
         if let Err(err) = model.refresh_status() {
             model.set_error(err);
             model.diff_lines = vec![DiffLine::plain("Unable to load git status")];
+            model.diff_truncated = false;
         }
 
         model
@@ -1141,17 +1158,21 @@ impl Model {
             Some(entry) => diff_for(entry, self.focus),
             None => {
                 self.diff_lines = vec![DiffLine::plain("No file selected")];
+                self.diff_truncated = false;
                 self.diff_scroll.reset();
                 return;
             }
         };
 
         match diff_result {
-            Ok(lines) => {
+            Ok(preview) => {
+                let DiffPreview { lines, truncated } = preview;
                 if lines.is_empty() {
                     self.diff_lines = vec![DiffLine::plain("No diff available")];
+                    self.diff_truncated = false;
                 } else {
                     self.diff_lines = lines;
+                    self.diff_truncated = truncated;
                 }
                 self.diff_scroll.reset();
 
@@ -1161,6 +1182,7 @@ impl Model {
             }
             Err(err) => {
                 self.diff_lines = vec![DiffLine::plain("Failed to load diff")];
+                self.diff_truncated = false;
                 self.set_error(err);
                 self.diff_scroll.reset();
             }
@@ -1388,6 +1410,11 @@ impl DiffLine {
     }
 }
 
+struct DiffPreview {
+    lines: Vec<DiffLine>,
+    truncated: bool,
+}
+
 struct GitStatus {
     unstaged: Vec<FileEntry>,
     staged: Vec<FileEntry>,
@@ -1496,18 +1523,25 @@ impl ParsedStatus {
     }
 }
 
-fn diff_for(entry: &FileEntry, focus: Focus) -> Result<Vec<DiffLine>> {
-    let diff_output = match focus {
+fn diff_for(entry: &FileEntry, focus: Focus) -> Result<DiffPreview> {
+    let mut diff_output = match focus {
         Focus::Unstaged => diff_unstaged(entry),
         Focus::Staged => diff_staged(entry),
     }?;
 
     if diff_output.trim().is_empty() {
-        return Ok(Vec::new());
+        return Ok(DiffPreview {
+            lines: Vec::new(),
+            truncated: false,
+        });
     }
 
+    let diff_truncated = truncate_string(&mut diff_output, PREVIEW_BYTE_LIMIT);
     let versions = load_file_versions(entry, focus)?;
-    Ok(build_diff_lines(&diff_output, &versions))
+    let truncated = diff_truncated || versions.truncated;
+    let lines = build_diff_lines(&diff_output, &versions);
+
+    Ok(DiffPreview { lines, truncated })
 }
 
 fn diff_unstaged(entry: &FileEntry) -> Result<String> {
@@ -1532,6 +1566,12 @@ fn diff_staged(entry: &FileEntry) -> Result<String> {
 struct FileVersions {
     old: Option<FileContent>,
     new: Option<FileContent>,
+    truncated: bool,
+}
+
+struct LoadedContent {
+    text: String,
+    truncated: bool,
 }
 
 #[derive(Clone)]
@@ -1546,13 +1586,18 @@ struct LineContent {
 }
 
 impl FileContent {
-    fn from_source(path: &str, source: String) -> Self {
-        let text_lines: Vec<String> = source.lines().map(str::to_string).collect();
-        let highlight_lines = match highlight::highlight_lines(Path::new(path), &source) {
-            Some(lines) if lines.len() == text_lines.len() => Some(lines),
-            _ => None,
+    fn from_source(path: &str, source: LoadedContent) -> Self {
+        let LoadedContent { text, truncated } = source;
+        let text_lines: Vec<String> = text.lines().map(str::to_string).collect();
+        let line_count = text_lines.len();
+        let highlight_lines = if truncated {
+            None
+        } else {
+            match highlight::highlight_lines(Path::new(path), &text) {
+                Some(lines) if lines.len() == line_count => Some(lines),
+                _ => None,
+            }
         };
-
         let mut lines = Vec::with_capacity(text_lines.len());
         for (idx, text_line) in text_lines.into_iter().enumerate() {
             let spans = highlight_lines
@@ -1599,29 +1644,35 @@ fn load_file_versions(entry: &FileEntry, focus: Focus) -> Result<FileVersions> {
         Focus::Staged => read_index_file(&entry.path)?,
     };
 
+    let old_truncated = old_source.as_ref().is_some_and(|content| content.truncated);
+    let new_truncated = new_source.as_ref().is_some_and(|content| content.truncated);
+
     Ok(FileVersions {
         old: old_source.map(|content| FileContent::from_source(&entry.path, content)),
         new: new_source.map(|content| FileContent::from_source(&entry.path, content)),
+        truncated: old_truncated || new_truncated,
     })
 }
 
-fn read_worktree_file(path: &str) -> Result<Option<String>> {
-    match fs::read_to_string(path) {
-        Ok(content) => Ok(Some(content)),
+fn read_worktree_file(path: &str) -> Result<Option<LoadedContent>> {
+    match File::open(path) {
+        Ok(file) => load_limited_from_file(file)
+            .map(Some)
+            .wrap_err_with(|| format!("failed to read {}", path)),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
         Err(err) => Err(err).wrap_err_with(|| format!("failed to read {}", path)),
     }
 }
 
-fn read_index_file(path: &str) -> Result<Option<String>> {
+fn read_index_file(path: &str) -> Result<Option<LoadedContent>> {
     git_show(&format!(":{}", path))
 }
 
-fn read_head_file(path: &str) -> Result<Option<String>> {
+fn read_head_file(path: &str) -> Result<Option<LoadedContent>> {
     git_show(&format!("HEAD:{}", path))
 }
 
-fn git_show(spec: &str) -> Result<Option<String>> {
+fn git_show(spec: &str) -> Result<Option<LoadedContent>> {
     let output = Command::new("git")
         .arg("show")
         .arg(spec)
@@ -1630,9 +1681,15 @@ fn git_show(spec: &str) -> Result<Option<String>> {
         .wrap_err_with(|| format!("git show {}", spec))?;
 
     if output.status.success() {
-        let stdout = String::from_utf8(output.stdout)
-            .map_err(|err| eyre!("git show {} produced non-utf8 output: {}", spec, err))?;
-        return Ok(Some(stdout));
+        let stdout = output.stdout;
+        let truncated = stdout.len() > PREVIEW_BYTE_LIMIT;
+        let slice = if truncated {
+            &stdout[..PREVIEW_BYTE_LIMIT]
+        } else {
+            stdout.as_slice()
+        };
+        let text = String::from_utf8_lossy(slice).into_owned();
+        return Ok(Some(LoadedContent { text, truncated }));
     }
 
     if matches!(output.status.code(), Some(128)) {
@@ -1644,6 +1701,47 @@ fn git_show(spec: &str) -> Result<Option<String>> {
         spec,
         String::from_utf8_lossy(&output.stderr)
     ))
+}
+
+fn load_limited_from_file(file: File) -> Result<LoadedContent> {
+    let mut reader = BufReader::new(file);
+    let mut buffer = Vec::new();
+    reader
+        .by_ref()
+        .take(PREVIEW_BYTE_LIMIT as u64)
+        .read_to_end(&mut buffer)
+        .wrap_err("failed to read file prefix")?;
+
+    let truncated = if buffer.len() == PREVIEW_BYTE_LIMIT {
+        let mut probe = [0u8; 1];
+        loop {
+            match reader.read(&mut probe) {
+                Ok(0) => break false,
+                Ok(_) => break true,
+                Err(err) if err.kind() == ErrorKind::Interrupted => continue,
+                Err(err) => return Err(err).wrap_err("failed to read file tail"),
+            }
+        }
+    } else {
+        false
+    };
+
+    let text = String::from_utf8_lossy(&buffer).into_owned();
+    Ok(LoadedContent { text, truncated })
+}
+
+fn truncate_string(content: &mut String, limit: usize) -> bool {
+    if content.len() <= limit {
+        return false;
+    }
+
+    let mut idx = limit;
+    while idx > 0 && !content.is_char_boundary(idx) {
+        idx -= 1;
+    }
+
+    content.truncate(idx);
+    true
 }
 
 fn build_diff_lines(diff: &str, versions: &FileVersions) -> Vec<DiffLine> {

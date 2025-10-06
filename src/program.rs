@@ -60,28 +60,30 @@ impl<Model, Msg> Program<Model, Msg> {
     }
 
     pub fn run(mut self) -> Result<(), ProgramError> {
-        let mut terminal = PlatformTerminal::new().map_err(|e| {
-            ProgramError::terminal(format!("Failed to create terminal: {}", e))
-        })?;
+        let mut terminal = PlatformTerminal::new()
+            .map_err(|e| ProgramError::terminal(format!("Failed to create terminal: {}", e)))?;
 
         // Enter raw mode for the duration of the loop.
-        terminal.enter_raw_mode().map_err(|e| {
-            ProgramError::terminal(format!("Failed to enter raw mode: {}", e))
-        })?;
+        terminal
+            .enter_raw_mode()
+            .map_err(|e| ProgramError::terminal(format!("Failed to enter raw mode: {}", e)))?;
 
         // Enter alternate screen and enable mouse tracking
-        write!(terminal, "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h",    // Enable SGR mouse mode
-        ).map_err(|e| {
-            ProgramError::terminal(format!("Failed to setup terminal: {}", e))
-        })?;
-        terminal.flush().map_err(|e| {
-            ProgramError::terminal(format!("Failed to flush terminal: {}", e))
-        })?;
+        write!(
+            terminal,
+            "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h", // Enable SGR mouse mode
+        )
+        .map_err(|e| ProgramError::terminal(format!("Failed to setup terminal: {}", e)))?;
+        terminal
+            .flush()
+            .map_err(|e| ProgramError::terminal(format!("Failed to flush terminal: {}", e)))?;
 
         let result = self.event_loop(&mut terminal);
 
         // Always attempt to restore terminal state.
-        let _ = write!(terminal, "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l",    // Exit alternate screen
+        let _ = write!(
+            terminal,
+            "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l", // Exit alternate screen
         );
         let _ = terminal.flush();
         let _ = terminal.enter_cooked_mode();
@@ -93,35 +95,32 @@ impl<Model, Msg> Program<Model, Msg> {
         self.process_event(event, None)
     }
 
-    fn event_loop(
-        &mut self,
-        terminal: &mut PlatformTerminal,
-    ) -> Result<(), ProgramError> {
-        let dimensions = terminal.get_dimensions().map_err(|e| {
-            ProgramError::terminal(format!("Failed to get dimensions: {}", e))
-        })?;
+    fn event_loop(&mut self, terminal: &mut PlatformTerminal) -> Result<(), ProgramError> {
+        let dimensions = terminal
+            .get_dimensions()
+            .map_err(|e| ProgramError::terminal(format!("Failed to get dimensions: {}", e)))?;
         let mut buffer = DoubleBuffer::new(dimensions.cols as usize, dimensions.rows as usize);
-        
+
         self.render_view(&mut buffer)?;
-        buffer.flush(terminal).map_err(|e| {
-            ProgramError::terminal(format!("Failed to flush buffer: {:?}", e))
-        })?;
+        buffer
+            .flush(terminal)
+            .map_err(|e| ProgramError::terminal(format!("Failed to flush buffer: {:?}", e)))?;
 
         // Hide cursor
-        write!(terminal, "\x1b[?25l").map_err(|e| {
-            ProgramError::terminal(format!("Failed to hide cursor: {}", e))
-        })?;
-        terminal.flush().map_err(|e| {
-            ProgramError::terminal(format!("Failed to flush terminal: {}", e))
-        })?;
+        write!(terminal, "\x1b[?25l")
+            .map_err(|e| ProgramError::terminal(format!("Failed to hide cursor: {}", e)))?;
+        terminal
+            .flush()
+            .map_err(|e| ProgramError::terminal(format!("Failed to flush terminal: {}", e)))?;
 
         loop {
             // Check for terminal resize
-            let new_dimensions = terminal.get_dimensions().map_err(|e| {
-                ProgramError::terminal(format!("Failed to get dimensions: {}", e))
-            })?;
+            let new_dimensions = terminal
+                .get_dimensions()
+                .map_err(|e| ProgramError::terminal(format!("Failed to get dimensions: {}", e)))?;
             let (old_cols, old_rows) = buffer.dimensions();
-            if new_dimensions.cols as usize != old_cols || new_dimensions.rows as usize != old_rows {
+            if new_dimensions.cols as usize != old_cols || new_dimensions.rows as usize != old_rows
+            {
                 let (transition, needs_render) = self.handle_event(Event::Resize(Size {
                     width: new_dimensions.cols,
                     height: new_dimensions.rows,
@@ -136,12 +135,13 @@ impl<Model, Msg> Program<Model, Msg> {
             }
 
             // Poll for events with no timeout (blocking read)
-            if terminal.poll(|_| true, None).map_err(|e| {
-                ProgramError::event(format!("Failed to poll events: {}", e))
-            })? {
-                let event = terminal.read(|_| true).map_err(|e| {
-                    ProgramError::event(format!("Failed to read event: {}", e))
-                })?;
+            if terminal
+                .poll(|_| true, None)
+                .map_err(|e| ProgramError::event(format!("Failed to poll events: {}", e)))?
+            {
+                let event = terminal
+                    .read(|_| true)
+                    .map_err(|e| ProgramError::event(format!("Failed to read event: {}", e)))?;
 
                 let mut needs_render = false;
                 let mut should_quit = false;
@@ -155,12 +155,13 @@ impl<Model, Msg> Program<Model, Msg> {
                 }
 
                 // Read any additional pending events with zero timeout
-                while terminal.poll(|_| true, Some(Duration::from_millis(0))).map_err(|e| {
-                    ProgramError::event(format!("Failed to poll events: {}", e))
-                })? {
-                    let event = terminal.read(|_| true).map_err(|e| {
-                        ProgramError::event(format!("Failed to read event: {}", e))
-                    })?;
+                while terminal
+                    .poll(|_| true, Some(Duration::from_millis(0)))
+                    .map_err(|e| ProgramError::event(format!("Failed to poll events: {}", e)))?
+                {
+                    let event = terminal
+                        .read(|_| true)
+                        .map_err(|e| ProgramError::event(format!("Failed to read event: {}", e)))?;
 
                     if let Some(converted_event) = convert_input_event(event) {
                         let (transition, render_flag) = self.handle_event(converted_event);
@@ -346,19 +347,16 @@ fn convert_input_event(input: termina::Event) -> Option<Event> {
     match input {
         termina::Event::Key(key) => map_key_event(key),
         termina::Event::Mouse(mouse) => map_mouse_event(mouse),
-        termina::Event::WindowResized(size) => Some(Event::Resize(Size::new(
-            size.cols,
-            size.rows,
-        ))),
+        termina::Event::WindowResized(size) => Some(Event::Resize(Size::new(size.cols, size.rows))),
         _ => None,
     }
 }
 
 fn map_mouse_event(mouse: termina::event::MouseEvent) -> Option<Event> {
     use termina::event::{MouseButton, MouseEventKind};
-    
+
     let mut buttons = MouseButtons::default();
-    
+
     match mouse.kind {
         MouseEventKind::Down(btn) => {
             // Button press - set the button as pressed
@@ -409,7 +407,7 @@ fn map_mouse_event(mouse: termina::event::MouseEvent) -> Option<Event> {
             buttons.wheel_positive = true;
         }
     }
-    
+
     Some(Event::Mouse(MouseEvent::with_modifiers(
         mouse.column,
         mouse.row,

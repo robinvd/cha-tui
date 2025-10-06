@@ -105,9 +105,8 @@ const GO_HIGHLIGHTS_QUERY: &str = include_str!(
 const GO_INJECTIONS_QUERY: &str = include_str!(
     "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/go/injections.scm"
 );
-const GO_LOCALS_QUERY: &str = include_str!(
-    "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/go/locals.scm"
-);
+const GO_LOCALS_QUERY: &str =
+    include_str!("/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/go/locals.scm");
 
 pub(crate) const EVERFOREST_FG: Color = Color::rgb(0xd3, 0xc6, 0xaa);
 pub(crate) const EVERFOREST_RED: Color = Color::rgb(0xe6, 0x7e, 0x80);
