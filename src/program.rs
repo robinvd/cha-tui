@@ -1,5 +1,6 @@
 use std::boxed::Box;
 use std::io::Write;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::buffer::DoubleBuffer;
@@ -8,6 +9,7 @@ use crate::error::ProgramError;
 use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};
 use crate::palette::Palette;
 use crate::render::Renderer;
+use crate::scroll::ScrollAlignment;
 
 use taffy::compute_root_layout;
 use termina::{PlatformTerminal, Terminal};
@@ -23,6 +25,11 @@ pub enum Transition {
     Quit,
 }
 
+struct ScrollEffect<Msg> {
+    callback: Rc<dyn Fn(f32) -> Msg>,
+    offset: f32,
+}
+
 pub struct Program<Model, Msg> {
     model: Model,
     update: UpdateFn<Model, Msg>,
@@ -33,6 +40,7 @@ pub struct Program<Model, Msg> {
     last_mouse_buttons: MouseButtons,
     last_click: Option<LastClick>,
     palette: Palette,
+    queued_quit: bool,
 }
 
 impl<Model, Msg> Program<Model, Msg> {
@@ -51,6 +59,7 @@ impl<Model, Msg> Program<Model, Msg> {
             last_mouse_buttons: MouseButtons::default(),
             last_click: None,
             palette: Palette::default(),
+            queued_quit: false,
         }
     }
 
@@ -240,6 +249,15 @@ impl<Model, Msg> Program<Model, Msg> {
             Transition::Continue
         };
 
+        if matches!(transition, Transition::Quit) {
+            return (Transition::Quit, needs_render);
+        }
+
+        if self.queued_quit {
+            self.queued_quit = false;
+            return (Transition::Quit, needs_render);
+        }
+
         (transition, needs_render)
     }
 
@@ -290,7 +308,113 @@ impl<Model, Msg> Program<Model, Msg> {
                     }
                 }
             });
+            if quit {
+                self.queued_quit = true;
+            }
         }
+
+        let mut scroll_effects: Vec<ScrollEffect<Msg>> = Vec::new();
+        if let Some(view) = self.current_view.as_mut() {
+            Self::collect_pending_scrolls(view, &mut scroll_effects);
+        }
+
+        for effect in scroll_effects {
+            let message = (effect.callback)(effect.offset);
+            if matches!((self.update)(&mut self.model, message), Transition::Quit) {
+                self.queued_quit = true;
+            }
+        }
+    }
+
+    fn collect_pending_scrolls(node: &mut Node<Msg>, effects: &mut Vec<ScrollEffect<Msg>>) {
+        if let Some(pending) = node.take_pending_scroll()
+            && let Some((target_top, target_height)) =
+                Self::target_geometry(node, pending.target_hash)
+        {
+            let layout = node.layout_state.layout;
+            let viewport_height = layout.size.height.max(0.0);
+            let content_height = layout.content_size.height.max(viewport_height);
+            let new_scroll = Self::resolve_scroll_offset(
+                node.scroll_y,
+                viewport_height,
+                content_height,
+                target_top,
+                target_height,
+                pending.alignment,
+            );
+
+            if (new_scroll - node.scroll_y).abs() > f32::EPSILON {
+                node.scroll_y = new_scroll;
+                effects.push(ScrollEffect {
+                    callback: pending.callback,
+                    offset: new_scroll,
+                });
+            }
+        }
+
+        if let crate::dom::NodeContent::Element(element) = &mut node.content {
+            for child in &mut element.children {
+                Self::collect_pending_scrolls(child, effects);
+            }
+        }
+    }
+
+    fn target_geometry(node: &Node<Msg>, target_hash: u64) -> Option<(f32, f32)> {
+        fn helper<Msg>(node: &Node<Msg>, target_hash: u64, offset: f32) -> Option<(f32, f32)> {
+            if node.hashed_id() == target_hash {
+                let layout = node.layout_state.layout;
+                return Some((offset, layout.size.height.max(0.0)));
+            }
+
+            match &node.content {
+                crate::dom::NodeContent::Element(element) => {
+                    for child in &element.children {
+                        let child_layout = child.layout_state.layout;
+                        let child_offset = offset + child_layout.location.y;
+                        if let Some(result) = helper(child, target_hash, child_offset) {
+                            return Some(result);
+                        }
+                    }
+                    None
+                }
+                crate::dom::NodeContent::Text(_) => None,
+            }
+        }
+
+        helper(node, target_hash, 0.0)
+    }
+
+    fn resolve_scroll_offset(
+        current_scroll: f32,
+        viewport_height: f32,
+        content_height: f32,
+        target_top: f32,
+        target_height: f32,
+        alignment: ScrollAlignment,
+    ) -> f32 {
+        if viewport_height <= f32::EPSILON {
+            return 0.0;
+        }
+
+        let max_scroll = (content_height - viewport_height).max(0.0);
+        let target_bottom = target_top + target_height;
+        let viewport_bottom = current_scroll + viewport_height;
+
+        let desired = match alignment {
+            ScrollAlignment::Start => target_top,
+            ScrollAlignment::End => target_bottom - viewport_height,
+            ScrollAlignment::Nearest => {
+                if target_top < current_scroll {
+                    target_top
+                } else if target_bottom > viewport_bottom {
+                    target_bottom - viewport_height
+                } else {
+                    current_scroll
+                }
+            }
+        };
+
+        desired.clamp(0.0, max_scroll)
     }
 
     fn handle_mouse_event(&mut self, event: &MouseEvent) -> Option<Msg> {

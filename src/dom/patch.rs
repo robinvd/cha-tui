@@ -24,6 +24,7 @@ pub fn patch<Msg>(existing: &mut Node<Msg>, new_node: Node<Msg>) -> PatchResult<
         on_mouse: new_on_mouse,
         on_resize: new_on_resize,
         scroll_y: new_scroll_y,
+        pending_scroll: new_pending_scroll,
     } = new_node;
 
     existing.classname = new_classname;
@@ -31,6 +32,7 @@ pub fn patch<Msg>(existing: &mut Node<Msg>, new_node: Node<Msg>) -> PatchResult<
     existing.scroll_y = new_scroll_y;
     existing.on_mouse = new_on_mouse;
     existing.on_resize = new_on_resize;
+    existing.pending_scroll = new_pending_scroll;
 
     let mut layout_changed = false;
 

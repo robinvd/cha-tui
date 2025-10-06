@@ -7,6 +7,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::event::{MouseEvent, Size};
+use crate::scroll::ScrollAlignment;
 use taffy::{
     CacheTree, LayoutFlexboxContainer, Overflow, compute_cached_layout, compute_flexbox_layout,
     compute_leaf_layout,
@@ -35,6 +36,14 @@ pub struct Node<Msg> {
 
     pub(crate) on_mouse: Option<Rc<dyn Fn(MouseEvent) -> Option<Msg>>>,
     pub(crate) on_resize: Option<ResizeHandler<Msg>>,
+    pub(crate) pending_scroll: Option<PendingScroll<Msg>>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingScroll<Msg> {
+    pub target_hash: u64,
+    pub alignment: ScrollAlignment,
+    pub callback: Rc<dyn Fn(f32) -> Msg>,
 }
 
 impl<Msg: fmt::Debug> fmt::Debug for Node<Msg> {
@@ -45,6 +54,7 @@ impl<Msg: fmt::Debug> fmt::Debug for Node<Msg> {
             .field("id", &self.id)
             .field("layout_state", &self.layout_state)
             .field("clickable", &self.on_mouse.is_some())
+            .field("pending_scroll", &self.pending_scroll.is_some())
             .finish()
     }
 }
@@ -56,6 +66,7 @@ impl<Msg: PartialEq> PartialEq for Node<Msg> {
             && self.id == other.id
             && self.layout_state == other.layout_state
             && self.on_mouse.is_some() == other.on_mouse.is_some()
+            && self.pending_scroll.is_some() == other.pending_scroll.is_some()
             && (self.scroll_y - other.scroll_y).abs() < f32::EPSILON
     }
 }
@@ -320,6 +331,7 @@ impl<Msg> Node<Msg> {
             on_mouse: None,
             on_resize: None,
             scroll_y: 0.0,
+            pending_scroll: None,
         }
     }
 
@@ -472,6 +484,19 @@ impl<Msg> Node<Msg> {
         self.scroll_y = if y.is_sign_negative() { 0.0 } else { y };
         self.layout_state.style.overflow.y = Overflow::Scroll;
         self
+    }
+
+    pub(crate) fn hashed_id(&self) -> u64 {
+        self.id
+    }
+
+    pub(crate) fn with_pending_scroll(mut self, pending: PendingScroll<Msg>) -> Self {
+        self.pending_scroll = Some(pending);
+        self
+    }
+
+    pub(crate) fn take_pending_scroll(&mut self) -> Option<PendingScroll<Msg>> {
+        self.pending_scroll.take()
     }
 
     pub fn layout_state(&self) -> &LayoutState {

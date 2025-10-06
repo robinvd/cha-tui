@@ -4,7 +4,7 @@ use std::io::{BufReader, ErrorKind, Read};
 use std::path::Path;
 use std::process::Command;
 
-use chatui::components::scroll::{ScrollMsg, ScrollState, scrollable_content};
+use chatui::components::scroll::{ScrollMsg, ScrollState, ScrollTarget, scrollable_content};
 use chatui::dom::{Node, TextSpan};
 use chatui::event::{Event, Key, KeyCode};
 use chatui::{Program, Style, Transition, block_with_title, column, modal, rich_text, row, text};
@@ -490,6 +490,7 @@ fn handle_section_msg(model: &mut Model, focus: Focus, msg: SectionMsg) -> Trans
                     model.focus = Focus::Staged;
                 }
             }
+            model.queue_scroll_for_focus(model.focus);
             model.update_diff();
             Transition::Continue
         }
@@ -504,6 +505,7 @@ fn handle_section_msg(model: &mut Model, focus: Focus, msg: SectionMsg) -> Trans
                     model.focus = Focus::Staged;
                 }
             }
+            model.queue_scroll_for_focus(model.focus);
             model.toggle_stage_selected();
             Transition::Continue
         }
@@ -704,23 +706,31 @@ fn render_file_list(
         items.push(text::<Msg>("(no files)").with_style(inactive_style()));
     } else {
         for (idx, entry) in entries.iter().enumerate() {
-            let mut node = text::<Msg>(&entry.display).on_mouse(move |event| {
-                if event.is_double_click() {
-                    Some(if is_staged {
-                        Msg::Staged(SectionMsg::ToggleStageEntry(idx))
+            let item_id = if is_staged {
+                Model::STAGED_ITEM_ID
+            } else {
+                Model::UNSTAGED_ITEM_ID
+            };
+
+            let mut node = text::<Msg>(&entry.display)
+                .with_id_mixin(item_id, idx as u64)
+                .on_mouse(move |event| {
+                    if event.is_double_click() {
+                        Some(if is_staged {
+                            Msg::Staged(SectionMsg::ToggleStageEntry(idx))
+                        } else {
+                            Msg::Unstaged(SectionMsg::ToggleStageEntry(idx))
+                        })
+                    } else if event.is_single_click() {
+                        Some(if is_staged {
+                            Msg::Staged(SectionMsg::ActivateFile(idx))
+                        } else {
+                            Msg::Unstaged(SectionMsg::ActivateFile(idx))
+                        })
                     } else {
-                        Msg::Unstaged(SectionMsg::ToggleStageEntry(idx))
-                    })
-                } else if event.is_single_click() {
-                    Some(if is_staged {
-                        Msg::Staged(SectionMsg::ActivateFile(idx))
-                    } else {
-                        Msg::Unstaged(SectionMsg::ActivateFile(idx))
-                    })
-                } else {
-                    None
-                }
-            });
+                        None
+                    }
+                });
 
             if idx == selected {
                 let mut style = if is_active {
@@ -1020,6 +1030,11 @@ struct Model {
 }
 
 impl Model {
+    const UNSTAGED_CONTAINER_ID: &'static str = "unstaged-section-content";
+    const STAGED_CONTAINER_ID: &'static str = "staged-section-content";
+    const UNSTAGED_ITEM_ID: &'static str = "unstaged-entry";
+    const STAGED_ITEM_ID: &'static str = "staged-entry";
+
     fn new() -> Self {
         let mut model = Self::default();
 
@@ -1215,18 +1230,13 @@ impl Model {
             Focus::Unstaged => {
                 if self.selected_unstaged > 0 {
                     self.selected_unstaged -= 1;
-                    if (self.selected_unstaged as f32) < self.unstaged_scroll.offset() {
-                        self.unstaged_scroll
-                            .set_offset(self.selected_unstaged as f32);
-                    }
+                    self.queue_scroll_for_focus(Focus::Unstaged);
                 }
             }
             Focus::Staged => {
                 if self.selected_staged > 0 {
                     self.selected_staged -= 1;
-                    if (self.selected_staged as f32) < self.staged_scroll.offset() {
-                        self.staged_scroll.set_offset(self.selected_staged as f32);
-                    }
+                    self.queue_scroll_for_focus(Focus::Staged);
                 } else if !self.unstaged.is_empty() {
                     self.focus = Focus::Unstaged;
                     self.selected_unstaged = self.unstaged.len().saturating_sub(1);
@@ -1241,7 +1251,7 @@ impl Model {
             Focus::Unstaged => {
                 if self.selected_unstaged + 1 < self.unstaged.len() {
                     self.selected_unstaged += 1;
-                    self.ensure_selected_visible();
+                    self.queue_scroll_for_focus(Focus::Unstaged);
                 } else if !self.staged.is_empty() {
                     self.focus = Focus::Staged;
                     self.selected_staged = 0;
@@ -1251,7 +1261,7 @@ impl Model {
             Focus::Staged => {
                 if self.selected_staged + 1 < self.staged.len() {
                     self.selected_staged += 1;
-                    self.ensure_selected_visible();
+                    self.queue_scroll_for_focus(Focus::Staged);
                 }
             }
         }
@@ -1260,12 +1270,14 @@ impl Model {
     fn focus_unstaged(&mut self) {
         if !self.unstaged.is_empty() {
             self.focus = Focus::Unstaged;
+            self.queue_scroll_for_unstaged();
         }
     }
 
     fn focus_staged(&mut self) {
         if !self.staged.is_empty() {
             self.focus = Focus::Staged;
+            self.queue_scroll_for_staged();
         }
     }
 
@@ -1303,20 +1315,35 @@ impl Model {
         self.scroll_files(focus, delta);
     }
 
-    fn ensure_selected_visible(&mut self) {
-        match self.focus {
-            Focus::Unstaged => {
-                if (self.selected_unstaged as f32) < self.unstaged_scroll.offset() {
-                    self.unstaged_scroll
-                        .set_offset(self.selected_unstaged as f32);
-                }
-            }
-            Focus::Staged => {
-                if (self.selected_staged as f32) < self.staged_scroll.offset() {
-                    self.staged_scroll.set_offset(self.selected_staged as f32);
-                }
-            }
+    fn queue_scroll_for_focus(&mut self, focus: Focus) {
+        match focus {
+            Focus::Unstaged => self.queue_scroll_for_unstaged(),
+            Focus::Staged => self.queue_scroll_for_staged(),
         }
+    }
+
+    fn queue_scroll_for_unstaged(&mut self) {
+        if self.unstaged.is_empty() {
+            return;
+        }
+        let index = self.selected_unstaged.min(self.unstaged.len() - 1);
+        let target = ScrollTarget::with_mixin(Self::UNSTAGED_ITEM_ID, index as u64);
+        self.unstaged_scroll
+            .ensure_visible(Self::UNSTAGED_CONTAINER_ID, target);
+    }
+
+    fn queue_scroll_for_staged(&mut self) {
+        if self.staged.is_empty() {
+            return;
+        }
+        let index = self.selected_staged.min(self.staged.len() - 1);
+        let target = ScrollTarget::with_mixin(Self::STAGED_ITEM_ID, index as u64);
+        self.staged_scroll
+            .ensure_visible(Self::STAGED_CONTAINER_ID, target);
+    }
+
+    fn ensure_selected_visible(&mut self) {
+        self.queue_scroll_for_focus(self.focus);
     }
 
     fn update_section_scroll(&mut self, focus: Focus, msg: ScrollMsg) {
