@@ -38,6 +38,7 @@ pub struct LeafRenderContext<'a> {
     origin: (usize, usize),
     area: BufferRect,
     inherited_scroll_y: f32,
+    inherited_scroll_x: f32,
 }
 
 impl<'a> LeafRenderContext<'a> {
@@ -56,6 +57,7 @@ impl<'a> LeafRenderContext<'a> {
             origin,
             area,
             inherited_scroll_y,
+            inherited_scroll_x: 0.0,
         }
     }
 
@@ -97,6 +99,10 @@ impl<'a> LeafRenderContext<'a> {
 
     pub fn scroll_y(&self) -> f32 {
         self.inherited_scroll_y
+    }
+
+    pub fn scroll_x(&self) -> f32 {
+        self.inherited_scroll_x
     }
 }
 
@@ -166,7 +172,7 @@ impl<'a> Renderer<'a> {
             width,
             height,
         };
-        self.render_node(root, Point { x: 0, y: 0 }, clip, 0.0, false);
+        self.render_node(root, Point { x: 0, y: 0 }, clip, 0.0, 0.0, false);
 
         Ok(())
     }
@@ -177,6 +183,7 @@ impl<'a> Renderer<'a> {
         parent_origin: Point,
         clip: Rect,
         inherited_scroll_y: f32,
+        inherited_scroll_x: f32,
         clear: bool,
     ) {
         let layout = node.layout_state.layout;
@@ -207,9 +214,21 @@ impl<'a> Renderer<'a> {
         }
 
         match &node.content {
-            NodeContent::Text(text) => self.render_text(text, node_origin, area),
+            NodeContent::Text(text) => {
+                // Apply horizontal windowing if x-overflow is scroll
+                let skip_cols = {
+                    let local = if node.layout_state.style.overflow.x == taffy::Overflow::Scroll {
+                        node.scroll_x.max(0.0)
+                    } else {
+                        0.0
+                    };
+                    (local + inherited_scroll_x.max(0.0)).round() as usize
+                };
+                self.render_text(text, node_origin, area, skip_cols)
+            }
             NodeContent::Element(element) => {
                 let is_scroll = node.layout_state.style.overflow.y == taffy::Overflow::Scroll;
+                let is_scroll_x = node.layout_state.style.overflow.x == taffy::Overflow::Scroll;
                 let border_style =
                     if matches!(element.kind, ElementKind::Block) && element.attrs.style.border {
                         Some(&element.attrs.style)
@@ -221,9 +240,17 @@ impl<'a> Renderer<'a> {
                 } else {
                     inherited_scroll_y
                 };
-                self.render_element(element, node_origin, area, next_scroll);
+                let next_scroll_x = if is_scroll_x {
+                    inherited_scroll_x + node.scroll_x
+                } else {
+                    inherited_scroll_x
+                };
+                self.render_element(element, node_origin, area, next_scroll, next_scroll_x);
                 if is_scroll {
                     self.render_scrollbar(node_origin, area, &layout, node.scroll_y, border_style);
+                }
+                if is_scroll_x {
+                    self.render_hscrollbar(node_origin, area, &layout, node.scroll_x, border_style);
                 }
             }
             NodeContent::Leaf(leaf) => {
@@ -236,12 +263,20 @@ impl<'a> Renderer<'a> {
                     clip_rect,
                     inherited_scroll_y,
                 );
+                // Override horizontal scroll into the leaf context if this node scrolls horizontally
+                ctx.inherited_scroll_x = if node.layout_state.style.overflow.x
+                    == taffy::Overflow::Scroll
+                {
+                    inherited_scroll_x + node.scroll_x
+                } else {
+                    inherited_scroll_x
+                };
                 leaf.render(&mut ctx);
             }
         }
     }
 
-    fn render_text(&mut self, text: &TextNode, _parent_origin: Point, clip: Rect) {
+    fn render_text(&mut self, text: &TextNode, _parent_origin: Point, clip: Rect, mut skip_cols: usize) {
         let mut remaining = clip.width;
         if remaining == 0 {
             return;
@@ -258,12 +293,27 @@ impl<'a> Renderer<'a> {
             let mut collected = String::new();
             let mut taken = 0;
 
+            // Skip leading columns according to horizontal scroll, then take up to remaining
             for ch in span.content.chars() {
                 if taken == remaining {
                     break;
                 }
+                // width per char (treat at least 1 col)
+                let mut buf = [0u8; 4];
+                let s = ch.encode_utf8(&mut buf);
+                let w = unicode_column_width(s, None).max(1);
+                if skip_cols >= w {
+                    skip_cols -= w;
+                    continue;
+                } else if skip_cols > 0 {
+                    // partial skip into this char: treat as fully visible
+                    skip_cols = 0;
+                }
+                if taken + w > remaining {
+                    break;
+                }
                 collected.push(ch);
-                taken += 1;
+                taken += w;
             }
 
             if collected.is_empty() {
@@ -296,12 +346,13 @@ impl<'a> Renderer<'a> {
         parent_origin: Point,
         clip: Rect,
         scroll_y: f32,
+        scroll_x: f32,
     ) {
         match element.kind {
-            ElementKind::Block => self.render_block(element, parent_origin, clip, scroll_y),
+            ElementKind::Block => self.render_block(element, parent_origin, clip, scroll_y, scroll_x),
             ElementKind::Modal => self.render_modal(element, parent_origin, clip, scroll_y),
             ElementKind::Column | ElementKind::Row => {
-                self.render_children(&element.children, parent_origin, clip, scroll_y, false)
+                self.render_children(&element.children, parent_origin, clip, scroll_y, scroll_x, false)
             }
         }
     }
@@ -312,10 +363,11 @@ impl<'a> Renderer<'a> {
         parent_origin: Point,
         clip: Rect,
         scroll_y: f32,
+        scroll_x: f32,
         clear: bool,
     ) {
         for child in children {
-            self.render_node(child, parent_origin, clip, scroll_y, clear);
+            self.render_node(child, parent_origin, clip, scroll_y, scroll_x, clear);
         }
     }
 
@@ -415,6 +467,99 @@ impl<'a> Renderer<'a> {
         }
     }
 
+    fn render_hscrollbar(
+        &mut self,
+        parent_origin: Point,
+        clip: Rect,
+        layout: &TaffyLayout,
+        scroll_offset: f32,
+        block_border_style: Option<&Style>,
+    ) {
+        let _ = parent_origin;
+
+        let viewport_width = layout.size.width.max(0.0);
+        if viewport_width <= 0.0 {
+            return;
+        }
+
+        let mut content_width = layout.content_size.width.max(viewport_width);
+        // If layout doesn't report horizontal overflow but the node scrolls horizontally,
+        // still render a minimal scrollbar to indicate horizontal scroll capability.
+        if content_width <= viewport_width + f32::EPSILON {
+            content_width = viewport_width + 1.0;
+        }
+
+        let raw_scrollbar_height = layout.scrollbar_size.height.max(0.0).round() as usize;
+        let share_border_row = block_border_style.is_some() && raw_scrollbar_height <= 1;
+        let scrollbar_height = if share_border_row {
+            raw_scrollbar_height.max(1)
+        } else {
+            raw_scrollbar_height
+        };
+
+        if scrollbar_height == 0 || clip.width == 0 || clip.height == 0 {
+            return;
+        }
+        if clip.height < scrollbar_height {
+            return;
+        }
+
+        let track_left = if share_border_row { clip.x + 1 } else { clip.x };
+        let track_width = if share_border_row {
+            clip.width.saturating_sub(2)
+        } else {
+            clip.width
+        };
+        if track_width == 0 {
+            return;
+        }
+
+        let scrollbar_y = clip.y + clip.height - scrollbar_height;
+        if !share_border_row {
+            let track_attrs = CellAttributes::default();
+            for y in scrollbar_y..(scrollbar_y + scrollbar_height) {
+                for x in track_left..(track_left + track_width) {
+                    self.write_char(x, y, SCROLLBAR_TRACK_CHAR, &track_attrs);
+                }
+            }
+        }
+
+        let max_scroll = (content_width - viewport_width).max(0.0);
+        let clamped_scroll = if max_scroll <= f32::EPSILON {
+            0.0
+        } else {
+            scroll_offset.clamp(0.0, max_scroll)
+        };
+
+        let mut thumb_width = ((track_width as f32 * (viewport_width / content_width)).floor()
+            as usize)
+            .max(1);
+        if thumb_width > track_width {
+            thumb_width = track_width;
+        }
+
+        let travel = track_width.saturating_sub(thumb_width);
+        let thumb_left_offset = if travel == 0 || max_scroll <= f32::EPSILON {
+            0
+        } else {
+            ((clamped_scroll / max_scroll) * travel as f32).round() as usize
+        };
+        let thumb_left = track_left + thumb_left_offset;
+        let thumb_right = thumb_left.saturating_add(thumb_width).min(track_left + track_width);
+
+        let mut thumb_attrs = match block_border_style {
+            Some(style) => style_to_attributes(self.palette, style),
+            None => CellAttributes::default(),
+        };
+        thumb_attrs.set_bold(true);
+
+        for y in scrollbar_y..(scrollbar_y + scrollbar_height) {
+            for x in thumb_left..thumb_right {
+                self.write_char(x, y, SCROLLBAR_THUMB_CHAR, &thumb_attrs);
+            }
+        }
+    }
+
     fn render_modal<Msg>(
         &mut self,
         element: &ElementNode<Msg>,
@@ -423,7 +568,7 @@ impl<'a> Renderer<'a> {
         scroll_y: f32,
     ) {
         self.apply_overlay_style(clip, &element.attrs.style);
-        self.render_children(&element.children, parent_origin, clip, scroll_y, true);
+        self.render_children(&element.children, parent_origin, clip, scroll_y, 0.0, true);
     }
 
     fn render_block<Msg>(
@@ -432,6 +577,7 @@ impl<'a> Renderer<'a> {
         parent_origin: Point,
         clip: Rect,
         scroll_y: f32,
+        scroll_x: f32,
     ) {
         self.draw_border(clip, &element.attrs.style);
         if let Some(title) = &element.title {
@@ -450,7 +596,7 @@ impl<'a> Renderer<'a> {
             width: clip.width.saturating_sub(1),
             height: clip.height.saturating_sub(2),
         };
-        self.render_children(&element.children, child_origin, child_area, scroll_y, false);
+        self.render_children(&element.children, child_origin, child_area, scroll_y, scroll_x, false);
     }
 
     fn draw_border(&mut self, area: Rect, style: &Style) {
@@ -734,6 +880,86 @@ mod tests {
         assert_eq!(keyword.ch, 'f');
         // Cyan color (0, 205, 205)
         assert_eq!(keyword.attrs.foreground(), Some(Rgba::opaque(0, 205, 205)));
+    }
+
+    #[test]
+    fn rich_text_respects_horizontal_scroll() {
+        let mut buffer = DoubleBuffer::new(6, 1);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
+        let spans = vec![
+            TextSpan::new("abcdef", Style::fg(Color::Red)),
+        ];
+        let mut node = rich_text::<()>(spans).with_scroll_x(2.0);
+        prepare_layout(&mut node, Size::new(6, 1));
+
+        renderer.render(&node, Size::new(6, 1)).expect("render should succeed");
+
+        let screen = renderer.buffer().to_string();
+        let first_line = screen.lines().next().unwrap_or("");
+        assert_eq!(first_line, "cdef  ");
+    }
+
+    fn render_dual_scroll_block_lines(x_scroll: f32, y_scroll: f32) -> Vec<String> {
+        let mut buffer = DoubleBuffer::new(12, 8);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
+        // Many long lines to overflow both width and height
+        let lines: Vec<Node<()>> = (0..30)
+            .map(|idx| text::<()>(format!("Item {idx} 1234567890abcdef")))
+            .collect();
+        let mut root = block::<()>(vec![column(lines)])
+            .with_scroll(y_scroll)
+            .with_scroll_x(x_scroll)
+            .with_width(Dimension::percent(1.0))
+            .with_height(Dimension::percent(1.0));
+        prepare_layout(&mut root, Size::new(12, 8));
+
+        renderer.render(&root, Size::new(12, 8)).expect("render should succeed");
+
+        renderer
+            .buffer()
+            .to_string()
+            .lines()
+            .map(|line| line.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn block_renders_both_scrollbars() {
+        let lines = render_dual_scroll_block_lines(4.0, 5.0);
+        assert!(!lines.is_empty(), "expected rendered lines");
+        // Rightmost column contains vertical scrollbar thumb in interior rows
+        let right_column: Vec<char> = lines
+            .iter()
+            .filter_map(|line| line.chars().last())
+            .collect();
+        let interior = &right_column[1..right_column.len().saturating_sub(1)];
+        assert!(
+            interior.contains(&SCROLLBAR_THUMB_CHAR),
+            "expected vertical thumb present in right border column"
+        );
+        // Bottom row contains horizontal scrollbar thumb somewhere in interior columns
+        let bottom = lines.last().expect("expected bottom line");
+        assert!(
+            bottom.contains(SCROLLBAR_THUMB_CHAR),
+            "expected horizontal thumb present in bottom row"
+        );
+    }
+
+    #[test]
+    fn fullwidth_char_windowing_contains_wide_char() {
+        let mut buffer = DoubleBuffer::new(6, 1);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
+        let spans = vec![TextSpan::new("ab漢cdef", Style::fg(Color::Yellow))];
+        let mut node = rich_text::<()>(spans).with_scroll_x(2.0);
+        prepare_layout(&mut node, Size::new(6, 1));
+
+        renderer.render(&node, Size::new(6, 1)).expect("render should succeed");
+        let screen = renderer.buffer().to_string();
+        let first_line = screen.lines().next().unwrap_or("");
+        assert!(first_line.contains('漢'));
     }
 
     #[test]
@@ -1119,5 +1345,27 @@ mod tests {
             lines.get(1).expect("expected first content row"),
             "│Item  │"
         );
+    }
+
+    #[test]
+    fn input_overflow_hides_latest_text() {
+        // Confirms bug: when input content exceeds available width, newest text is not visible.
+        let mut buffer = DoubleBuffer::new(8, 1);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
+
+        let value = "abcdefghijklmnopqrstuvwxyz";
+        let state = crate::InputState::with_value(value);
+        let style = crate::InputStyle::default();
+        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+        prepare_layout(&mut node, Size::new(8, 1));
+
+        renderer.render(&node, Size::new(8, 1)).expect("render should succeed");
+
+        let screen = renderer.buffer().to_string();
+        let first_line = screen.lines().next().unwrap_or("");
+        // It currently shows the prefix and hides the end (bug: latest text not visible).
+        assert_eq!(first_line, &value[..8]);
+        assert!(!first_line.contains(value.chars().last().unwrap()));
     }
 }

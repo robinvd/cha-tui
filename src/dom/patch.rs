@@ -23,12 +23,14 @@ pub fn patch<Msg>(existing: &mut Node<Msg>, new_node: Node<Msg>) -> PatchResult<
         layout_state: new_layout_state,
         on_mouse: new_on_mouse,
         on_resize: new_on_resize,
+        scroll_x: new_scroll_x,
         scroll_y: new_scroll_y,
         pending_scroll: new_pending_scroll,
     } = new_node;
 
     existing.classname = new_classname;
     existing.id = new_id;
+    existing.scroll_x = new_scroll_x;
     existing.scroll_y = new_scroll_y;
     existing.on_mouse = new_on_mouse;
     existing.on_resize = new_on_resize;

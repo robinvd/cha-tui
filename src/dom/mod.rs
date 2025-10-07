@@ -55,6 +55,7 @@ pub struct Node<Msg> {
 
     pub(crate) content: NodeContent<Msg>,
     pub(crate) layout_state: LayoutState,
+    pub(crate) scroll_x: f32,
     pub(crate) scroll_y: f32,
 
     pub(crate) on_mouse: Option<Rc<dyn Fn(MouseEvent) -> Option<Msg>>>,
@@ -90,6 +91,7 @@ impl<Msg> PartialEq for Node<Msg> {
             && self.layout_state == other.layout_state
             && self.on_mouse.is_some() == other.on_mouse.is_some()
             && self.pending_scroll.is_some() == other.pending_scroll.is_some()
+            && (self.scroll_x - other.scroll_x).abs() < f32::EPSILON
             && (self.scroll_y - other.scroll_y).abs() < f32::EPSILON
     }
 }
@@ -358,6 +360,7 @@ impl<Msg> Node<Msg> {
             id: 0,
             on_mouse: None,
             on_resize: None,
+            scroll_x: 0.0,
             scroll_y: 0.0,
             pending_scroll: None,
         }
@@ -474,6 +477,12 @@ impl<Msg> Node<Msg> {
 
     pub fn with_overflow_x(mut self, val: taffy::Overflow) -> Self {
         self.layout_state.style.overflow.x = val;
+        self
+    }
+
+    pub fn with_scroll_x(mut self, x: f32) -> Self {
+        self.scroll_x = if x.is_sign_negative() { 0.0 } else { x };
+        self.layout_state.style.overflow.x = Overflow::Scroll;
         self
     }
 

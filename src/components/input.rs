@@ -10,6 +10,8 @@ pub struct InputState {
     rope: Rope,
     cursor: usize,
     anchor: usize,
+    viewport_cols: usize,
+    scroll_x: usize,
 }
 
 impl Default for InputState {
@@ -18,6 +20,8 @@ impl Default for InputState {
             rope: Rope::new(),
             cursor: 0,
             anchor: 0,
+            viewport_cols: 0,
+            scroll_x: 0,
         }
     }
 }
@@ -47,6 +51,10 @@ impl InputState {
 
     pub fn cursor(&self) -> usize {
         self.cursor
+    }
+
+    pub fn scroll_x(&self) -> usize {
+        self.scroll_x
     }
 
     pub fn selection(&self) -> Option<(usize, usize)> {
@@ -102,19 +110,29 @@ impl InputState {
             } => self.handle_pointer(column as usize, click_count.max(1)),
             InputMsg::Replace(text) => {
                 self.set_value(text);
+                self.ensure_cursor_visible();
                 true
             }
             InputMsg::SelectRange { start, end } => {
                 self.set_selection(start, end);
+                self.ensure_cursor_visible();
                 true
             }
             InputMsg::ClearSelection => {
                 if self.cursor != self.anchor {
                     self.anchor = self.cursor;
+                    self.ensure_cursor_visible();
                     true
                 } else {
                     false
                 }
+            }
+            InputMsg::SetViewportWidth { cols } => {
+                let cols = cols.max(1);
+                let changed = self.viewport_cols != cols;
+                self.viewport_cols = cols;
+                self.ensure_cursor_visible();
+                changed
             }
         }
     }
@@ -131,6 +149,7 @@ impl InputState {
         self.cursor += added;
         self.anchor = self.cursor;
         changed |= added > 0;
+        self.ensure_cursor_visible();
         changed
     }
 
@@ -147,6 +166,7 @@ impl InputState {
         self.rope.remove(prev..self.cursor);
         self.cursor = prev;
         self.anchor = prev;
+        self.ensure_cursor_visible();
         true
     }
 
@@ -166,21 +186,25 @@ impl InputState {
         self.rope.remove(boundary..self.cursor);
         self.cursor = boundary;
         self.anchor = boundary;
+        self.ensure_cursor_visible();
         true
     }
 
     fn delete_to_start(&mut self) -> bool {
         if self.delete_selection() {
+            self.ensure_cursor_visible();
             return true;
         }
 
         if self.cursor == 0 {
+            self.ensure_cursor_visible();
             return false;
         }
 
         self.rope.remove(0..self.cursor);
         self.cursor = 0;
         self.anchor = 0;
+        self.ensure_cursor_visible();
         true
     }
 
@@ -195,6 +219,7 @@ impl InputState {
         }
         self.rope.remove(self.cursor..len);
         self.anchor = self.cursor;
+        self.ensure_cursor_visible();
         true
     }
 
@@ -202,6 +227,7 @@ impl InputState {
         if !extend && let Some((start, _)) = self.selection() {
             self.cursor = start;
             self.anchor = start;
+            self.ensure_cursor_visible();
             return true;
         }
 
@@ -216,13 +242,32 @@ impl InputState {
         if !extend {
             self.anchor = self.cursor;
         }
+        self.ensure_cursor_visible();
         true
+    }
+
+    fn ensure_cursor_visible(&mut self) {
+        let viewport = self.viewport_cols.max(1);
+        // compute cursor column
+        let mut col = 0usize;
+        for (i, ch) in self.rope.chars().enumerate() {
+            if i >= self.cursor {
+                break;
+            }
+            col += Self::char_width(ch);
+        }
+        if col < self.scroll_x {
+            self.scroll_x = col;
+        } else if col >= self.scroll_x + viewport {
+            self.scroll_x = col + 1 - viewport;
+        }
     }
 
     fn move_right(&mut self, extend: bool) -> bool {
         if !extend && let Some((_, end)) = self.selection() {
             self.cursor = end;
             self.anchor = end;
+            self.ensure_cursor_visible();
             return true;
         }
 
@@ -238,6 +283,7 @@ impl InputState {
         if !extend {
             self.anchor = self.cursor;
         }
+        self.ensure_cursor_visible();
         true
     }
 
@@ -253,6 +299,7 @@ impl InputState {
         if !extend {
             self.anchor = clamped;
         }
+        self.ensure_cursor_visible();
         true
     }
 
@@ -262,6 +309,7 @@ impl InputState {
         let end = end.min(len);
         self.anchor = start;
         self.cursor = end;
+        self.ensure_cursor_visible();
     }
 
     fn delete_selection(&mut self) -> bool {
@@ -269,6 +317,7 @@ impl InputState {
             self.rope.remove(start..end);
             self.cursor = start;
             self.anchor = start;
+            self.ensure_cursor_visible();
             true
         } else {
             false
@@ -279,18 +328,28 @@ impl InputState {
         let index = self.column_to_index(column);
 
         match click_count {
-            1 => self.move_to_index(index, false),
+            1 => {
+                let changed = self.move_to_index(index, false);
+                self.ensure_cursor_visible();
+                changed
+            }
             2 => {
                 let (start, end) = self.word_range_at(index);
                 self.set_selection(start, end);
+                self.ensure_cursor_visible();
                 true
             }
             3 => {
                 let len = self.len_chars();
                 self.set_selection(0, len);
+                self.ensure_cursor_visible();
                 true
             }
-            _ => self.move_to_index(index, false),
+            _ => {
+                let changed = self.move_to_index(index, false);
+                self.ensure_cursor_visible();
+                changed
+            }
         }
     }
 
@@ -526,6 +585,7 @@ pub enum InputMsg {
     Replace(String),
     SelectRange { start: usize, end: usize },
     ClearSelection,
+    SetViewportWidth { cols: usize },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -560,6 +620,8 @@ where
 
     let spans = state.spans(style);
     let mut node = rich_text::<Msg>(spans).with_id(id);
+    // Apply horizontal scroll to keep cursor visible
+    node = node.with_scroll_x(state.scroll_x as f32);
 
     let handler = Rc::new(map_msg);
     let mouse_handler = handler.clone();
@@ -574,6 +636,13 @@ where
         } else {
             None
         }
+    });
+
+    // Track viewport width via resize and update state
+    let resize_handler = handler.clone();
+    node = node.on_resize(move |layout| {
+        let cols = layout.size.width.max(0.0).round() as usize;
+        Some(resize_handler(InputMsg::SetViewportWidth { cols }))
     });
 
     node
@@ -664,5 +733,137 @@ mod tests {
         assert_eq!(spans[0].style, style.text);
         assert_eq!(spans[1].content, style.cursor_symbol);
         assert_eq!(spans[1].style, style.cursor);
+    }
+
+    #[test]
+    fn input_keeps_cursor_visible_with_horizontal_scroll() {
+        // Set long value and narrow viewport; ensure state scrolls to keep cursor visible
+        let mut state = InputState::with_value("hello world this is long");
+        // Simulate resize to 8 cols
+        state.update(InputMsg::SetViewportWidth { cols: 8 });
+        // Move cursor to end (already there by set_value)
+        // Ensure scroll advanced
+        assert!(state.scroll_x() > 0);
+
+        let style = InputStyle::default();
+        // Build node and ensure it asks for x-scroll
+        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+        // Layout and render to 8x1
+        use crate::render::Renderer;
+        use crate::buffer::DoubleBuffer;
+        use crate::palette::Palette;
+        use crate::event::Size;
+        use crate::dom::rounding::round_layout;
+        use taffy::{AvailableSpace, compute_root_layout};
+
+        let mut buffer = DoubleBuffer::new(8, 1);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
+
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: AvailableSpace::Definite(8.0),
+                height: AvailableSpace::Definite(1.0),
+            },
+        );
+        round_layout(&mut node);
+
+        renderer.render(&node, Size::new(8, 1)).expect("render should succeed");
+        let screen = renderer.buffer().to_string();
+        let first_line = screen.lines().next().unwrap_or("");
+        // Expect to see the last characters including the cursor placeholder/char region at end
+        assert!(first_line.ends_with(' '));
+    }
+
+    #[test]
+    fn input_windowing_handles_fullwidth_chars() {
+        // Include fullwidth char and verify it shows within window after horizontal scroll
+        let mut state = InputState::with_value("ab漢cdef");
+        state.update(InputMsg::SetViewportWidth { cols: 6 });
+        // Move cursor to end to trigger scroll
+        state.update(InputMsg::MoveToEnd { extend: false });
+        let style = InputStyle::default();
+        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+
+        use crate::render::Renderer;
+        use crate::buffer::DoubleBuffer;
+        use crate::palette::Palette;
+        use crate::event::Size;
+        use crate::dom::rounding::round_layout;
+        use taffy::{AvailableSpace, compute_root_layout};
+
+        let mut buffer = DoubleBuffer::new(6, 1);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
+
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: AvailableSpace::Definite(6.0),
+                height: AvailableSpace::Definite(1.0),
+            },
+        );
+        round_layout(&mut node);
+
+        renderer.render(&node, Size::new(6, 1)).expect("render should succeed");
+        let screen = renderer.buffer().to_string();
+        let first_line = screen.lines().next().unwrap_or("");
+        assert!(first_line.contains('漢'));
+    }
+
+    #[test]
+    fn trailing_whitespace_after_cursor_uses_cursor_style() {
+        // When the cursor is at the end of the input, trailing whitespace in the row
+        // is rendered using the cursor style to visually indicate cursor position.
+        let state = InputState::with_value("hi");
+        let style = InputStyle::default();
+        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+
+        use crate::buffer::DoubleBuffer;
+        use crate::dom::rounding::round_layout;
+        use crate::event::Size;
+        use crate::palette::{Palette, Rgba};
+        use crate::render::Renderer;
+        use taffy::{AvailableSpace, compute_root_layout};
+
+        let mut buffer = DoubleBuffer::new(6, 1);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
+
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: AvailableSpace::Definite(6.0),
+                height: AvailableSpace::Definite(1.0),
+            },
+        );
+        round_layout(&mut node);
+
+        renderer
+            .render(&node, Size::new(6, 1))
+            .expect("render should succeed");
+
+        let back = renderer.buffer().back_buffer();
+
+        // First two cells are the text with default styling
+        assert_eq!(back[0][0].ch, 'h');
+        assert_eq!(back[0][0].attrs.background(), None);
+        assert!(!back[0][0].attrs.is_bold());
+        assert_eq!(back[0][1].ch, 'i');
+        assert_eq!(back[0][1].attrs.background(), None);
+        assert!(!back[0][1].attrs.is_bold());
+
+        // The cursor placeholder space uses cursor style
+        let expected_bg = Rgba::opaque(229, 229, 229); // White
+        let expected_fg = Rgba::opaque(0, 0, 0); // Black
+        let cursor_cell = &back[0][2];
+        assert_eq!(cursor_cell.ch, ' ');
+        assert_eq!(cursor_cell.attrs.background(), Some(expected_bg));
+        assert_eq!(cursor_cell.attrs.foreground(), Some(expected_fg));
+        assert!(cursor_cell.attrs.is_bold());
     }
 }

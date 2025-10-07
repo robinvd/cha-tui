@@ -995,6 +995,7 @@ fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
 fn commit_input_style() -> InputStyle {
     let mut style = InputStyle::default();
     style.text.fg = Some(highlight::EVERFOREST_GREEN);
+    style.text.bg = Some(highlight::EVERFOREST_FG);
 
     let mut selection = style.selection.clone();
     selection.bg = Some(highlight::EVERFOREST_BG_GREEN);
