@@ -80,7 +80,7 @@ impl<Model, Msg> Program<Model, Msg> {
         // Enter alternate screen and enable mouse tracking
         write!(
             terminal,
-            "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h", // Enable SGR mouse mode
+            "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h", // Enable SGR mouse mode and focus tracking
         )
         .map_err(|e| ProgramError::terminal(format!("Failed to setup terminal: {}", e)))?;
         terminal
@@ -92,7 +92,7 @@ impl<Model, Msg> Program<Model, Msg> {
         // Always attempt to restore terminal state.
         let _ = write!(
             terminal,
-            "\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l", // Exit alternate screen
+            "\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l", // Exit alternate screen
         );
         let _ = terminal.flush();
         let _ = terminal.enter_cooked_mode();
@@ -472,6 +472,7 @@ fn convert_input_event(input: termina::Event) -> Option<Event> {
         termina::Event::Key(key) => map_key_event(key),
         termina::Event::Mouse(mouse) => map_mouse_event(mouse),
         termina::Event::WindowResized(size) => Some(Event::Resize(Size::new(size.cols, size.rows))),
+        termina::Event::FocusIn => Some(Event::FocusGained),
         _ => None,
     }
 }
@@ -813,5 +814,11 @@ mod tests {
             .expect("second click should succeed");
         assert_eq!(program.model.single, 2);
         assert_eq!(program.model.double, 0);
+    }
+
+    #[test]
+    fn focus_in_event_is_exposed() {
+        let event = super::convert_input_event(termina::Event::FocusIn);
+        assert_eq!(event, Some(Event::FocusGained));
     }
 }

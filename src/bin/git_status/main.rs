@@ -401,10 +401,10 @@ fn main() -> Result<()> {
 }
 
 fn map_event(event: Event) -> Option<Msg> {
-    if let Event::Key(key) = event {
-        Some(Msg::KeyPressed(key))
-    } else {
-        None
+    match event {
+        Event::Key(key) => Some(Msg::KeyPressed(key)),
+        Event::FocusGained => Some(Msg::RefreshStatus),
+        _ => None,
     }
 }
 
@@ -456,7 +456,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
             Transition::Continue
         }
         Msg::RefreshStatus => {
-            if let Err(err) = model.refresh_status() {
+            if let Err(err) = model.refresh_status_preserving_diff_scroll() {
                 model.set_error(err);
             }
             Transition::Continue
@@ -1439,6 +1439,30 @@ impl Model {
     }
 
     fn refresh_status(&mut self) -> Result<()> {
+        self.refresh_status_internal(false)
+    }
+
+    fn refresh_status_preserving_diff_scroll(&mut self) -> Result<()> {
+        self.refresh_status_internal(true)
+    }
+
+    fn refresh_status_internal(&mut self, preserve_diff_scroll: bool) -> Result<()> {
+        let previous_focus = if preserve_diff_scroll {
+            Some(self.focus)
+        } else {
+            None
+        };
+        let previous_selection = if preserve_diff_scroll {
+            self.selected_id(self.focus)
+        } else {
+            None
+        };
+        let previous_diff_offset = if preserve_diff_scroll {
+            Some(self.diff_scroll.offset())
+        } else {
+            None
+        };
+
         let status = load_git_status()?;
         self.unstaged = status.unstaged;
         self.staged = status.staged;
@@ -1447,21 +1471,30 @@ impl Model {
         let staged_nodes = build_file_tree(&self.staged);
         self.unstaged_tree.set_items(unstaged_nodes);
         self.staged_tree.set_items(staged_nodes);
-        if !self.unstaged_initialized {
-            if !self.unstaged_tree.visible().is_empty() {
-                self.unstaged_tree.expand_all();
-                self.unstaged_initialized = true;
-            }
+        if !self.unstaged_initialized && !self.unstaged_tree.visible().is_empty() {
+            self.unstaged_tree.expand_all();
+            self.unstaged_initialized = true;
         }
-        if !self.staged_initialized {
-            if !self.staged_tree.visible().is_empty() {
-                self.staged_tree.expand_all();
-                self.staged_initialized = true;
-            }
+        if !self.staged_initialized && !self.staged_tree.visible().is_empty() {
+            self.staged_tree.expand_all();
+            self.staged_initialized = true;
         }
         self.ensure_focus_valid();
         self.clear_error();
         self.update_diff();
+        if let (Some(offset), Some(prev_focus), Some(prev_selection)) = (
+            previous_diff_offset,
+            previous_focus,
+            previous_selection,
+        ) && self.focus == prev_focus
+            && self
+                .tree_state(self.focus)
+                .selected()
+                .map(|current| current == &prev_selection)
+                .unwrap_or(false)
+        {
+            self.diff_scroll.set_offset(offset);
+        }
         Ok(())
     }
 

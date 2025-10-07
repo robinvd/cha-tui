@@ -3,6 +3,7 @@ pub enum Event {
     Key(Key),
     Resize(Size),
     Mouse(MouseEvent),
+    FocusGained,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,6 +65,10 @@ impl Event {
 
     pub fn mouse(x: u16, y: u16, buttons: MouseButtons) -> Self {
         Self::Mouse(MouseEvent::new(x, y, buttons))
+    }
+
+    pub fn focus_gained() -> Self {
+        Self::FocusGained
     }
 }
 
@@ -224,6 +229,14 @@ mod tests {
                 assert!(!mouse.shift);
             }
             other => panic!("expected mouse event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn focus_event_constructor_returns_variant() {
+        match Event::focus_gained() {
+            Event::FocusGained => {}
+            other => panic!("expected focus gained event, got {:?}", other),
         }
     }
 }
