@@ -598,7 +598,7 @@ impl<Msg> Node<Msg> {
         &self,
         x: u16,
         y: u16,
-        callback: &mut impl FnMut(&Node<Msg>) -> Option<T>,
+        callback: &mut impl FnMut(&Node<Msg>, f32, f32) -> Option<T>,
     ) -> Option<T> {
         // info!("hit test: {:?}", Self::hit_test_inner(self, x, y, 0.0, 0.0, 0.0, callback).map(|n| n.classname));
         Self::hit_test_inner(self, x, y, 0.0, 0.0, 0.0, callback)
@@ -611,7 +611,7 @@ impl<Msg> Node<Msg> {
         origin_x: f32,
         origin_y: f32,
         ancestor_scroll_y: f32,
-        callback: &mut impl FnMut(&Node<Msg>) -> Option<T>,
+        callback: &mut impl FnMut(&Node<Msg>, f32, f32) -> Option<T>,
     ) -> Option<T> {
         let layout = node.layout_state.layout;
         let abs_x = origin_x + layout.location.x;
@@ -648,7 +648,7 @@ impl<Msg> Node<Msg> {
             }
         }
 
-        callback(node)
+        callback(node, abs_x, abs_y)
     }
 }
 
@@ -1029,7 +1029,7 @@ mod tests {
         );
         crate::dom::rounding::round_layout(&mut node);
 
-        node.hit_test(0, 0, &mut |n| {
+        node.hit_test(0, 0, &mut |n, _, _| {
             n.mouse_message(crate::event::MouseEvent::new(
                 0,
                 0,

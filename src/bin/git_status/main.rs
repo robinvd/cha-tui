@@ -11,7 +11,10 @@ use std::process::Command;
 use chatui::components::scroll::{ScrollMsg, ScrollState, ScrollTarget, scrollable_content};
 use chatui::dom::{Node, TextSpan};
 use chatui::event::{Event, Key, KeyCode};
-use chatui::{Program, Style, Transition, block_with_title, column, modal, rich_text, row, text};
+use chatui::{
+    InputMsg, InputState, InputStyle, Program, Style, Transition, block_with_title, column,
+    default_input_keybindings, input, modal, rich_text, row, text,
+};
 use chatui::{TreeMsg, TreeNode, TreeState, TreeStyle, tree_view};
 use color_eyre::eyre::{Context, Result, eyre};
 use taffy::Dimension;
@@ -382,7 +385,7 @@ mod shortcuts {
                 ModifierRequirement::Disabled,
                 ModifierRequirement::Any,
             )),
-            msg: Some(Msg::BackspaceCommit),
+            msg: None,
         },
     ];
 }
@@ -474,6 +477,12 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
             model.close_commit_modal();
             Transition::Continue
         }
+        Msg::CommitInput(input_msg) => {
+            if let Some(modal) = model.commit_modal.as_mut() {
+                modal.update(input_msg);
+            }
+            Transition::Continue
+        }
         Msg::OpenDeleteModal => {
             model.open_delete_modal();
             Transition::Continue
@@ -481,10 +490,6 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
         Msg::ConfirmDelete => model.confirm_delete(),
         Msg::CancelDelete => {
             model.close_delete_modal();
-            Transition::Continue
-        }
-        Msg::BackspaceCommit => {
-            model.backspace_commit_message();
             Transition::Continue
         }
         Msg::Staged(msg) => handle_section_msg(model, Focus::Staged, msg),
@@ -531,17 +536,11 @@ fn handle_key(model: &mut Model, key: Key) -> Transition {
 }
 
 fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition {
-    match key.code {
-        KeyCode::Char(ch) => {
-            if key.ctrl || key.alt {
-                return Transition::Continue;
-            }
-
-            model.append_commit_char(ch);
-            Transition::Continue
-        }
-        _ => Transition::Continue,
+    if let Some(msg) = default_input_keybindings(key, Msg::CommitInput) {
+        return update(model, msg);
     }
+
+    Transition::Continue
 }
 
 fn handle_delete_modal_key(model: &mut Model, key: Key) -> Transition {
@@ -855,10 +854,23 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
 fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
     let title = text::<Msg>("Commit staged changes").with_style(Style::bold());
     let instructions = text::<Msg>("Ctrl-D commits, Esc cancels").with_style(Style::dim());
-    let input_value = format!("> {}", state.display_value());
-    let input = text::<Msg>(input_value).with_style(Style::fg(highlight::EVERFOREST_GREEN));
+    let input_style = commit_input_style();
 
-    let content = column(vec![title, instructions, input])
+    let prompt = text::<Msg>("> ").with_style(Style::fg(highlight::EVERFOREST_GREEN));
+    let input_field = input::<Msg>(
+        "commit-modal-input",
+        &state.input,
+        &input_style,
+        Msg::CommitInput,
+    )
+    .with_flex_grow(1.)
+    .with_flex_basis(Dimension::ZERO)
+    .with_min_width(Dimension::ZERO);
+    let input_row = row(vec![prompt, input_field])
+        .with_width(Dimension::percent(1.0))
+        .with_id("commit-modal-input-row");
+
+    let content = column(vec![title, instructions, input_row])
         .with_min_width(Dimension::length(30.0))
         .with_min_height(Dimension::length(3.0));
 
@@ -869,6 +881,23 @@ fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
             .with_id("commit-modal-block"),
     ])
     .with_id("commit-modal")
+}
+
+fn commit_input_style() -> InputStyle {
+    let mut style = InputStyle::default();
+    style.text.fg = Some(highlight::EVERFOREST_GREEN);
+
+    let mut selection = style.selection.clone();
+    selection.bg = Some(highlight::EVERFOREST_BG_GREEN);
+    selection.fg = Some(highlight::EVERFOREST_FG);
+    style.selection = selection;
+
+    let mut cursor = style.cursor.clone();
+    cursor.bg = Some(highlight::EVERFOREST_GREEN);
+    cursor.fg = Some(highlight::EVERFOREST_BG_GREEN);
+    style.cursor = cursor;
+
+    style
 }
 
 fn render_delete_modal(state: &DeleteModal) -> Node<Msg> {
@@ -1145,18 +1174,16 @@ fn aggregate_code(codes: &BTreeSet<char>) -> char {
 
 #[derive(Default)]
 struct CommitModal {
-    message: String,
+    input: InputState,
 }
 
 impl CommitModal {
-    fn display_value(&self) -> String {
-        if self.message.is_empty() {
-            String::from("_")
-        } else {
-            let mut rendered = self.message.clone();
-            rendered.push('_');
-            rendered
-        }
+    fn update(&mut self, msg: InputMsg) {
+        self.input.update(msg);
+    }
+
+    fn message(&self) -> String {
+        self.input.value()
     }
 }
 
@@ -1377,21 +1404,9 @@ impl Model {
         self.show_all_shortcuts = !self.show_all_shortcuts;
     }
 
-    fn append_commit_char(&mut self, ch: char) {
-        if let Some(modal) = self.commit_modal.as_mut() {
-            modal.message.push(ch);
-        }
-    }
-
-    fn backspace_commit_message(&mut self) {
-        if let Some(modal) = self.commit_modal.as_mut() {
-            modal.message.pop();
-        }
-    }
-
     fn submit_commit(&mut self) -> Transition {
         let message = match self.commit_modal.as_ref() {
-            Some(modal) => modal.message.clone(),
+            Some(modal) => modal.message(),
             None => return Transition::Continue,
         };
 
@@ -1482,11 +1497,9 @@ impl Model {
         self.ensure_focus_valid();
         self.clear_error();
         self.update_diff();
-        if let (Some(offset), Some(prev_focus), Some(prev_selection)) = (
-            previous_diff_offset,
-            previous_focus,
-            previous_selection,
-        ) && self.focus == prev_focus
+        if let (Some(offset), Some(prev_focus), Some(prev_selection)) =
+            (previous_diff_offset, previous_focus, previous_selection)
+            && self.focus == prev_focus
             && self
                 .tree_state(self.focus)
                 .selected()
@@ -1805,9 +1818,9 @@ enum Msg {
     ToggleShortcutsHelp,
     SubmitCommit,
     CancelCommit,
+    CommitInput(InputMsg),
     ConfirmDelete,
     CancelDelete,
-    BackspaceCommit,
     Staged(SectionMsg),
     Unstaged(SectionMsg),
     DiffScroll(ScrollMsg),

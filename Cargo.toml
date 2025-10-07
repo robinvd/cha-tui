@@ -17,3 +17,4 @@ tree-sitter-python = "0.25"
 tree-sitter-go = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
+ropey = "1.6"

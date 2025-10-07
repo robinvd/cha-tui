@@ -426,27 +426,41 @@ impl<Model, Msg> Program<Model, Msg> {
 
         if event.buttons.left && !previous.left {
             let timestamp = Instant::now();
-            let is_double = self
-                .last_click
-                .as_ref()
-                .map(|last| {
-                    timestamp.duration_since(last.timestamp) <= DOUBLE_CLICK_INTERVAL
-                        && last.x == event.x
-                        && last.y == event.y
-                })
-                .unwrap_or(false);
+            let click_count = if let Some(last) = &self.last_click
+                && timestamp.duration_since(last.timestamp) <= DOUBLE_CLICK_INTERVAL
+                && last.x == event.x
+                && last.y == event.y
+            {
+                if last.count >= 3 {
+                    1
+                } else {
+                    last.count + 1
+                }
+            } else {
+                1
+            };
 
-            enriched.click_count = if is_double { 2 } else { 1 };
+            enriched.click_count = click_count;
             self.last_click = Some(LastClick {
                 timestamp,
                 x: event.x,
                 y: event.y,
+                count: click_count,
             });
         }
 
         if let Some(view) = self.current_view.as_ref()
-            && let Some(msg) = view.hit_test(event.x, event.y, &mut |target| {
-                target.mouse_message(enriched)
+            && let Some(msg) = view.hit_test(event.x, event.y, &mut |target, origin_x, origin_y| {
+                let mut local_event = enriched;
+                let origin_x_rounded = origin_x.round() as i32;
+                let origin_y_rounded = origin_y.round() as i32;
+
+                let rel_x = i32::from(local_event.x).saturating_sub(origin_x_rounded);
+                let rel_y = i32::from(local_event.y).saturating_sub(origin_y_rounded);
+                local_event.local_x = rel_x.max(0) as u16;
+                local_event.local_y = rel_y.max(0) as u16;
+
+                target.mouse_message(local_event)
             })
         {
             return Some(msg);
@@ -464,6 +478,7 @@ struct LastClick {
     timestamp: Instant,
     x: u16,
     y: u16,
+    count: u8,
 }
 
 fn convert_input_event(input: termina::Event) -> Option<Event> {

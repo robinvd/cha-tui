@@ -18,6 +18,8 @@ pub struct Key {
 pub struct MouseEvent {
     pub x: u16,
     pub y: u16,
+    pub local_x: u16,
+    pub local_y: u16,
     pub buttons: MouseButtons,
     pub ctrl: bool,
     pub alt: bool,
@@ -97,6 +99,8 @@ impl MouseEvent {
         Self {
             x,
             y,
+            local_x: x,
+            local_y: y,
             buttons,
             ctrl: false,
             alt: false,
@@ -116,6 +120,8 @@ impl MouseEvent {
         Self {
             x,
             y,
+            local_x: x,
+            local_y: y,
             buttons,
             ctrl,
             alt,
