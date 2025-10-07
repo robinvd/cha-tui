@@ -21,4 +21,5 @@ pub use crate::error::ProgramError;
 pub use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};
 pub use crate::program::{EventFn, Program, Transition, UpdateFn, ViewFn};
 pub use components::scroll::{ScrollMsg, ScrollState, scrollable_content};
+pub use components::tree::{TreeMsg, TreeNode, TreeNodeKind, TreeState, TreeStyle, tree_view};
 pub use scroll::ScrollAlignment;

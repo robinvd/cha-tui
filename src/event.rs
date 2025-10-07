@@ -44,6 +44,7 @@ pub enum KeyCode {
     Right,
     Up,
     Down,
+    Tab,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]

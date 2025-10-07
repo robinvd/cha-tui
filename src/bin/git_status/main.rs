@@ -1,5 +1,9 @@
+use std::collections::btree_map::Entry;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::fs::File;
+use std::hash::{Hash, Hasher};
 use std::io::{BufReader, ErrorKind, Read};
 use std::path::Path;
 use std::process::Command;
@@ -8,6 +12,7 @@ use chatui::components::scroll::{ScrollMsg, ScrollState, ScrollTarget, scrollabl
 use chatui::dom::{Node, TextSpan};
 use chatui::event::{Event, Key, KeyCode};
 use chatui::{Program, Style, Transition, block_with_title, column, modal, rich_text, row, text};
+use chatui::{TreeMsg, TreeNode, TreeState, TreeStyle, tree_view};
 use color_eyre::eyre::{Context, Result, eyre};
 use taffy::Dimension;
 use taffy::prelude::{FromLength, TaffyZero};
@@ -197,28 +202,16 @@ mod shortcuts {
             msg: None,
         },
         Shortcut {
-            label: "Left",
-            description: "Focus unstaged",
+            label: "Tab",
+            description: "Toggle focus",
             show_in_bar: true,
             binding: Some(Binding::new(
-                KeyCode::Left,
+                KeyCode::Tab,
                 ModifierRequirement::Disabled,
                 ModifierRequirement::Disabled,
                 ModifierRequirement::Any,
             )),
-            msg: Some(Msg::FocusUnstaged),
-        },
-        Shortcut {
-            label: "Right",
-            description: "Focus staged",
-            show_in_bar: true,
-            binding: Some(Binding::new(
-                KeyCode::Right,
-                ModifierRequirement::Disabled,
-                ModifierRequirement::Disabled,
-                ModifierRequirement::Any,
-            )),
-            msg: Some(Msg::FocusStaged),
+            msg: Some(Msg::ToggleFocus),
         },
         Shortcut {
             label: "Up",
@@ -243,6 +236,30 @@ mod shortcuts {
                 ModifierRequirement::Any,
             )),
             msg: Some(Msg::MoveSelectionDown),
+        },
+        Shortcut {
+            label: "⇠",
+            description: "Collapse directory",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Left,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::CollapseNode),
+        },
+        Shortcut {
+            label: "",
+            description: "Expand directory",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Right,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::ExpandNode),
         },
         Shortcut {
             label: "j",
@@ -400,13 +417,11 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
             model.toggle_stage_selected();
             Transition::Continue
         }
-        Msg::FocusUnstaged => {
-            model.focus_unstaged();
-            model.update_diff();
-            Transition::Continue
-        }
-        Msg::FocusStaged => {
-            model.focus_staged();
+        Msg::ToggleFocus => {
+            match model.focus {
+                Focus::Unstaged => model.focus_staged(),
+                Focus::Staged => model.focus_unstaged(),
+            }
             model.update_diff();
             Transition::Continue
         }
@@ -418,6 +433,18 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
         Msg::MoveSelectionDown => {
             model.move_selection_down();
             model.update_diff();
+            Transition::Continue
+        }
+        Msg::CollapseNode => {
+            if model.collapse_selected() {
+                model.update_diff();
+            }
+            Transition::Continue
+        }
+        Msg::ExpandNode => {
+            if model.expand_selected() {
+                model.update_diff();
+            }
             Transition::Continue
         }
         Msg::ScrollFiles(delta) => {
@@ -479,36 +506,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
 
 fn handle_section_msg(model: &mut Model, focus: Focus, msg: SectionMsg) -> Transition {
     match msg {
-        SectionMsg::ActivateFile(index) => {
-            match focus {
-                Focus::Unstaged => {
-                    model.selected_unstaged = index;
-                    model.focus = Focus::Unstaged;
-                }
-                Focus::Staged => {
-                    model.selected_staged = index;
-                    model.focus = Focus::Staged;
-                }
-            }
-            model.queue_scroll_for_focus(model.focus);
-            model.update_diff();
-            Transition::Continue
-        }
-        SectionMsg::ToggleStageEntry(index) => {
-            match focus {
-                Focus::Unstaged => {
-                    model.selected_unstaged = index;
-                    model.focus = Focus::Unstaged;
-                }
-                Focus::Staged => {
-                    model.selected_staged = index;
-                    model.focus = Focus::Staged;
-                }
-            }
-            model.queue_scroll_for_focus(model.focus);
-            model.toggle_stage_selected();
-            Transition::Continue
-        }
+        SectionMsg::Tree(tree_msg) => model.handle_tree_message(focus, tree_msg),
     }
 }
 
@@ -627,11 +625,11 @@ fn view(model: &Model) -> Node<Msg> {
 }
 
 fn render_left_pane(model: &Model) -> Node<Msg> {
-    let unstaged_list = render_file_list(
-        &model.unstaged,
+    let unstaged_list = render_file_tree(
+        Model::UNSTAGED_ITEM_ID,
+        &model.unstaged_tree,
         model.focus == Focus::Unstaged,
-        model.selected_unstaged,
-        false,
+        |tree_msg| Msg::Unstaged(SectionMsg::Tree(tree_msg)),
     )
     .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
@@ -657,11 +655,11 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
     .with_flex_basis(Dimension::ZERO)
     .with_id("unstaged-section");
 
-    let staged_list = render_file_list(
-        &model.staged,
+    let staged_list = render_file_tree(
+        Model::STAGED_ITEM_ID,
+        &model.staged_tree,
         model.focus == Focus::Staged,
-        model.selected_staged,
-        true,
+        |tree_msg| Msg::Staged(SectionMsg::Tree(tree_msg)),
     )
     .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
@@ -694,65 +692,41 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
     .with_id("left-pane")
 }
 
-fn render_file_list(
-    entries: &[FileEntry],
+fn render_file_tree(
+    id_prefix: &'static str,
+    tree: &TreeState<FileNodeId>,
     is_active: bool,
-    selected: usize,
-    is_staged: bool,
+    map_msg: impl Fn(TreeMsg<FileNodeId>) -> Msg + 'static,
 ) -> Node<Msg> {
-    let mut items = Vec::new();
-
-    if entries.is_empty() {
-        items.push(text::<Msg>("(no files)").with_style(inactive_style()));
-    } else {
-        for (idx, entry) in entries.iter().enumerate() {
-            let item_id = if is_staged {
-                Model::STAGED_ITEM_ID
-            } else {
-                Model::UNSTAGED_ITEM_ID
-            };
-
-            let mut node = text::<Msg>(&entry.display)
-                .with_id_mixin(item_id, idx as u64)
-                .on_mouse(move |event| {
-                    if event.is_double_click() {
-                        Some(if is_staged {
-                            Msg::Staged(SectionMsg::ToggleStageEntry(idx))
-                        } else {
-                            Msg::Unstaged(SectionMsg::ToggleStageEntry(idx))
-                        })
-                    } else if event.is_single_click() {
-                        Some(if is_staged {
-                            Msg::Staged(SectionMsg::ActivateFile(idx))
-                        } else {
-                            Msg::Unstaged(SectionMsg::ActivateFile(idx))
-                        })
-                    } else {
-                        None
-                    }
-                });
-
-            if idx == selected {
-                let mut style = if is_active {
-                    active_selection_style()
-                } else {
-                    inactive_selection_style()
-                };
-                // Keep the status letter readable.
-                if entry.code == '?' {
-                    style.bold = true;
-                }
-                node = node.with_style(style);
-            }
-
-            items.push(node);
-        }
+    if tree.visible().is_empty() {
+        return column(vec![text::<Msg>("(no files)").with_style(inactive_style())])
+            .with_min_height(Dimension::ZERO)
+            .with_flex_grow(1.)
+            .with_flex_basis(Dimension::ZERO);
     }
 
-    column(items)
+    let mut style = file_tree_style();
+    // Ensure selection colors match the legacy list styling.
+    style.active_selected_row = active_selection_style();
+    style.inactive_selected_row = inactive_selection_style();
+
+    tree_view(id_prefix, tree, &style, map_msg, is_active)
         .with_min_height(Dimension::ZERO)
         .with_flex_grow(1.)
         .with_flex_basis(Dimension::ZERO)
+}
+
+fn file_tree_style() -> TreeStyle {
+    TreeStyle {
+        indent: 2,
+        inactive_row: Style::default(),
+        active_row: Style::default(),
+        inactive_selected_row: inactive_selection_style(),
+        active_selected_row: active_selection_style(),
+        branch_collapsed: String::from(">"),
+        branch_expanded: String::from("v"),
+        leaf_bullet: String::from(" "),
+    }
 }
 
 fn render_diff_pane(model: &Model) -> Node<Msg> {
@@ -767,7 +741,13 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
                 format!("Diff Preview - {}", entry.path)
             }
         }
-        None => "Diff Preview".to_string(),
+        None => {
+            if let Some(selected) = model.selected_id(model.focus) {
+                format!("Diff Preview - {}", selected.path())
+            } else {
+                "Diff Preview".to_string()
+            }
+        }
     };
     let content = scrollable_content(
         "diff-pane-content",
@@ -817,9 +797,6 @@ fn render_shortcuts_bar(model: &Model) -> Node<Msg> {
         .with_width(Dimension::percent(1.))
         .with_id("shortcuts-items");
 
-    // if model.show_all_shortcuts {
-    //     shortcuts_row = shortcuts_row.with_flex_wrap(FlexWrap::Wrap);
-    // }
     shortcuts_row = shortcuts_row.with_flex_wrap(FlexWrap::Wrap);
     if !model.show_all_shortcuts {
         shortcuts_row = shortcuts_row.with_height(Dimension::length(1.));
@@ -932,7 +909,8 @@ fn branch_name_style() -> Style {
 
 fn active_selection_style() -> Style {
     let mut style = Style::bold();
-    style.fg = Some(highlight::EVERFOREST_GREEN);
+    style.fg = Some(highlight::EVERFOREST_FG);
+    style.bg = Some(highlight::EVERFOREST_BG_GREEN);
     style
 }
 
@@ -975,6 +953,194 @@ impl FileEntry {
             code,
         }
     }
+
+    fn tree_label(&self) -> String {
+        let rest = self
+            .display
+            .split_once(' ')
+            .map(|(_, tail)| tail)
+            .unwrap_or(self.display.as_str());
+
+        if let Some((before, after)) = rest.split_once(" -> ") {
+            format!("{} -> {}", last_component(before), last_component(after))
+        } else {
+            last_component(rest).to_string()
+        }
+    }
+}
+
+fn last_component(path: &str) -> &str {
+    path.rsplit('/')
+        .next()
+        .filter(|component| !component.is_empty())
+        .unwrap_or(path)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum FileNodeId {
+    File(String),
+    Dir(String),
+}
+
+impl FileNodeId {
+    fn path(&self) -> &str {
+        match self {
+            Self::File(path) | Self::Dir(path) => path,
+        }
+    }
+
+    fn is_dir(&self) -> bool {
+        matches!(self, Self::Dir(_))
+    }
+
+    fn mixin(&self) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        match self {
+            Self::File(path) => {
+                "file".hash(&mut hasher);
+                path.hash(&mut hasher);
+            }
+            Self::Dir(path) => {
+                "dir".hash(&mut hasher);
+                path.hash(&mut hasher);
+            }
+        }
+        hasher.finish()
+    }
+}
+
+fn parent_dir_node(path: &str) -> Option<FileNodeId> {
+    let (parent, _) = path.rsplit_once('/')?;
+    if parent.is_empty() {
+        None
+    } else {
+        Some(FileNodeId::Dir(parent.to_string()))
+    }
+}
+
+#[derive(Default)]
+struct DirBuilder {
+    name: String,
+    path: String,
+    children: BTreeMap<String, NodeBuilder>,
+    codes: BTreeSet<char>,
+}
+
+enum NodeBuilder {
+    Dir(DirBuilder),
+    File(FileEntry),
+}
+
+impl DirBuilder {
+    fn root() -> Self {
+        Self {
+            name: String::new(),
+            path: String::new(),
+            children: BTreeMap::new(),
+            codes: BTreeSet::new(),
+        }
+    }
+
+    fn new(name: String, path: String) -> Self {
+        Self {
+            name,
+            path,
+            children: BTreeMap::new(),
+            codes: BTreeSet::new(),
+        }
+    }
+
+    fn insert(&mut self, components: &[&str], entry: &FileEntry) {
+        if components.is_empty() {
+            return;
+        }
+
+        self.codes.insert(entry.code);
+
+        if components.len() == 1 {
+            self.children
+                .insert(components[0].to_string(), NodeBuilder::File(entry.clone()));
+            return;
+        }
+
+        let child_name = components[0].to_string();
+        let child_path = if self.path.is_empty() {
+            child_name.clone()
+        } else {
+            format!("{}/{}", self.path, child_name)
+        };
+
+        match self.children.entry(child_name.clone()) {
+            Entry::Vacant(vacant) => {
+                let mut dir = DirBuilder::new(child_name, child_path);
+                dir.insert(&components[1..], entry);
+                vacant.insert(NodeBuilder::Dir(dir));
+            }
+            Entry::Occupied(mut occupied) => {
+                if let NodeBuilder::Dir(dir) = occupied.get_mut() {
+                    dir.insert(&components[1..], entry);
+                }
+            }
+        }
+    }
+
+    fn into_nodes(self) -> Vec<TreeNode<FileNodeId>> {
+        self.children
+            .into_values()
+            .map(|child| child.into_tree_node())
+            .collect()
+    }
+
+    fn into_tree_node(self) -> TreeNode<FileNodeId> {
+        let children = self
+            .children
+            .into_values()
+            .map(|child| child.into_tree_node())
+            .collect();
+        let label = format!("{} {}", aggregate_code(&self.codes), self.name);
+        TreeNode::branch(
+            FileNodeId::Dir(self.path),
+            vec![TextSpan::new(label, Style::default())],
+            children,
+        )
+    }
+}
+
+impl NodeBuilder {
+    fn into_tree_node(self) -> TreeNode<FileNodeId> {
+        match self {
+            Self::Dir(dir) => dir.into_tree_node(),
+            Self::File(entry) => TreeNode::leaf(
+                FileNodeId::File(entry.path.clone()),
+                vec![TextSpan::new(
+                    format!("{} {}", entry.code, entry.tree_label()),
+                    Style::default(),
+                )],
+            ),
+        }
+    }
+}
+
+fn build_file_tree(entries: &[FileEntry]) -> Vec<TreeNode<FileNodeId>> {
+    let mut root = DirBuilder::root();
+    for entry in entries {
+        let components: Vec<&str> = entry.path.split('/').collect();
+        if components.is_empty() {
+            continue;
+        }
+        root.insert(&components, entry);
+    }
+    root.into_nodes()
+}
+
+fn aggregate_code(codes: &BTreeSet<char>) -> char {
+    if codes.is_empty() {
+        ' '
+    } else if codes.len() == 1 {
+        *codes.iter().next().unwrap()
+    } else {
+        '*'
+    }
 }
 
 #[derive(Default)]
@@ -1013,9 +1179,11 @@ impl DeleteModal {
 struct Model {
     unstaged: Vec<FileEntry>,
     staged: Vec<FileEntry>,
+    unstaged_tree: TreeState<FileNodeId>,
+    staged_tree: TreeState<FileNodeId>,
+    unstaged_initialized: bool,
+    staged_initialized: bool,
     focus: Focus,
-    selected_unstaged: usize,
-    selected_staged: usize,
     diff_lines: Vec<DiffLine>,
     diff_truncated: bool,
     diff_scroll: ScrollState,
@@ -1045,6 +1213,136 @@ impl Model {
         }
 
         model
+    }
+
+    fn tree_state(&self, focus: Focus) -> &TreeState<FileNodeId> {
+        match focus {
+            Focus::Unstaged => &self.unstaged_tree,
+            Focus::Staged => &self.staged_tree,
+        }
+    }
+
+    fn tree_state_mut(&mut self, focus: Focus) -> &mut TreeState<FileNodeId> {
+        match focus {
+            Focus::Unstaged => &mut self.unstaged_tree,
+            Focus::Staged => &mut self.staged_tree,
+        }
+    }
+
+    fn selected_id(&self, focus: Focus) -> Option<FileNodeId> {
+        self.tree_state(focus).selected().cloned()
+    }
+
+    fn select_tree_id(&mut self, focus: Focus, id: &FileNodeId) {
+        let state = self.tree_state_mut(focus);
+        state.select(id.clone());
+        state.ensure_selected();
+    }
+
+    fn ensure_tree_selection(&mut self, focus: Focus) {
+        self.tree_state_mut(focus).ensure_selected();
+    }
+
+    fn select_if_different(&mut self, focus: Focus, id: &FileNodeId) -> bool {
+        let should_change = self
+            .tree_state(focus)
+            .selected()
+            .map(|selected| selected != id)
+            .unwrap_or(true);
+        if should_change {
+            self.select_tree_id(focus, id);
+        }
+        should_change
+    }
+
+    fn collapse_selected(&mut self) -> bool {
+        let focus = self.focus;
+        let Some(id) = self.selected_id(focus) else {
+            return false;
+        };
+        let mut changed = false;
+
+        match &id {
+            FileNodeId::Dir(path) => {
+                if self.tree_state(focus).is_expanded(&id) {
+                    self.tree_state_mut(focus).set_expanded(id.clone(), false);
+                    changed = true;
+                } else if let Some(parent) = parent_dir_node(path) {
+                    if self.select_if_different(focus, &parent) {
+                        changed = true;
+                    }
+                    if self.tree_state(focus).is_expanded(&parent) {
+                        self.tree_state_mut(focus)
+                            .set_expanded(parent.clone(), false);
+                        changed = true;
+                    }
+                }
+            }
+            FileNodeId::File(path) => {
+                if let Some(parent) = parent_dir_node(path) {
+                    if self.select_if_different(focus, &parent) {
+                        changed = true;
+                    }
+                    if self.tree_state(focus).is_expanded(&parent) {
+                        self.tree_state_mut(focus)
+                            .set_expanded(parent.clone(), false);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if changed {
+            self.queue_scroll_for_focus(focus);
+        }
+        changed
+    }
+
+    fn expand_selected(&mut self) -> bool {
+        let focus = self.focus;
+        let Some(id) = self.selected_id(focus) else {
+            return false;
+        };
+        let mut changed = false;
+
+        match &id {
+            FileNodeId::Dir(_) => {
+                if !self.tree_state(focus).is_expanded(&id) {
+                    self.tree_state_mut(focus).set_expanded(id.clone(), true);
+                    changed = true;
+                }
+            }
+            FileNodeId::File(path) => {
+                if let Some(parent) = parent_dir_node(path)
+                    && !self.tree_state(focus).is_expanded(&parent)
+                {
+                    self.tree_state_mut(focus)
+                        .set_expanded(parent.clone(), true);
+                    changed = true;
+                }
+            }
+        }
+
+        if changed {
+            self.queue_scroll_for_focus(focus);
+        }
+        changed
+    }
+
+    fn is_first_selected(&self, focus: Focus) -> bool {
+        let state = self.tree_state(focus);
+        match (state.selected(), state.visible().first()) {
+            (Some(selected), Some(first)) => selected == &first.id,
+            _ => true,
+        }
+    }
+
+    fn is_last_selected(&self, focus: Focus) -> bool {
+        let state = self.tree_state(focus);
+        match (state.selected(), state.visible().last()) {
+            (Some(selected), Some(last)) => selected == &last.id,
+            _ => true,
+        }
     }
 
     fn set_error(&mut self, err: color_eyre::eyre::Report) {
@@ -1125,11 +1423,7 @@ impl Model {
 
         // Determine the selected entry code to decide how to discard.
         let code = match self.focus {
-            Focus::Unstaged => self
-                .unstaged
-                .get(self.selected_unstaged)
-                .map(|e| e.code)
-                .unwrap_or(' '),
+            Focus::Unstaged => self.current_entry().map(|e| e.code).unwrap_or(' '),
             Focus::Staged => ' ',
         };
 
@@ -1149,6 +1443,22 @@ impl Model {
         self.unstaged = status.unstaged;
         self.staged = status.staged;
         self.current_branch = status.branch;
+        let unstaged_nodes = build_file_tree(&self.unstaged);
+        let staged_nodes = build_file_tree(&self.staged);
+        self.unstaged_tree.set_items(unstaged_nodes);
+        self.staged_tree.set_items(staged_nodes);
+        if !self.unstaged_initialized {
+            if !self.unstaged_tree.visible().is_empty() {
+                self.unstaged_tree.expand_all();
+                self.unstaged_initialized = true;
+            }
+        }
+        if !self.staged_initialized {
+            if !self.staged_tree.visible().is_empty() {
+                self.staged_tree.expand_all();
+                self.staged_initialized = true;
+            }
+        }
         self.ensure_focus_valid();
         self.clear_error();
         self.update_diff();
@@ -1156,22 +1466,33 @@ impl Model {
     }
 
     fn ensure_focus_valid(&mut self) {
-        clamp_index(&mut self.selected_unstaged, self.unstaged.len());
-        clamp_index(&mut self.selected_staged, self.staged.len());
-
-        if self.focus == Focus::Unstaged && self.unstaged.is_empty() && !self.staged.is_empty() {
+        if self.focus == Focus::Unstaged
+            && self.unstaged_tree.visible().is_empty()
+            && !self.staged_tree.visible().is_empty()
+        {
             self.focus = Focus::Staged;
-        } else if self.focus == Focus::Staged && self.staged.is_empty() && !self.unstaged.is_empty()
+        } else if self.focus == Focus::Staged
+            && self.staged_tree.visible().is_empty()
+            && !self.unstaged_tree.visible().is_empty()
         {
             self.focus = Focus::Unstaged;
         }
+        self.ensure_tree_selection(Focus::Unstaged);
+        self.ensure_tree_selection(Focus::Staged);
         self.clamp_file_scrolls();
     }
 
     fn update_diff(&mut self) {
-        let diff_result = match self.current_entry() {
-            Some(entry) => diff_for(entry, self.focus),
-            None => {
+        let selected_id = self.selected_id(self.focus);
+        let diff_result = match (self.current_entry(), selected_id.as_ref()) {
+            (Some(entry), _) => diff_for(entry, self.focus),
+            (None, Some(FileNodeId::Dir(_))) => {
+                self.diff_lines = vec![DiffLine::plain("Select a file to view diff")];
+                self.diff_truncated = false;
+                self.diff_scroll.reset();
+                return;
+            }
+            (None, _) => {
                 self.diff_lines = vec![DiffLine::plain("No file selected")];
                 self.diff_truncated = false;
                 self.diff_scroll.reset();
@@ -1205,10 +1526,15 @@ impl Model {
     }
 
     fn current_entry(&self) -> Option<&FileEntry> {
-        match self.focus {
-            Focus::Unstaged => self.unstaged.get(self.selected_unstaged),
-            Focus::Staged => self.staged.get(self.selected_staged),
-        }
+        let focus = self.focus;
+        let selected = self.tree_state(focus).selected()?;
+        let path = match selected {
+            FileNodeId::File(path) => path,
+            FileNodeId::Dir(_) => return None,
+        };
+        self.entries_for_focus(focus)
+            .iter()
+            .find(|entry| entry.path == *path)
     }
 
     fn entries_for_focus(&self, focus: Focus) -> &[FileEntry] {
@@ -1228,19 +1554,37 @@ impl Model {
     fn move_selection_up(&mut self) {
         match self.focus {
             Focus::Unstaged => {
-                if self.selected_unstaged > 0 {
-                    self.selected_unstaged -= 1;
-                    self.queue_scroll_for_focus(Focus::Unstaged);
+                if self.unstaged_tree.visible().is_empty() {
+                    return;
+                }
+                if self.is_first_selected(Focus::Unstaged) {
+                    if !self.staged_tree.visible().is_empty() {
+                        self.focus = Focus::Staged;
+                        let state = self.tree_state_mut(Focus::Staged);
+                        state.select_last();
+                        state.ensure_selected();
+                        self.queue_scroll_for_staged();
+                    }
+                } else {
+                    self.tree_state_mut(Focus::Unstaged).select_prev();
+                    self.queue_scroll_for_unstaged();
                 }
             }
             Focus::Staged => {
-                if self.selected_staged > 0 {
-                    self.selected_staged -= 1;
-                    self.queue_scroll_for_focus(Focus::Staged);
-                } else if !self.unstaged.is_empty() {
-                    self.focus = Focus::Unstaged;
-                    self.selected_unstaged = self.unstaged.len().saturating_sub(1);
-                    self.sync_scroll_to_selected();
+                if self.staged_tree.visible().is_empty() {
+                    return;
+                }
+                if self.is_first_selected(Focus::Staged) {
+                    if !self.unstaged_tree.visible().is_empty() {
+                        self.focus = Focus::Unstaged;
+                        let state = self.tree_state_mut(Focus::Unstaged);
+                        state.select_last();
+                        state.ensure_selected();
+                        self.queue_scroll_for_unstaged();
+                    }
+                } else {
+                    self.tree_state_mut(Focus::Staged).select_prev();
+                    self.queue_scroll_for_staged();
                 }
             }
         }
@@ -1249,47 +1593,63 @@ impl Model {
     fn move_selection_down(&mut self) {
         match self.focus {
             Focus::Unstaged => {
-                if self.selected_unstaged + 1 < self.unstaged.len() {
-                    self.selected_unstaged += 1;
-                    self.queue_scroll_for_focus(Focus::Unstaged);
-                } else if !self.staged.is_empty() {
-                    self.focus = Focus::Staged;
-                    self.selected_staged = 0;
-                    self.sync_scroll_to_selected();
+                if self.unstaged_tree.visible().is_empty() {
+                    return;
+                }
+                if self.is_last_selected(Focus::Unstaged) {
+                    if !self.staged_tree.visible().is_empty() {
+                        self.focus = Focus::Staged;
+                        let state = self.tree_state_mut(Focus::Staged);
+                        state.select_first();
+                        state.ensure_selected();
+                        self.queue_scroll_for_staged();
+                    }
+                } else {
+                    self.tree_state_mut(Focus::Unstaged).select_next();
+                    self.queue_scroll_for_unstaged();
                 }
             }
             Focus::Staged => {
-                if self.selected_staged + 1 < self.staged.len() {
-                    self.selected_staged += 1;
-                    self.queue_scroll_for_focus(Focus::Staged);
+                if self.staged_tree.visible().is_empty() {
+                    return;
                 }
+                if self.is_last_selected(Focus::Staged) {
+                    // Stay within staged list; no wrap-around.
+                    return;
+                }
+                self.tree_state_mut(Focus::Staged).select_next();
+                self.queue_scroll_for_staged();
             }
         }
     }
 
     fn focus_unstaged(&mut self) {
-        if !self.unstaged.is_empty() {
+        if !self.unstaged_tree.visible().is_empty() {
             self.focus = Focus::Unstaged;
+            self.ensure_tree_selection(Focus::Unstaged);
             self.queue_scroll_for_unstaged();
         }
     }
 
     fn focus_staged(&mut self) {
-        if !self.staged.is_empty() {
+        if !self.staged_tree.visible().is_empty() {
             self.focus = Focus::Staged;
+            self.ensure_tree_selection(Focus::Staged);
             self.queue_scroll_for_staged();
         }
     }
 
     fn toggle_stage_selected(&mut self) {
-        let entry = match self.current_entry().cloned() {
-            Some(entry) => entry,
-            None => return,
-        };
+        if let Some(id) = self.selected_id(self.focus) {
+            self.toggle_stage_for_id(self.focus, &id);
+        }
+    }
 
-        let result = match self.focus {
-            Focus::Unstaged => stage_path(&entry.path),
-            Focus::Staged => unstage_path(&entry.path),
+    fn toggle_stage_for_id(&mut self, focus: Focus, id: &FileNodeId) {
+        let path = id.path();
+        let result = match focus {
+            Focus::Unstaged => stage_path(path),
+            Focus::Staged => unstage_path(path),
         };
 
         if let Err(err) = result {
@@ -1299,6 +1659,32 @@ impl Model {
 
         if let Err(err) = self.refresh_status() {
             self.set_error(err);
+        }
+    }
+
+    fn handle_tree_message(&mut self, focus: Focus, tree_msg: TreeMsg<FileNodeId>) -> Transition {
+        match tree_msg {
+            TreeMsg::Activate(id) => {
+                self.focus = focus;
+                self.select_tree_id(focus, &id);
+                self.queue_scroll_for_focus(focus);
+                self.update_diff();
+                Transition::Continue
+            }
+            TreeMsg::ToggleExpand(id) => {
+                self.focus = focus;
+                self.select_tree_id(focus, &id);
+                if id.is_dir() {
+                    self.tree_state_mut(focus).toggle_expanded(&id);
+                    self.queue_scroll_for_focus(focus);
+                    self.update_diff();
+                    Transition::Continue
+                } else {
+                    self.queue_scroll_for_focus(focus);
+                    self.toggle_stage_for_id(focus, &id);
+                    Transition::Continue
+                }
+            }
         }
     }
 
@@ -1323,31 +1709,23 @@ impl Model {
     }
 
     fn queue_scroll_for_unstaged(&mut self) {
-        if self.unstaged.is_empty() {
-            return;
+        if let Some(id) = self.selected_id(Focus::Unstaged) {
+            let target = ScrollTarget::with_mixin(Self::UNSTAGED_ITEM_ID, id.mixin());
+            self.unstaged_scroll
+                .ensure_visible(Self::UNSTAGED_CONTAINER_ID, target);
         }
-        let index = self.selected_unstaged.min(self.unstaged.len() - 1);
-        let target = ScrollTarget::with_mixin(Self::UNSTAGED_ITEM_ID, index as u64);
-        self.unstaged_scroll
-            .ensure_visible(Self::UNSTAGED_CONTAINER_ID, target);
     }
 
     fn queue_scroll_for_staged(&mut self) {
-        if self.staged.is_empty() {
-            return;
+        if let Some(id) = self.selected_id(Focus::Staged) {
+            let target = ScrollTarget::with_mixin(Self::STAGED_ITEM_ID, id.mixin());
+            self.staged_scroll
+                .ensure_visible(Self::STAGED_CONTAINER_ID, target);
         }
-        let index = self.selected_staged.min(self.staged.len() - 1);
-        let target = ScrollTarget::with_mixin(Self::STAGED_ITEM_ID, index as u64);
-        self.staged_scroll
-            .ensure_visible(Self::STAGED_CONTAINER_ID, target);
-    }
-
-    fn ensure_selected_visible(&mut self) {
-        self.queue_scroll_for_focus(self.focus);
     }
 
     fn update_section_scroll(&mut self, focus: Focus, msg: ScrollMsg) {
-        if matches!(msg, ScrollMsg::Delta(_)) && self.entries_for_focus(focus).is_empty() {
+        if matches!(msg, ScrollMsg::Delta(_)) && self.tree_state(focus).visible().is_empty() {
             return;
         }
         self.scroll_state_mut(focus).update(msg);
@@ -1356,22 +1734,22 @@ impl Model {
         // }
     }
 
-    fn sync_scroll_to_selected(&mut self) {
-        self.ensure_selected_visible();
-    }
-
     fn clamp_file_scrolls(&mut self) {
-        if self.unstaged.is_empty() {
+        if self.unstaged_tree.visible().is_empty() {
             self.unstaged_scroll.reset();
-        } else if self.unstaged_scroll.offset() as usize >= self.unstaged.len() {
-            self.unstaged_scroll
-                .set_offset(self.unstaged.len().saturating_sub(1) as f32);
+        } else {
+            let max_offset = (self.unstaged_tree.visible().len().saturating_sub(1)) as f32;
+            if self.unstaged_scroll.offset() > max_offset {
+                self.unstaged_scroll.set_offset(max_offset);
+            }
         }
-        if self.staged.is_empty() {
+        if self.staged_tree.visible().is_empty() {
             self.staged_scroll.reset();
-        } else if self.staged_scroll.offset() as usize >= self.staged.len() {
-            self.staged_scroll
-                .set_offset(self.staged.len().saturating_sub(1) as f32);
+        } else {
+            let max_offset = (self.staged_tree.visible().len().saturating_sub(1)) as f32;
+            if self.staged_scroll.offset() > max_offset {
+                self.staged_scroll.set_offset(max_offset);
+            }
         }
     }
 }
@@ -1381,10 +1759,11 @@ enum Msg {
     KeyPressed(Key),
     Quit,
     ToggleStage,
-    FocusUnstaged,
-    FocusStaged,
+    ToggleFocus,
     MoveSelectionUp,
     MoveSelectionDown,
+    CollapseNode,
+    ExpandNode,
     ScrollFiles(i32),
     ScrollDiff(i32),
     RefreshStatus,
@@ -1405,8 +1784,7 @@ enum Msg {
 
 #[derive(Clone, Debug)]
 enum SectionMsg {
-    ActivateFile(usize),
-    ToggleStageEntry(usize),
+    Tree(TreeMsg<FileNodeId>),
 }
 
 #[derive(Clone, Debug)]
@@ -1977,11 +2355,78 @@ fn discard_unstaged_changes(path: &str, code: char) -> Result<()> {
     run_git(["restore", "--worktree", "--", path]).map(|_| ())
 }
 
-fn clamp_index(index: &mut usize, len: usize) {
-    if len == 0 {
-        *index = 0;
-    } else if *index >= len {
-        *index = len - 1;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chatui::TreeNodeKind;
+
+    #[test]
+    fn tree_label_truncates_to_file_name() {
+        let entry = FileEntry::new("src/lib.rs".into(), 'M', "M src/lib.rs".into());
+        assert_eq!(entry.tree_label(), "lib.rs");
+    }
+
+    #[test]
+    fn tree_label_handles_rename() {
+        let entry = FileEntry::new(
+            "src/new.rs".into(),
+            'R',
+            "R src/old.rs -> src/new.rs".into(),
+        );
+        assert_eq!(entry.tree_label(), "old.rs -> new.rs");
+    }
+
+    #[test]
+    fn build_file_tree_groups_into_directories() {
+        let entries = vec![
+            FileEntry::new("src/lib.rs".into(), 'M', "M src/lib.rs".into()),
+            FileEntry::new("src/main.rs".into(), 'M', "M src/main.rs".into()),
+            FileEntry::new("README.md".into(), 'A', "A README.md".into()),
+        ];
+
+        let nodes = build_file_tree(&entries);
+        assert_eq!(nodes.len(), 2);
+
+        let src_node = nodes
+            .iter()
+            .find(|node| matches!(node.id, FileNodeId::Dir(ref path) if path == "src"))
+            .expect("src directory node");
+        assert_eq!(src_node.children.len(), 2);
+        assert!(
+            src_node
+                .label
+                .first()
+                .map(|span| span.content.starts_with('M'))
+                .unwrap_or(false)
+        );
+
+        let readme_node = nodes
+            .iter()
+            .find(|node| matches!(node.id, FileNodeId::File(ref path) if path == "README.md"))
+            .expect("readme node");
+        assert!(matches!(readme_node.kind, TreeNodeKind::Leaf));
+        assert_eq!(readme_node.label[0].content.trim(), "A README.md");
+    }
+
+    #[test]
+    fn directory_with_mixed_statuses_uses_aggregate_marker() {
+        let entries = vec![
+            FileEntry::new("src/lib.rs".into(), 'M', "M src/lib.rs".into()),
+            FileEntry::new("src/new.rs".into(), '?', "? src/new.rs".into()),
+        ];
+
+        let nodes = build_file_tree(&entries);
+        let src_node = nodes
+            .iter()
+            .find(|node| matches!(node.id, FileNodeId::Dir(ref path) if path == "src"))
+            .expect("src directory node");
+        assert!(
+            src_node
+                .label
+                .first()
+                .map(|span| span.content.starts_with('*'))
+                .unwrap_or(false)
+        );
     }
 }
 
