@@ -90,9 +90,10 @@ impl<Model, Msg> Program<Model, Msg> {
         let result = self.event_loop(&mut terminal);
 
         // Always attempt to restore terminal state.
+        // Show cursor again and disable mouse tracking + exit alternate screen.
         let _ = write!(
             terminal,
-            "\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l", // Exit alternate screen
+            "\x1b[?25h\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l",
         );
         let _ = terminal.flush();
         let _ = terminal.enter_cooked_mode();
@@ -378,6 +379,7 @@ impl<Model, Msg> Program<Model, Msg> {
                     None
                 }
                 crate::dom::NodeContent::Text(_) => None,
+                crate::dom::NodeContent::Leaf(_) => None,
             }
         }
 
@@ -431,11 +433,7 @@ impl<Model, Msg> Program<Model, Msg> {
                 && last.x == event.x
                 && last.y == event.y
             {
-                if last.count >= 3 {
-                    1
-                } else {
-                    last.count + 1
-                }
+                if last.count >= 3 { 1 } else { last.count + 1 }
             } else {
                 1
             };

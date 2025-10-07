@@ -1,5 +1,5 @@
-use crate::buffer::{CellAttributes, DoubleBuffer};
-use crate::dom::{ElementKind, ElementNode, Node, NodeContent, Style, TextNode};
+use crate::buffer::{CellAttributes, DoubleBuffer, Rect as BufferRect};
+use crate::dom::{Color, ElementKind, ElementNode, Node, NodeContent, Style, TextNode};
 use crate::error::ProgramError;
 use crate::event::Size;
 use crate::palette::{Palette, Rgba};
@@ -7,6 +7,98 @@ use crate::palette::{Palette, Rgba};
 use termwiz::cell::unicode_column_width;
 
 use taffy::Layout as TaffyLayout;
+
+fn color_to_rgba(palette: &Palette, color: Color) -> Rgba {
+    match color {
+        Color::Reset => palette.foreground,
+        Color::Rgba { r, g, b, a } => Rgba::new(r, g, b, a),
+    }
+}
+
+fn style_to_attributes(palette: &Palette, style: &Style) -> CellAttributes {
+    let mut attrs = CellAttributes::default();
+    if let Some(fg) = style.fg {
+        attrs.set_foreground(color_to_rgba(palette, fg));
+    }
+    if let Some(bg) = style.bg {
+        attrs.set_background(color_to_rgba(palette, bg));
+    }
+    if style.bold {
+        attrs.set_bold(true);
+    } else if style.dim {
+        attrs.set_dim(true);
+    }
+    attrs
+}
+
+pub struct LeafRenderContext<'a> {
+    buffer: &'a mut DoubleBuffer,
+    palette: &'a Palette,
+    layout: &'a TaffyLayout,
+    origin: (usize, usize),
+    area: BufferRect,
+    inherited_scroll_y: f32,
+}
+
+impl<'a> LeafRenderContext<'a> {
+    pub fn new(
+        buffer: &'a mut DoubleBuffer,
+        palette: &'a Palette,
+        layout: &'a TaffyLayout,
+        origin: (usize, usize),
+        area: BufferRect,
+        inherited_scroll_y: f32,
+    ) -> Self {
+        Self {
+            buffer,
+            palette,
+            layout,
+            origin,
+            area,
+            inherited_scroll_y,
+        }
+    }
+
+    pub fn layout(&self) -> &TaffyLayout {
+        self.layout
+    }
+
+    pub fn origin(&self) -> (usize, usize) {
+        self.origin
+    }
+
+    pub fn area(&self) -> BufferRect {
+        self.area
+    }
+
+    pub fn buffer(&mut self) -> &mut DoubleBuffer {
+        self.buffer
+    }
+
+    pub fn palette(&self) -> &Palette {
+        self.palette
+    }
+
+    pub fn style_to_attributes(&self, style: &Style) -> CellAttributes {
+        style_to_attributes(self.palette, style)
+    }
+
+    pub fn write_text(&mut self, x: usize, y: usize, text: &str, attrs: &CellAttributes) {
+        self.buffer.write_text(x, y, text, attrs);
+    }
+
+    pub fn write_char(&mut self, x: usize, y: usize, ch: char, attrs: &CellAttributes) {
+        self.buffer.write_char(x, y, ch, attrs);
+    }
+
+    pub fn clear_area(&mut self, rect: BufferRect) {
+        self.buffer.clear_area(rect);
+    }
+
+    pub fn scroll_y(&self) -> f32 {
+        self.inherited_scroll_y
+    }
+}
 
 pub struct Renderer<'a> {
     buffer: &'a mut DoubleBuffer,
@@ -134,10 +226,22 @@ impl<'a> Renderer<'a> {
                     self.render_scrollbar(node_origin, area, &layout, node.scroll_y, border_style);
                 }
             }
+            NodeContent::Leaf(leaf) => {
+                let clip_rect = BufferRect::new(area.x, area.y, area.width, area.height);
+                let mut ctx = LeafRenderContext::new(
+                    self.buffer,
+                    self.palette,
+                    &layout,
+                    (node_origin.x, node_origin.y),
+                    clip_rect,
+                    inherited_scroll_y,
+                );
+                leaf.render(&mut ctx);
+            }
         }
     }
 
-    fn render_text<Msg>(&mut self, text: &TextNode<Msg>, _parent_origin: Point, clip: Rect) {
+    fn render_text(&mut self, text: &TextNode, _parent_origin: Point, clip: Rect) {
         let mut remaining = clip.width;
         if remaining == 0 {
             return;
@@ -170,7 +274,7 @@ impl<'a> Renderer<'a> {
                 fill_style = Some(span.style.clone());
             }
 
-            let attrs = self.style_to_attributes(&span.style);
+            let attrs = style_to_attributes(self.palette, &span.style);
             self.buffer.write_text(cursor_x, clip.y, &collected, &attrs);
 
             cursor_x += taken;
@@ -180,32 +284,9 @@ impl<'a> Renderer<'a> {
         if remaining > 0
             && let Some(style) = fill_style
         {
-            let attrs = self.style_to_attributes(&style);
+            let attrs = style_to_attributes(self.palette, &style);
             let padding = " ".repeat(remaining);
             self.buffer.write_text(cursor_x, clip.y, &padding, &attrs);
-        }
-    }
-
-    fn style_to_attributes(&self, style: &Style) -> CellAttributes {
-        let mut attrs = CellAttributes::default();
-        if let Some(fg) = style.fg {
-            attrs.set_foreground(self.color_to_rgba(fg));
-        }
-        if let Some(bg) = style.bg {
-            attrs.set_background(self.color_to_rgba(bg));
-        }
-        if style.bold {
-            attrs.set_bold(true);
-        } else if style.dim {
-            attrs.set_dim(true);
-        }
-        attrs
-    }
-
-    fn color_to_rgba(&self, color: crate::dom::Color) -> Rgba {
-        match color {
-            crate::dom::Color::Reset => self.palette.foreground,
-            crate::dom::Color::Rgba { r, g, b, a } => Rgba::new(r, g, b, a),
         }
     }
 
@@ -322,7 +403,7 @@ impl<'a> Renderer<'a> {
             .min(track_top + track_height);
 
         let mut thumb_attrs = match block_border_style {
-            Some(style) => self.style_to_attributes(style),
+            Some(style) => style_to_attributes(self.palette, style),
             None => CellAttributes::default(),
         };
         thumb_attrs.set_bold(true);
@@ -377,7 +458,7 @@ impl<'a> Renderer<'a> {
             return;
         }
 
-        let attrs = self.style_to_attributes(style);
+        let attrs = style_to_attributes(self.palette, style);
 
         // Top border
         self.write_char(area.x, area.y, '┌', &attrs);
@@ -442,7 +523,7 @@ impl<'a> Renderer<'a> {
             return;
         }
 
-        let attrs = self.style_to_attributes(style);
+        let attrs = style_to_attributes(self.palette, style);
         self.buffer
             .write_text(clip.x + 1, clip.y, &rendered, &attrs);
     }
@@ -457,8 +538,8 @@ impl<'a> Renderer<'a> {
         }
 
         // Convert colors before the loop to avoid borrow checker issues
-        let fg_color = style.fg.map(|c| self.color_to_rgba(c));
-        let bg_color = style.bg.map(|c| self.color_to_rgba(c));
+        let fg_color = style.fg.map(|c| color_to_rgba(self.palette, c));
+        let bg_color = style.bg.map(|c| color_to_rgba(self.palette, c));
 
         for y in area.y..(area.y + area.height).min(self.buffer.dimensions().1) {
             for x in area.x..(area.x + area.width).min(self.buffer.dimensions().0) {
@@ -874,19 +955,15 @@ mod tests {
 
     #[test]
     fn dim_style_sets_dim() {
-        let mut buffer = DoubleBuffer::new(10, 2);
         let palette = Palette::default();
-        let renderer = Renderer::new(&mut buffer, &palette);
-        let attrs = renderer.style_to_attributes(&Style::dim());
+        let attrs = style_to_attributes(&palette, &Style::dim());
         assert!(attrs.is_dim());
     }
 
     #[test]
     fn translates_rgb_color() {
-        let mut buffer = DoubleBuffer::new(10, 2);
         let palette = Palette::default();
-        let renderer = Renderer::new(&mut buffer, &palette);
-        let rgba = renderer.color_to_rgba(Color::rgb(10, 20, 30));
+        let rgba = color_to_rgba(&palette, Color::rgb(10, 20, 30));
         let expected = Rgba::opaque(10, 20, 30);
         assert_eq!(rgba, expected);
     }

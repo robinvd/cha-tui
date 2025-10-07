@@ -53,6 +53,7 @@ pub fn print_tree<Msg>(root: &Node<Msg>) {
                 }
             }
             crate::dom::NodeContent::Text(_) => {}
+            crate::dom::NodeContent::Leaf(_) => {}
         }
 
         // Recurse into children

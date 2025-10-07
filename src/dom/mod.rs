@@ -2,11 +2,12 @@ pub mod patch;
 pub mod print;
 pub mod rounding;
 
+use std::any::Any;
 use std::fmt;
-use std::marker::PhantomData;
 use std::rc::Rc;
 
 use crate::event::{MouseEvent, Size};
+use crate::render::LeafRenderContext;
 use crate::scroll::ScrollAlignment;
 use taffy::{
     CacheTree, LayoutFlexboxContainer, Overflow, compute_cached_layout, compute_flexbox_layout,
@@ -25,7 +26,29 @@ use termwiz::cell::unicode_column_width;
 
 type ResizeHandler<Msg> = Rc<dyn Fn(&TaffyLayout) -> Option<Msg>>;
 
-#[derive(Clone)]
+pub trait Renderable: fmt::Debug + 'static {
+    fn eq_leaf(&self, _other: &dyn Renderable) -> bool {
+        false
+    }
+
+    fn measure(
+        &self,
+        style: &TaffyStyle,
+        known_dimensions: taffy::Size<Option<f32>>,
+        available_space: taffy::Size<taffy::AvailableSpace>,
+    ) -> taffy::Size<f32>;
+
+    fn render(&self, ctx: &mut LeafRenderContext<'_>);
+
+    fn debug_label(&self) -> &'static str {
+        "leaf"
+    }
+
+    fn as_any(&self) -> &dyn Any;
+}
+
+pub type LeafNode = Rc<dyn Renderable>;
+
 pub struct Node<Msg> {
     classname: &'static str,
     id: u64,
@@ -46,7 +69,7 @@ pub(crate) struct PendingScroll<Msg> {
     pub callback: Rc<dyn Fn(f32) -> Msg>,
 }
 
-impl<Msg: fmt::Debug> fmt::Debug for Node<Msg> {
+impl<Msg> fmt::Debug for Node<Msg> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Node")
             .field("content", &self.content)
@@ -59,7 +82,7 @@ impl<Msg: fmt::Debug> fmt::Debug for Node<Msg> {
     }
 }
 
-impl<Msg: PartialEq> PartialEq for Node<Msg> {
+impl<Msg> PartialEq for Node<Msg> {
     fn eq(&self, other: &Self) -> bool {
         self.content == other.content
             && self.classname == other.classname
@@ -71,26 +94,28 @@ impl<Msg: PartialEq> PartialEq for Node<Msg> {
     }
 }
 
-#[derive(Clone)]
 pub enum NodeContent<Msg> {
     Element(ElementNode<Msg>),
-    Text(TextNode<Msg>),
+    Text(TextNode),
+    Leaf(LeafNode),
 }
 
-impl<Msg: fmt::Debug> fmt::Debug for NodeContent<Msg> {
+impl<Msg> fmt::Debug for NodeContent<Msg> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Element(e) => f.debug_tuple("Element").field(e).finish(),
             Self::Text(t) => f.debug_tuple("Text").field(t).finish(),
+            Self::Leaf(l) => f.debug_tuple("Leaf").field(l).finish(),
         }
     }
 }
 
-impl<Msg: PartialEq> PartialEq for NodeContent<Msg> {
+impl<Msg> PartialEq for NodeContent<Msg> {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::Element(a), Self::Element(b)) => a == b,
             (Self::Text(a), Self::Text(b)) => a == b,
+            (Self::Leaf(a), Self::Leaf(b)) => Rc::ptr_eq(a, b) || a.eq_leaf(&**b),
             _ => false,
         }
     }
@@ -121,7 +146,7 @@ impl Default for LayoutState {
     }
 }
 
-#[derive(Clone)]
+// #[derive(Clone)]
 pub struct ElementNode<Msg> {
     pub kind: ElementKind,
     pub attrs: Attributes,
@@ -129,7 +154,7 @@ pub struct ElementNode<Msg> {
     pub title: Option<String>,
 }
 
-impl<Msg: fmt::Debug> fmt::Debug for ElementNode<Msg> {
+impl<Msg> fmt::Debug for ElementNode<Msg> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ElementNode")
             .field("kind", &self.kind)
@@ -140,7 +165,7 @@ impl<Msg: fmt::Debug> fmt::Debug for ElementNode<Msg> {
     }
 }
 
-impl<Msg: PartialEq> PartialEq for ElementNode<Msg> {
+impl<Msg> PartialEq for ElementNode<Msg> {
     fn eq(&self, other: &Self) -> bool {
         self.kind == other.kind
             && self.attrs == other.attrs
@@ -165,9 +190,8 @@ impl TextSpan {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TextNode<Msg> {
+pub struct TextNode {
     spans: Vec<TextSpan>,
-    _marker: PhantomData<Msg>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -256,6 +280,10 @@ pub fn text<Msg>(content: impl Into<String>) -> Node<Msg> {
 
 pub fn rich_text<Msg>(spans: impl Into<Vec<TextSpan>>) -> Node<Msg> {
     Node::new(NodeContent::Text(TextNode::from_spans(spans.into())))
+}
+
+pub fn leaf<Msg>(widget: impl Renderable + 'static) -> Node<Msg> {
+    Node::new(NodeContent::Leaf(Rc::new(widget)))
 }
 
 pub fn column<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
@@ -347,6 +375,7 @@ impl<Msg> Node<Msg> {
                 ElementKind::Modal => "modal",
             },
             NodeContent::Text(_text_node) => "text",
+            NodeContent::Leaf(leaf) => leaf.debug_label(),
         }
     }
 
@@ -476,6 +505,7 @@ impl<Msg> Node<Msg> {
             NodeContent::Text(text) => {
                 text.apply_uniform_style(style);
             }
+            NodeContent::Leaf(_leaf) => {}
         }
         self
     }
@@ -514,9 +544,16 @@ impl<Msg> Node<Msg> {
         }
     }
 
-    pub fn as_text(&self) -> Option<&TextNode<Msg>> {
+    pub fn as_text(&self) -> Option<&TextNode> {
         match &self.content {
             NodeContent::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn as_leaf(&self) -> Option<&dyn Renderable> {
+        match &self.content {
+            NodeContent::Leaf(leaf) => Some(leaf.as_ref()),
             _ => None,
         }
     }
@@ -528,9 +565,16 @@ impl<Msg> Node<Msg> {
         }
     }
 
-    pub fn into_text(self) -> Option<TextNode<Msg>> {
+    pub fn into_text(self) -> Option<TextNode> {
         match self.content {
             NodeContent::Text(text) => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn into_leaf(self) -> Option<LeafNode> {
+        match self.content {
+            NodeContent::Leaf(leaf) => Some(leaf),
             _ => None,
         }
     }
@@ -543,6 +587,7 @@ impl<Msg> Node<Msg> {
             match &self.content {
                 NodeContent::Element(element_node) => &element_node.children[index as usize],
                 NodeContent::Text(_) => panic!("text has no children"),
+                NodeContent::Leaf(_) => panic!("leaf has no children"),
             }
         }
     }
@@ -555,6 +600,7 @@ impl<Msg> Node<Msg> {
             match &mut self.content {
                 NodeContent::Element(element_node) => &mut element_node.children[index as usize],
                 NodeContent::Text(_) => panic!("text has no children"),
+                NodeContent::Leaf(_) => panic!("leaf has no children"),
             }
         }
     }
@@ -584,6 +630,7 @@ impl<Msg> Node<Msg> {
                 }
             }
             NodeContent::Text(_) => {}
+            NodeContent::Leaf(_) => {}
         }
     }
 
@@ -724,7 +771,7 @@ impl<Msg> ElementNode<Msg> {
     }
 }
 
-impl<Msg> TextNode<Msg> {
+impl TextNode {
     pub fn new(content: impl Into<String>) -> Self {
         Self::from_span(content, Style::default())
     }
@@ -732,15 +779,11 @@ impl<Msg> TextNode<Msg> {
     pub fn from_span(content: impl Into<String>, style: Style) -> Self {
         Self {
             spans: vec![TextSpan::new(content, style)],
-            _marker: PhantomData,
         }
     }
 
     pub fn from_spans(spans: Vec<TextSpan>) -> Self {
-        Self {
-            spans,
-            _marker: PhantomData,
-        }
+        Self { spans }
     }
 
     pub fn spans(&self) -> &[TextSpan] {
@@ -778,6 +821,7 @@ impl<Msg> TraversePartialTree for Node<Msg> {
         match &node.content {
             NodeContent::Element(element_node) => element_node.children.len(),
             NodeContent::Text(_) => 0,
+            NodeContent::Leaf(_) => 0,
         }
     }
 
@@ -863,6 +907,14 @@ impl<Msg> LayoutPartialTree for Node<Msg> {
                         }
                     },
                 ),
+                NodeContent::Leaf(leaf) => compute_leaf_layout(
+                    inputs,
+                    &node.layout_state.style,
+                    |_val, _basis| 0.0,
+                    |known_dimensions, available_space| {
+                        leaf.measure(&node.layout_state.style, known_dimensions, available_space)
+                    },
+                ),
                 NodeContent::Element(_) => compute_flexbox_layout(node, u64::MAX.into(), inputs),
             }
         })
@@ -892,7 +944,62 @@ impl<Msg> LayoutFlexboxContainer for Node<Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::render::LeafRenderContext;
+    use std::any::Any;
     use taffy::style::{AlignItems, JustifyContent, LengthPercentageAuto, Position};
+
+    #[derive(Clone, Debug)]
+    struct DummyLeaf {
+        label: &'static str,
+        width: f32,
+        height: f32,
+    }
+
+    impl DummyLeaf {
+        fn new(label: &'static str, width: f32, height: f32) -> Self {
+            Self {
+                label,
+                width,
+                height,
+            }
+        }
+    }
+
+    impl Renderable for DummyLeaf {
+        fn eq_leaf(&self, other: &dyn Renderable) -> bool {
+            other
+                .as_any()
+                .downcast_ref::<Self>()
+                .map(|other| {
+                    other.label == self.label
+                        && other.width == self.width
+                        && other.height == self.height
+                })
+                .unwrap_or(false)
+        }
+
+        fn measure(
+            &self,
+            _style: &TaffyStyle,
+            _known_dimensions: taffy::Size<Option<f32>>,
+            _available_space: taffy::Size<taffy::AvailableSpace>,
+        ) -> taffy::Size<f32> {
+            taffy::Size {
+                width: self.width,
+                height: self.height,
+            }
+        }
+
+        fn render(&self, _ctx: &mut LeafRenderContext<'_>) {}
+
+        fn debug_label(&self) -> &'static str {
+            self.label
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
 
     #[test]
     fn text_node_preserves_content() {
@@ -924,13 +1031,13 @@ mod tests {
 
     #[test]
     fn column_node_wraps_children() {
-        let child: Node<()> = text("child");
-        let node = column(vec![child.clone()]);
+        let child = || text::<()>("child");
+        let node = column(vec![child()]);
 
         match node.into_element() {
             Some(element) => {
                 assert_eq!(element.kind, ElementKind::Column);
-                assert_eq!(element.children, vec![child]);
+                assert_eq!(element.children, vec![child()]);
                 assert_eq!(element.attrs, Attributes::default());
             }
             None => panic!("expected element node"),
@@ -939,13 +1046,13 @@ mod tests {
 
     #[test]
     fn row_node_wraps_children() {
-        let child: Node<()> = text("row child");
-        let node = row(vec![child.clone()]);
+        let child = || text::<()>("row child");
+        let node = row(vec![child()]);
 
         match node.into_element() {
             Some(element) => {
                 assert_eq!(element.kind, ElementKind::Row);
-                assert_eq!(element.children, vec![child]);
+                assert_eq!(element.children, vec![child()]);
             }
             None => panic!("expected element node"),
         }
@@ -953,12 +1060,12 @@ mod tests {
 
     #[test]
     fn modal_node_configures_overlay() {
-        let child: Node<()> = text("modal child");
-        let node = modal(vec![child.clone()]);
+        let child = || text::<()>("modal child");
+        let node = modal(vec![child()]);
 
         let element = node.as_element().expect("expected element node");
         assert_eq!(element.kind, ElementKind::Modal);
-        assert_eq!(element.children, vec![child]);
+        assert_eq!(element.children, vec![child()]);
         // Check that modal has a semi-transparent background instead of dim
         assert_eq!(element.attrs.style.bg, Some(Color::rgba(0, 0, 0, 8)));
 
@@ -984,6 +1091,34 @@ mod tests {
             }
             None => panic!("expected element node"),
         }
+    }
+
+    #[test]
+    fn leaf_node_preserves_widget_access() {
+        let node: Node<()> = leaf(DummyLeaf::new("dummy", 5.0, 2.0));
+
+        assert_eq!(node.get_debug_label(), "dummy");
+        let leaf_ref = node.as_leaf().expect("expected leaf reference");
+        assert!(leaf_ref.eq_leaf(leaf_ref));
+
+        let leaf_rc = node.into_leaf().expect("expected leaf rc");
+        let concrete = leaf_rc
+            .as_ref()
+            .as_any()
+            .downcast_ref::<DummyLeaf>()
+            .expect("expected DummyLeaf");
+        assert_eq!(concrete.width, 5.0);
+        assert_eq!(concrete.height, 2.0);
+    }
+
+    #[test]
+    fn leaf_partial_eq_delegates_to_widget() {
+        let a: Node<()> = leaf(DummyLeaf::new("widget", 3.0, 1.0));
+        let b: Node<()> = leaf(DummyLeaf::new("widget", 3.0, 1.0));
+        let c: Node<()> = leaf(DummyLeaf::new("widget", 4.0, 1.0));
+
+        assert_eq!(a, b);
+        assert_ne!(a, c);
     }
 
     #[test]

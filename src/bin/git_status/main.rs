@@ -9,8 +9,9 @@ use std::path::Path;
 use std::process::Command;
 
 use chatui::components::scroll::{ScrollMsg, ScrollState, ScrollTarget, scrollable_content};
-use chatui::dom::{Node, TextSpan};
+use chatui::dom::{Node, Renderable, TextSpan, leaf};
 use chatui::event::{Event, Key, KeyCode};
+use chatui::render::LeafRenderContext;
 use chatui::{
     InputMsg, InputState, InputStyle, Program, Style, Transition, block_with_title, column,
     default_input_keybindings, input, modal, rich_text, row, text,
@@ -843,12 +844,120 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
         .with_flex_basis(Dimension::ZERO);
     }
 
-    let rendered: Vec<_> = lines
-        .iter()
-        .map(|line| rich_text::<Msg>(line.spans.clone()).with_overflow_x(taffy::Overflow::Clip))
-        .collect();
+    leaf(DiffLeaf::new(lines.to_vec()))
+        .with_width(Dimension::percent(1.0))
+        // .with_flex_grow(1.0)
+        // .with_flex_basis(Dimension::ZERO)
+        // .with_min_height(Dimension::ZERO)
+        .with_id("diff_lines")
+}
 
-    column(rendered).with_id("diff_lines")
+#[derive(Clone, Debug)]
+struct DiffLeaf {
+    lines: Vec<DiffLine>,
+}
+
+impl DiffLeaf {
+    fn new(lines: Vec<DiffLine>) -> Self {
+        Self { lines }
+    }
+}
+
+impl Renderable for DiffLeaf {
+    fn eq_leaf(&self, other: &dyn Renderable) -> bool {
+        other
+            .as_any()
+            .downcast_ref::<Self>()
+            .map(|o| o.lines == self.lines)
+            .unwrap_or(false)
+    }
+
+    fn measure(
+        &self,
+        _style: &taffy::Style,
+        _known_dimensions: taffy::Size<Option<f32>>,
+        available_space: taffy::Size<taffy::AvailableSpace>,
+    ) -> taffy::Size<f32> {
+        let height = self.lines.len() as f32;
+        let max_width = self
+            .lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.len()).sum::<usize>())
+            .max()
+            .unwrap_or(0) as f32;
+
+        let width = match available_space.width {
+            taffy::AvailableSpace::Definite(w) => w,
+            taffy::AvailableSpace::MinContent => max_width,
+            taffy::AvailableSpace::MaxContent => max_width,
+        };
+
+        // Prefer the available width when definite; height is content height.
+        taffy::Size { width, height }
+    }
+
+    fn render(&self, ctx: &mut LeafRenderContext<'_>) {
+        let area = ctx.area();
+        // Use the inherited scroll from ancestors to determine the first
+        // content row to render. This allows the scrollbar to move the visible
+        // window through the diff lines.
+        let start_idx = ctx.scroll_y().max(0.0).floor() as usize;
+        let end_row = area.y.saturating_add(area.height);
+        let visible_height = end_row
+            .saturating_sub(area.y)
+            .min(self.lines.len().saturating_sub(start_idx));
+
+        for (i, line_idx) in (0..visible_height).enumerate() {
+            let idx = start_idx + line_idx;
+            let y = area.y + i;
+            if idx >= self.lines.len() || y >= area.y + area.height {
+                break;
+            }
+
+            let mut remaining = area.width;
+            let mut cursor_x = area.x;
+            let mut fill_style: Option<Style> = None;
+            for span in &self.lines[idx].spans {
+                if remaining == 0 {
+                    break;
+                }
+                let mut collected = String::new();
+                let mut taken = 0;
+                for ch in span.content.chars() {
+                    if taken == remaining {
+                        break;
+                    }
+                    collected.push(ch);
+                    taken += 1;
+                }
+                if collected.is_empty() {
+                    continue;
+                }
+                if span.style.bg.is_some() || span.style.dim {
+                    fill_style = Some(span.style.clone());
+                }
+                let attrs = ctx.style_to_attributes(&span.style);
+                ctx.write_text(cursor_x, y, &collected, &attrs);
+                cursor_x += taken;
+                remaining = remaining.saturating_sub(taken);
+            }
+            if remaining > 0
+                && let Some(style) = &fill_style
+            {
+                let attrs = ctx.style_to_attributes(style);
+                let padding = " ".repeat(remaining);
+                ctx.write_text(cursor_x, y, &padding, &attrs);
+            }
+        }
+    }
+
+    fn debug_label(&self) -> &'static str {
+        "diff"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
@@ -1833,7 +1942,7 @@ enum SectionMsg {
     Tree(TreeMsg<FileNodeId>),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct DiffLine {
     spans: Vec<TextSpan>,
 }

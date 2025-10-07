@@ -88,6 +88,32 @@ impl Rect {
             height,
         }
     }
+
+    /// Returns the intersection between two rectangles.
+    pub fn intersection(self, other: Self) -> Self {
+        let x = self.x.max(other.x);
+        let y = self.y.max(other.y);
+
+        let self_right = self.x.saturating_add(self.width);
+        let other_right = other.x.saturating_add(other.width);
+        let self_bottom = self.y.saturating_add(self.height);
+        let other_bottom = other.y.saturating_add(other.height);
+
+        let width = self_right.min(other_right).saturating_sub(x);
+        let height = self_bottom.min(other_bottom).saturating_sub(y);
+
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Checks if the rectangle encloses any area.
+    pub fn has_area(self) -> bool {
+        self.width > 0 && self.height > 0
+    }
 }
 
 /// Double-buffered in-memory buffer that renders diffs to the terminal
