@@ -264,19 +264,24 @@ impl<'a> Renderer<'a> {
                     inherited_scroll_y,
                 );
                 // Override horizontal scroll into the leaf context if this node scrolls horizontally
-                ctx.inherited_scroll_x = if node.layout_state.style.overflow.x
-                    == taffy::Overflow::Scroll
-                {
-                    inherited_scroll_x + node.scroll_x
-                } else {
-                    inherited_scroll_x
-                };
+                ctx.inherited_scroll_x =
+                    if node.layout_state.style.overflow.x == taffy::Overflow::Scroll {
+                        inherited_scroll_x + node.scroll_x
+                    } else {
+                        inherited_scroll_x
+                    };
                 leaf.render(&mut ctx);
             }
         }
     }
 
-    fn render_text(&mut self, text: &TextNode, _parent_origin: Point, clip: Rect, mut skip_cols: usize) {
+    fn render_text(
+        &mut self,
+        text: &TextNode,
+        _parent_origin: Point,
+        clip: Rect,
+        mut skip_cols: usize,
+    ) {
         let mut remaining = clip.width;
         if remaining == 0 {
             return;
@@ -349,11 +354,18 @@ impl<'a> Renderer<'a> {
         scroll_x: f32,
     ) {
         match element.kind {
-            ElementKind::Block => self.render_block(element, parent_origin, clip, scroll_y, scroll_x),
-            ElementKind::Modal => self.render_modal(element, parent_origin, clip, scroll_y),
-            ElementKind::Column | ElementKind::Row => {
-                self.render_children(&element.children, parent_origin, clip, scroll_y, scroll_x, false)
+            ElementKind::Block => {
+                self.render_block(element, parent_origin, clip, scroll_y, scroll_x)
             }
+            ElementKind::Modal => self.render_modal(element, parent_origin, clip, scroll_y),
+            ElementKind::Column | ElementKind::Row => self.render_children(
+                &element.children,
+                parent_origin,
+                clip,
+                scroll_y,
+                scroll_x,
+                false,
+            ),
         }
     }
 
@@ -531,9 +543,8 @@ impl<'a> Renderer<'a> {
             scroll_offset.clamp(0.0, max_scroll)
         };
 
-        let mut thumb_width = ((track_width as f32 * (viewport_width / content_width)).floor()
-            as usize)
-            .max(1);
+        let mut thumb_width =
+            ((track_width as f32 * (viewport_width / content_width)).floor() as usize).max(1);
         if thumb_width > track_width {
             thumb_width = track_width;
         }
@@ -545,7 +556,9 @@ impl<'a> Renderer<'a> {
             ((clamped_scroll / max_scroll) * travel as f32).round() as usize
         };
         let thumb_left = track_left + thumb_left_offset;
-        let thumb_right = thumb_left.saturating_add(thumb_width).min(track_left + track_width);
+        let thumb_right = thumb_left
+            .saturating_add(thumb_width)
+            .min(track_left + track_width);
 
         let mut thumb_attrs = match block_border_style {
             Some(style) => style_to_attributes(self.palette, style),
@@ -596,7 +609,14 @@ impl<'a> Renderer<'a> {
             width: clip.width.saturating_sub(1),
             height: clip.height.saturating_sub(2),
         };
-        self.render_children(&element.children, child_origin, child_area, scroll_y, scroll_x, false);
+        self.render_children(
+            &element.children,
+            child_origin,
+            child_area,
+            scroll_y,
+            scroll_x,
+            false,
+        );
     }
 
     fn draw_border(&mut self, area: Rect, style: &Style) {
@@ -887,13 +907,13 @@ mod tests {
         let mut buffer = DoubleBuffer::new(6, 1);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
-        let spans = vec![
-            TextSpan::new("abcdef", Style::fg(Color::Red)),
-        ];
+        let spans = vec![TextSpan::new("abcdef", Style::fg(Color::Red))];
         let mut node = rich_text::<()>(spans).with_scroll_x(2.0);
         prepare_layout(&mut node, Size::new(6, 1));
 
-        renderer.render(&node, Size::new(6, 1)).expect("render should succeed");
+        renderer
+            .render(&node, Size::new(6, 1))
+            .expect("render should succeed");
 
         let screen = renderer.buffer().to_string();
         let first_line = screen.lines().next().unwrap_or("");
@@ -915,7 +935,9 @@ mod tests {
             .with_height(Dimension::percent(1.0));
         prepare_layout(&mut root, Size::new(12, 8));
 
-        renderer.render(&root, Size::new(12, 8)).expect("render should succeed");
+        renderer
+            .render(&root, Size::new(12, 8))
+            .expect("render should succeed");
 
         renderer
             .buffer()
@@ -956,7 +978,9 @@ mod tests {
         let mut node = rich_text::<()>(spans).with_scroll_x(2.0);
         prepare_layout(&mut node, Size::new(6, 1));
 
-        renderer.render(&node, Size::new(6, 1)).expect("render should succeed");
+        renderer
+            .render(&node, Size::new(6, 1))
+            .expect("render should succeed");
         let screen = renderer.buffer().to_string();
         let first_line = screen.lines().next().unwrap_or("");
         assert!(first_line.contains('漢'));
@@ -1360,7 +1384,9 @@ mod tests {
         let mut node = crate::input::<()>("input", &state, &style, |_| ());
         prepare_layout(&mut node, Size::new(8, 1));
 
-        renderer.render(&node, Size::new(8, 1)).expect("render should succeed");
+        renderer
+            .render(&node, Size::new(8, 1))
+            .expect("render should succeed");
 
         let screen = renderer.buffer().to_string();
         let first_line = screen.lines().next().unwrap_or("");

@@ -749,11 +749,11 @@ mod tests {
         // Build node and ensure it asks for x-scroll
         let mut node = crate::input::<()>("input", &state, &style, |_| ());
         // Layout and render to 8x1
-        use crate::render::Renderer;
         use crate::buffer::DoubleBuffer;
-        use crate::palette::Palette;
-        use crate::event::Size;
         use crate::dom::rounding::round_layout;
+        use crate::event::Size;
+        use crate::palette::Palette;
+        use crate::render::Renderer;
         use taffy::{AvailableSpace, compute_root_layout};
 
         let mut buffer = DoubleBuffer::new(8, 1);
@@ -770,7 +770,9 @@ mod tests {
         );
         round_layout(&mut node);
 
-        renderer.render(&node, Size::new(8, 1)).expect("render should succeed");
+        renderer
+            .render(&node, Size::new(8, 1))
+            .expect("render should succeed");
         let screen = renderer.buffer().to_string();
         let first_line = screen.lines().next().unwrap_or("");
         // Expect to see the last characters including the cursor placeholder/char region at end
@@ -787,11 +789,11 @@ mod tests {
         let style = InputStyle::default();
         let mut node = crate::input::<()>("input", &state, &style, |_| ());
 
-        use crate::render::Renderer;
         use crate::buffer::DoubleBuffer;
-        use crate::palette::Palette;
-        use crate::event::Size;
         use crate::dom::rounding::round_layout;
+        use crate::event::Size;
+        use crate::palette::Palette;
+        use crate::render::Renderer;
         use taffy::{AvailableSpace, compute_root_layout};
 
         let mut buffer = DoubleBuffer::new(6, 1);
@@ -808,7 +810,9 @@ mod tests {
         );
         round_layout(&mut node);
 
-        renderer.render(&node, Size::new(6, 1)).expect("render should succeed");
+        renderer
+            .render(&node, Size::new(6, 1))
+            .expect("render should succeed");
         let screen = renderer.buffer().to_string();
         let first_line = screen.lines().next().unwrap_or("");
         assert!(first_line.contains('漢'));
