@@ -1,7 +1,8 @@
-use crate::buffer::{CellAttributes, DoubleBuffer, Rect as BufferRect};
+use crate::buffer::{CellAttributes, DoubleBuffer};
 use crate::dom::{Color, ElementKind, ElementNode, Node, NodeContent, Style, TextNode};
 use crate::error::ProgramError;
 use crate::event::Size;
+use crate::geometry::{Point, Rect};
 use crate::palette::{Palette, Rgba};
 
 use termwiz::cell::unicode_column_width;
@@ -36,7 +37,7 @@ pub struct LeafRenderContext<'a> {
     palette: &'a Palette,
     layout: &'a TaffyLayout,
     origin: (usize, usize),
-    area: BufferRect,
+    area: Rect,
     inherited_scroll_y: f32,
     inherited_scroll_x: f32,
 }
@@ -47,7 +48,7 @@ impl<'a> LeafRenderContext<'a> {
         palette: &'a Palette,
         layout: &'a TaffyLayout,
         origin: (usize, usize),
-        area: BufferRect,
+        area: Rect,
         inherited_scroll_y: f32,
     ) -> Self {
         Self {
@@ -69,7 +70,7 @@ impl<'a> LeafRenderContext<'a> {
         self.origin
     }
 
-    pub fn area(&self) -> BufferRect {
+    pub fn area(&self) -> Rect {
         self.area
     }
 
@@ -93,7 +94,7 @@ impl<'a> LeafRenderContext<'a> {
         self.buffer.write_char(x, y, ch, attrs);
     }
 
-    pub fn clear_area(&mut self, rect: BufferRect) {
+    pub fn clear_area(&mut self, rect: Rect) {
         self.buffer.clear_area(rect);
     }
 
@@ -109,46 +110,6 @@ impl<'a> LeafRenderContext<'a> {
 pub struct Renderer<'a> {
     buffer: &'a mut DoubleBuffer,
     palette: &'a Palette,
-}
-
-#[derive(Clone, Copy)]
-struct Rect {
-    x: usize,
-    y: usize,
-    width: usize,
-    height: usize,
-}
-
-impl Rect {
-    fn intersection(self, other: Self) -> Self {
-        let x = self.x.max(other.x);
-        let y = self.y.max(other.y);
-
-        let self_right = self.x.saturating_add(self.width);
-        let other_right = other.x.saturating_add(other.width);
-        let self_bottom = self.y.saturating_add(self.height);
-        let other_bottom = other.y.saturating_add(other.height);
-
-        let width = self_right.min(other_right).saturating_sub(x);
-        let height = self_bottom.min(other_bottom).saturating_sub(y);
-
-        Self {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    fn has_area(self) -> bool {
-        self.width > 0 && self.height > 0
-    }
-}
-
-#[derive(Clone, Copy)]
-struct Point {
-    x: usize,
-    y: usize,
 }
 
 const SCROLLBAR_TRACK_CHAR: char = ' ';
@@ -205,12 +166,7 @@ impl<'a> Renderer<'a> {
         }
 
         if clear {
-            self.buffer.clear_area(crate::buffer::Rect {
-                x: area.x,
-                y: area.y,
-                width: area.width,
-                height: area.height,
-            });
+            self.buffer.clear_area(area);
         }
 
         match &node.content {
@@ -254,13 +210,12 @@ impl<'a> Renderer<'a> {
                 }
             }
             NodeContent::Leaf(leaf) => {
-                let clip_rect = BufferRect::new(area.x, area.y, area.width, area.height);
                 let mut ctx = LeafRenderContext::new(
                     self.buffer,
                     self.palette,
                     &layout,
                     (node_origin.x, node_origin.y),
-                    clip_rect,
+                    area,
                     inherited_scroll_y,
                 );
                 // Override horizontal scroll into the leaf context if this node scrolls horizontally

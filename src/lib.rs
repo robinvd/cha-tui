@@ -3,6 +3,7 @@ pub mod components;
 pub mod dom;
 pub mod error;
 pub mod event;
+pub mod geometry;
 mod hash;
 pub mod oklab;
 pub mod palette;
@@ -19,6 +20,7 @@ pub use crate::dom::{
 };
 pub use crate::error::ProgramError;
 pub use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};
+pub use crate::geometry::{Point, Rect};
 pub use crate::program::{EventFn, Program, Transition, UpdateFn, ViewFn};
 pub use components::input::{
     InputMsg, InputState, InputStyle, default_keybindings as default_input_keybindings, input,
