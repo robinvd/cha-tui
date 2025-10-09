@@ -210,13 +210,19 @@ impl<'a> Renderer<'a> {
                 }
             }
             NodeContent::Leaf(leaf) => {
+                let leaf_scroll_y = if node.layout_state.style.overflow.y == taffy::Overflow::Scroll
+                {
+                    inherited_scroll_y + node.scroll_y
+                } else {
+                    inherited_scroll_y
+                };
                 let mut ctx = LeafRenderContext::new(
                     self.buffer,
                     self.palette,
                     &layout,
                     (node_origin.x, node_origin.y),
                     area,
-                    inherited_scroll_y,
+                    leaf_scroll_y,
                 );
                 // Override horizontal scroll into the leaf context if this node scrolls horizontally
                 ctx.inherited_scroll_x =

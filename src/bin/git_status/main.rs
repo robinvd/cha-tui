@@ -537,7 +537,11 @@ fn handle_key(model: &mut Model, key: Key) -> Transition {
 }
 
 fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition {
-    if let Some(msg) = default_input_keybindings(key, Msg::CommitInput) {
+    if let Some(msg) = model
+        .commit_modal
+        .as_ref()
+        .and_then(|modal| default_input_keybindings(&modal.input, key, Msg::CommitInput))
+    {
         return update(model, msg);
     }
 
@@ -977,11 +981,12 @@ fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
     .with_min_width(Dimension::ZERO);
     let input_row = row(vec![prompt, input_field])
         .with_width(Dimension::percent(1.0))
+        .with_height(Dimension::length(3.))
         .with_id("commit-modal-input-row");
 
     let content = column(vec![title, instructions, input_row])
         .with_min_width(Dimension::length(30.0))
-        .with_min_height(Dimension::length(3.0));
+        .with_min_height(Dimension::length(5.0));
 
     modal(vec![
         block_with_title("Commit", vec![content])
@@ -1282,7 +1287,6 @@ fn aggregate_code(codes: &BTreeSet<char>) -> char {
     }
 }
 
-#[derive(Default)]
 struct CommitModal {
     input: InputState,
 }
@@ -1294,6 +1298,14 @@ impl CommitModal {
 
     fn message(&self) -> String {
         self.input.value()
+    }
+}
+
+impl Default for CommitModal {
+    fn default() -> Self {
+        Self {
+            input: InputState::new_multiline(),
+        }
     }
 }
 
