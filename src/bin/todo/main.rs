@@ -321,11 +321,12 @@ fn main() -> color_eyre::Result<()> {
     install_panic_hook()?;
     init_tracing()?;
 
-    let program = Program::new(seed_model(), update, view).map_event(map_event);
+    let mut program = Program::new(seed_model(), update, view).map_event(map_event);
 
     tracing::info!("Starting TODO program");
 
-    if let Err(error) = program.run() {
+    // Drive the async runtime explicitly with smol
+    if let Err(error) = smol::block_on(program.run_async()) {
         tracing::error!(?error, "Program exited with error");
         eprintln!("Program exited with error: {:?}", error);
     }

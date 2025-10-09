@@ -395,9 +395,9 @@ fn main() -> Result<()> {
     color_eyre::install()?;
     init_tracing()?;
 
-    let program = Program::new(Model::new(), update, view).map_event(map_event);
+    let mut program = Program::new(Model::new(), update, view).map_event(map_event);
 
-    if let Err(error) = program.run() {
+    if let Err(error) = smol::block_on(program.run_async()) {
         eprintln!("Program exited with error: {:?}", error);
     }
 

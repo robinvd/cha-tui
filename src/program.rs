@@ -11,7 +11,9 @@ use crate::palette::Palette;
 use crate::render::Renderer;
 use crate::scroll::ScrollAlignment;
 
+use smol::stream::StreamExt;
 use taffy::compute_root_layout;
+use termina::EventStream;
 use termina::{PlatformTerminal, Terminal};
 use tracing::info;
 
@@ -69,6 +71,12 @@ impl<Model, Msg> Program<Model, Msg> {
     }
 
     pub fn run(mut self) -> Result<(), ProgramError> {
+        // Keep a sync entrypoint for consumers; run the async loop on the smol executor.
+        smol::block_on(self.run_async())
+    }
+
+    /// Async runtime: drives terminal I/O and event handling using termina's EventStream.
+    pub async fn run_async(&mut self) -> Result<(), ProgramError> {
         let mut terminal = PlatformTerminal::new()
             .map_err(|e| ProgramError::terminal(format!("Failed to create terminal: {}", e)))?;
 
@@ -87,7 +95,7 @@ impl<Model, Msg> Program<Model, Msg> {
             .flush()
             .map_err(|e| ProgramError::terminal(format!("Failed to flush terminal: {}", e)))?;
 
-        let result = self.event_loop(&mut terminal);
+        let result = self.event_loop_async(&mut terminal).await;
 
         // Always attempt to restore terminal state.
         // Show cursor again and disable mouse tracking + exit alternate screen.
@@ -105,12 +113,17 @@ impl<Model, Msg> Program<Model, Msg> {
         self.process_event(event, None)
     }
 
-    fn event_loop(&mut self, terminal: &mut PlatformTerminal) -> Result<(), ProgramError> {
+    async fn event_loop_async(
+        &mut self,
+        terminal: &mut PlatformTerminal,
+    ) -> Result<(), ProgramError> {
         let dimensions = terminal
             .get_dimensions()
             .map_err(|e| ProgramError::terminal(format!("Failed to get dimensions: {}", e)))?;
         let mut buffer = DoubleBuffer::new(dimensions.cols as usize, dimensions.rows as usize);
 
+        // Ensure initial size is propagated to the model/view before first render
+        let _ = self.handle_event(Event::Resize(Size::new(dimensions.cols, dimensions.rows)));
         self.render_view(&mut buffer)?;
         buffer
             .flush(terminal)
@@ -123,85 +136,42 @@ impl<Model, Msg> Program<Model, Msg> {
             .flush()
             .map_err(|e| ProgramError::terminal(format!("Failed to flush terminal: {}", e)))?;
 
-        loop {
-            // Check for terminal resize
-            let new_dimensions = terminal
-                .get_dimensions()
-                .map_err(|e| ProgramError::terminal(format!("Failed to get dimensions: {}", e)))?;
-            let (old_cols, old_rows) = buffer.dimensions();
-            if new_dimensions.cols as usize != old_cols || new_dimensions.rows as usize != old_rows
-            {
-                let (transition, needs_render) = self.handle_event(Event::Resize(Size {
-                    width: new_dimensions.cols,
-                    height: new_dimensions.rows,
-                }));
-                if needs_render {
-                    self.render_view(&mut buffer)?;
-                    buffer.flush(terminal)?;
-                }
+        // Consume events from termina asynchronously using its reader.
+        let mut events = EventStream::new(terminal.event_reader(), |_| true);
+
+        while let Some(event_res) = events.next().await {
+            let mut needs_render = false;
+            let mut should_quit = false;
+
+            let event = event_res
+                .map_err(|e| ProgramError::event(format!("Failed to read event: {}", e)))?;
+
+            if let Some(converted_event) = convert_input_event(event) {
+                let (transition, render_flag) = self.handle_event(converted_event);
+                needs_render |= render_flag;
                 if matches!(transition, Transition::Quit) {
-                    break;
+                    should_quit = true;
                 }
             }
 
-            // Poll for events with no timeout (blocking read)
-            if terminal
-                .poll(|_| true, None)
-                .map_err(|e| ProgramError::event(format!("Failed to poll events: {}", e)))?
-            {
-                let event = terminal
-                    .read(|_| true)
-                    .map_err(|e| ProgramError::event(format!("Failed to read event: {}", e)))?;
+            if needs_render {
+                self.render_view(&mut buffer)?;
+                // raw escape codes for `Synchronized Output` start
+                write!(terminal, "\x1b[?2026h").map_err(|e| {
+                    ProgramError::terminal(format!("Failed to write sync start: {}", e))
+                })?;
+                buffer.flush(terminal)?;
+                // raw escape codes for `Synchronized Output` end
+                write!(terminal, "\x1b[?2026l").map_err(|e| {
+                    ProgramError::terminal(format!("Failed to write sync end: {}", e))
+                })?;
+                terminal.flush().map_err(|e| {
+                    ProgramError::terminal(format!("Failed to flush terminal: {}", e))
+                })?;
+            }
 
-                let mut needs_render = false;
-                let mut should_quit = false;
-
-                if let Some(converted_event) = convert_input_event(event) {
-                    let (transition, render_flag) = self.handle_event(converted_event);
-                    needs_render |= render_flag;
-                    if matches!(transition, Transition::Quit) {
-                        should_quit = true;
-                    }
-                }
-
-                // Read any additional pending events with zero timeout
-                while terminal
-                    .poll(|_| true, Some(Duration::from_millis(0)))
-                    .map_err(|e| ProgramError::event(format!("Failed to poll events: {}", e)))?
-                {
-                    let event = terminal
-                        .read(|_| true)
-                        .map_err(|e| ProgramError::event(format!("Failed to read event: {}", e)))?;
-
-                    if let Some(converted_event) = convert_input_event(event) {
-                        let (transition, render_flag) = self.handle_event(converted_event);
-                        needs_render |= render_flag;
-                        if matches!(transition, Transition::Quit) {
-                            should_quit = true;
-                            break;
-                        }
-                    }
-                }
-
-                if needs_render {
-                    self.render_view(&mut buffer)?;
-                    // raw escape codes for `Synchronized Output` start
-                    write!(terminal, "\x1b[?2026h").map_err(|e| {
-                        ProgramError::terminal(format!("Failed to write sync start: {}", e))
-                    })?;
-                    buffer.flush(terminal)?;
-                    // raw escape codes for `Synchronized Output` end
-                    write!(terminal, "\x1b[?2026l").map_err(|e| {
-                        ProgramError::terminal(format!("Failed to write sync end: {}", e))
-                    })?;
-                    terminal.flush().map_err(|e| {
-                        ProgramError::terminal(format!("Failed to flush terminal: {}", e))
-                    })?;
-                }
-
-                if should_quit {
-                    break;
-                }
+            if should_quit {
+                break;
             }
         }
 
