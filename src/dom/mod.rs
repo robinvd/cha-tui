@@ -193,6 +193,7 @@ impl TextSpan {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextNode {
+    base_style: Style,
     spans: Vec<TextSpan>,
 }
 
@@ -512,7 +513,13 @@ impl<Msg> Node<Msg> {
                 element.attrs.style = style;
             }
             NodeContent::Text(text) => {
-                text.apply_uniform_style(style);
+                let prev = text.base_style.clone();
+                text.base_style = style.clone();
+                for span in &mut text.spans {
+                    if span.style == prev {
+                        span.style = style.clone();
+                    }
+                }
             }
             NodeContent::Leaf(_leaf) => {}
         }
@@ -786,13 +793,18 @@ impl TextNode {
     }
 
     pub fn from_span(content: impl Into<String>, style: Style) -> Self {
-        Self {
-            spans: vec![TextSpan::new(content, style)],
-        }
+        Self::from_spans(vec![TextSpan::new(content, style)])
     }
 
     pub fn from_spans(spans: Vec<TextSpan>) -> Self {
-        Self { spans }
+        Self {
+            spans,
+            base_style: Style::default(),
+        }
+    }
+
+    pub fn base_style(&self) -> &Style {
+        &self.base_style
     }
 
     pub fn spans(&self) -> &[TextSpan] {

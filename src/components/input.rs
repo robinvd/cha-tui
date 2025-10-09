@@ -619,9 +619,10 @@ where
     use std::rc::Rc;
 
     let spans = state.spans(style);
-    let mut node = rich_text::<Msg>(spans).with_id(id);
-    // Apply horizontal scroll to keep cursor visible
-    node = node.with_scroll_x(state.scroll_x as f32);
+    let mut node = rich_text::<Msg>(spans)
+        .with_id(id)
+        .with_scroll_x(state.scroll_x as f32)
+        .with_style(style.text.clone());
 
     let handler = Rc::new(map_msg);
     let mouse_handler = handler.clone();
@@ -819,9 +820,8 @@ mod tests {
     }
 
     #[test]
-    fn trailing_whitespace_after_cursor_uses_cursor_style() {
-        // When the cursor is at the end of the input, trailing whitespace in the row
-        // is rendered using the cursor style to visually indicate cursor position.
+    fn cursor_placeholder_cell_has_cursor_style() {
+        // Only the placeholder cell at the cursor position should adopt the cursor style.
         let state = InputState::with_value("hi");
         let style = InputStyle::default();
         let mut node = crate::input::<()>("input", &state, &style, |_| ());
@@ -869,5 +869,70 @@ mod tests {
         assert_eq!(cursor_cell.attrs.background(), Some(expected_bg));
         assert_eq!(cursor_cell.attrs.foreground(), Some(expected_fg));
         assert!(cursor_cell.attrs.is_bold());
+
+        for cell in &back[0][3..] {
+            assert_eq!(cell.attrs.background(), None);
+            assert!(!cell.attrs.is_bold());
+        }
+    }
+
+    #[test]
+    fn commit_style_cursor_tints_trailing_whitespace_with_text_style() {
+        // Regression: cursor background should not bleed into the rest of the row.
+        // Trailing whitespace should adopt the text background, matching the commit modal styling.
+        let state = InputState::with_value("hi");
+
+        let mut style = InputStyle::default();
+        style.text.bg = Some(crate::dom::Color::rgb(0x44, 0x55, 0x66));
+        style.text.fg = Some(crate::dom::Color::rgb(0x22, 0x33, 0x44));
+        style.cursor.bg = Some(crate::dom::Color::rgb(0x11, 0x22, 0x33));
+        style.cursor.fg = Some(crate::dom::Color::rgb(0xee, 0xdd, 0xcc));
+
+        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+
+        use crate::buffer::DoubleBuffer;
+        use crate::event::Size;
+        use crate::palette::{Palette, Rgba};
+        use crate::render::Renderer;
+
+        let mut buffer = DoubleBuffer::new(8, 1);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
+
+        node.layout_state.layout.size.width = 8.0;
+        node.layout_state.layout.size.height = 1.0;
+        node.layout_state.layout.location.x = 0.0;
+        node.layout_state.layout.location.y = 0.0;
+        node.layout_state.unrounded_layout.size.width = 8.0;
+        node.layout_state.unrounded_layout.size.height = 1.0;
+        node.layout_state.unrounded_layout.location.x = 0.0;
+        node.layout_state.unrounded_layout.location.y = 0.0;
+
+        renderer
+            .render(&node, Size::new(8, 1))
+            .expect("render should succeed");
+
+        let back = renderer.buffer().back_buffer();
+        let row = &back[0];
+
+        let expected_text_bg = Rgba::opaque(0x44, 0x55, 0x66);
+        let expected_cursor_bg = Rgba::opaque(0x11, 0x22, 0x33);
+        let expected_cursor_fg = Rgba::opaque(0xee, 0xdd, 0xcc);
+
+        let text_len = state.len_chars();
+        for cell in &row[..text_len] {
+            assert_eq!(cell.attrs.background(), Some(expected_text_bg));
+        }
+
+        let cursor_cell = &row[text_len];
+        assert_eq!(cursor_cell.ch, ' ');
+        assert_eq!(cursor_cell.attrs.background(), Some(expected_cursor_bg));
+        assert_eq!(cursor_cell.attrs.foreground(), Some(expected_cursor_fg));
+
+        for cell in &row[(text_len + 1)..] {
+            assert_eq!(cell.ch, ' ');
+            assert_eq!(cell.attrs.background(), Some(expected_text_bg));
+            assert_ne!(cell.attrs.background(), Some(expected_cursor_bg));
+        }
     }
 }

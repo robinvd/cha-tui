@@ -244,7 +244,6 @@ impl<'a> Renderer<'a> {
 
         let mut cursor_x = clip.x;
 
-        let mut fill_style: Option<Style> = None;
         for span in text.spans() {
             if remaining == 0 {
                 break;
@@ -280,10 +279,6 @@ impl<'a> Renderer<'a> {
                 continue;
             }
 
-            if span.style.bg.is_some() || span.style.dim {
-                fill_style = Some(span.style.clone());
-            }
-
             let attrs = style_to_attributes(self.palette, &span.style);
             self.buffer.write_text(cursor_x, clip.y, &collected, &attrs);
 
@@ -291,10 +286,8 @@ impl<'a> Renderer<'a> {
             remaining = remaining.saturating_sub(taken);
         }
 
-        if remaining > 0
-            && let Some(style) = fill_style
-        {
-            let attrs = style_to_attributes(self.palette, &style);
+        if remaining > 0 {
+            let attrs = style_to_attributes(self.palette, &text.base_style());
             let padding = " ".repeat(remaining);
             self.buffer.write_text(cursor_x, clip.y, &padding, &attrs);
         }
