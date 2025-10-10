@@ -55,8 +55,8 @@ pub fn patch<Msg>(existing: &mut Node<Msg>, new_node: Node<Msg>) -> PatchResult<
             let element_changed = patch_element(existing_element, new_element);
             layout_changed |= element_changed;
         }
-        (NodeContent::Leaf(existing_leaf), NodeContent::Leaf(new_leaf)) => {
-            if !existing_leaf.eq_leaf(&*new_leaf) {
+        (NodeContent::Renderable(existing_leaf), NodeContent::Renderable(new_leaf)) => {
+            if !existing_leaf.eq(&*new_leaf) {
                 *existing_leaf = new_leaf;
                 layout_changed = true;
             }
@@ -87,7 +87,7 @@ fn can_patch<Msg>(existing: &Node<Msg>, new_node: &Node<Msg>) -> bool {
         (NodeContent::Element(existing_element), NodeContent::Element(new_element)) => {
             existing_element.kind == new_element.kind
         }
-        (NodeContent::Leaf(_), NodeContent::Leaf(_)) => true,
+        (NodeContent::Renderable(_), NodeContent::Renderable(_)) => true,
         _ => false,
     }
 }

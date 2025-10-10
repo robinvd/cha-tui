@@ -79,7 +79,7 @@ pub fn round_layout<M>(root: &mut Node<M>) {
                 }
             }
             crate::dom::NodeContent::Text(_) => {}
-            crate::dom::NodeContent::Leaf(_) => {}
+            crate::dom::NodeContent::Renderable(_) => {}
         }
     }
 

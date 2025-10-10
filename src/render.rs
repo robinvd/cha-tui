@@ -32,7 +32,7 @@ fn style_to_attributes(palette: &Palette, style: &Style) -> CellAttributes {
     attrs
 }
 
-pub struct LeafRenderContext<'a> {
+pub struct RenderContext<'a> {
     buffer: &'a mut DoubleBuffer,
     palette: &'a Palette,
     layout: &'a TaffyLayout,
@@ -42,7 +42,7 @@ pub struct LeafRenderContext<'a> {
     inherited_scroll_x: f32,
 }
 
-impl<'a> LeafRenderContext<'a> {
+impl<'a> RenderContext<'a> {
     pub fn new(
         buffer: &'a mut DoubleBuffer,
         palette: &'a Palette,
@@ -218,14 +218,14 @@ impl<'a> Renderer<'a> {
                     self.render_hscrollbar(node_origin, area, &layout, node.scroll_x, border_style);
                 }
             }
-            NodeContent::Leaf(leaf) => {
+            NodeContent::Renderable(leaf) => {
                 let leaf_scroll_y = if node.layout_state.style.overflow.y == taffy::Overflow::Scroll
                 {
                     inherited_scroll_y + node.scroll_y
                 } else {
                     inherited_scroll_y
                 };
-                let mut ctx = LeafRenderContext::new(
+                let mut ctx = RenderContext::new(
                     self.buffer,
                     self.palette,
                     &layout,

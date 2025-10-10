@@ -7,7 +7,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use crate::event::{MouseEvent, Size};
-use crate::render::LeafRenderContext;
+use crate::render::RenderContext;
 use crate::scroll::ScrollAlignment;
 use taffy::{
     CacheTree, LayoutFlexboxContainer, Overflow, compute_cached_layout, compute_flexbox_layout,
@@ -27,7 +27,7 @@ use termwiz::cell::unicode_column_width;
 type ResizeHandler<Msg> = Rc<dyn Fn(&TaffyLayout) -> Option<Msg>>;
 
 pub trait Renderable: fmt::Debug + 'static {
-    fn eq_leaf(&self, _other: &dyn Renderable) -> bool {
+    fn eq(&self, _other: &dyn Renderable) -> bool {
         false
     }
 
@@ -38,7 +38,7 @@ pub trait Renderable: fmt::Debug + 'static {
         available_space: taffy::Size<taffy::AvailableSpace>,
     ) -> taffy::Size<f32>;
 
-    fn render(&self, ctx: &mut LeafRenderContext<'_>);
+    fn render(&self, ctx: &mut RenderContext<'_>);
 
     fn debug_label(&self) -> &'static str {
         "leaf"
@@ -47,7 +47,7 @@ pub trait Renderable: fmt::Debug + 'static {
     fn as_any(&self) -> &dyn Any;
 }
 
-pub type LeafNode = Rc<dyn Renderable>;
+pub type RenderableNode = Rc<dyn Renderable>;
 
 pub struct Node<Msg> {
     classname: &'static str,
@@ -99,7 +99,7 @@ impl<Msg> PartialEq for Node<Msg> {
 pub enum NodeContent<Msg> {
     Element(ElementNode<Msg>),
     Text(TextNode),
-    Leaf(LeafNode),
+    Renderable(RenderableNode),
 }
 
 impl<Msg> fmt::Debug for NodeContent<Msg> {
@@ -107,7 +107,7 @@ impl<Msg> fmt::Debug for NodeContent<Msg> {
         match self {
             Self::Element(e) => f.debug_tuple("Element").field(e).finish(),
             Self::Text(t) => f.debug_tuple("Text").field(t).finish(),
-            Self::Leaf(l) => f.debug_tuple("Leaf").field(l).finish(),
+            Self::Renderable(l) => f.debug_tuple("Renderable").field(l).finish(),
         }
     }
 }
@@ -117,7 +117,7 @@ impl<Msg> PartialEq for NodeContent<Msg> {
         match (self, other) {
             (Self::Element(a), Self::Element(b)) => a == b,
             (Self::Text(a), Self::Text(b)) => a == b,
-            (Self::Leaf(a), Self::Leaf(b)) => Rc::ptr_eq(a, b) || a.eq_leaf(&**b),
+            (Self::Renderable(a), Self::Renderable(b)) => Rc::ptr_eq(a, b) || a.eq(&**b),
             _ => false,
         }
     }
@@ -285,8 +285,8 @@ pub fn rich_text<Msg>(spans: impl Into<Vec<TextSpan>>) -> Node<Msg> {
     Node::new(NodeContent::Text(TextNode::from_spans(spans.into())))
 }
 
-pub fn leaf<Msg>(widget: impl Renderable + 'static) -> Node<Msg> {
-    Node::new(NodeContent::Leaf(Rc::new(widget)))
+pub fn renderable<Msg>(widget: impl Renderable + 'static) -> Node<Msg> {
+    Node::new(NodeContent::Renderable(Rc::new(widget)))
 }
 
 pub fn column<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
@@ -379,7 +379,7 @@ impl<Msg> Node<Msg> {
                 ElementKind::Modal => "modal",
             },
             NodeContent::Text(_text_node) => "text",
-            NodeContent::Leaf(leaf) => leaf.debug_label(),
+            NodeContent::Renderable(leaf) => leaf.debug_label(),
         }
     }
 
@@ -521,7 +521,7 @@ impl<Msg> Node<Msg> {
                     }
                 }
             }
-            NodeContent::Leaf(_leaf) => {}
+            NodeContent::Renderable(_leaf) => {}
         }
         self
     }
@@ -567,9 +567,9 @@ impl<Msg> Node<Msg> {
         }
     }
 
-    pub fn as_leaf(&self) -> Option<&dyn Renderable> {
+    pub fn as_renderable(&self) -> Option<&dyn Renderable> {
         match &self.content {
-            NodeContent::Leaf(leaf) => Some(leaf.as_ref()),
+            NodeContent::Renderable(leaf) => Some(leaf.as_ref()),
             _ => None,
         }
     }
@@ -588,9 +588,9 @@ impl<Msg> Node<Msg> {
         }
     }
 
-    pub fn into_leaf(self) -> Option<LeafNode> {
+    pub fn into_renderable(self) -> Option<RenderableNode> {
         match self.content {
-            NodeContent::Leaf(leaf) => Some(leaf),
+            NodeContent::Renderable(leaf) => Some(leaf),
             _ => None,
         }
     }
@@ -603,7 +603,7 @@ impl<Msg> Node<Msg> {
             match &self.content {
                 NodeContent::Element(element_node) => &element_node.children[index as usize],
                 NodeContent::Text(_) => panic!("text has no children"),
-                NodeContent::Leaf(_) => panic!("leaf has no children"),
+                NodeContent::Renderable(_) => panic!("renderable has no children"),
             }
         }
     }
@@ -616,7 +616,7 @@ impl<Msg> Node<Msg> {
             match &mut self.content {
                 NodeContent::Element(element_node) => &mut element_node.children[index as usize],
                 NodeContent::Text(_) => panic!("text has no children"),
-                NodeContent::Leaf(_) => panic!("leaf has no children"),
+                NodeContent::Renderable(_) => panic!("renderable has no children"),
             }
         }
     }
@@ -646,7 +646,7 @@ impl<Msg> Node<Msg> {
                 }
             }
             NodeContent::Text(_) => {}
-            NodeContent::Leaf(_) => {}
+            NodeContent::Renderable(_) => {}
         }
     }
 
@@ -842,7 +842,7 @@ impl<Msg> TraversePartialTree for Node<Msg> {
         match &node.content {
             NodeContent::Element(element_node) => element_node.children.len(),
             NodeContent::Text(_) => 0,
-            NodeContent::Leaf(_) => 0,
+            NodeContent::Renderable(_) => 0,
         }
     }
 
@@ -928,7 +928,7 @@ impl<Msg> LayoutPartialTree for Node<Msg> {
                         }
                     },
                 ),
-                NodeContent::Leaf(leaf) => compute_leaf_layout(
+                NodeContent::Renderable(leaf) => compute_leaf_layout(
                     inputs,
                     &node.layout_state.style,
                     |_val, _basis| 0.0,
@@ -965,18 +965,18 @@ impl<Msg> LayoutFlexboxContainer for Node<Msg> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::LeafRenderContext;
+    use crate::render::RenderContext;
     use std::any::Any;
     use taffy::style::{AlignItems, JustifyContent, LengthPercentageAuto, Position};
 
     #[derive(Clone, Debug)]
-    struct DummyLeaf {
+    struct DummyRenderable {
         label: &'static str,
         width: f32,
         height: f32,
     }
 
-    impl DummyLeaf {
+    impl DummyRenderable {
         fn new(label: &'static str, width: f32, height: f32) -> Self {
             Self {
                 label,
@@ -986,8 +986,8 @@ mod tests {
         }
     }
 
-    impl Renderable for DummyLeaf {
-        fn eq_leaf(&self, other: &dyn Renderable) -> bool {
+    impl Renderable for DummyRenderable {
+        fn eq(&self, other: &dyn Renderable) -> bool {
             other
                 .as_any()
                 .downcast_ref::<Self>()
@@ -1011,7 +1011,7 @@ mod tests {
             }
         }
 
-        fn render(&self, _ctx: &mut LeafRenderContext<'_>) {}
+        fn render(&self, _ctx: &mut RenderContext<'_>) {}
 
         fn debug_label(&self) -> &'static str {
             self.label
@@ -1116,17 +1116,17 @@ mod tests {
 
     #[test]
     fn leaf_node_preserves_widget_access() {
-        let node: Node<()> = leaf(DummyLeaf::new("dummy", 5.0, 2.0));
+        let node: Node<()> = renderable(DummyRenderable::new("dummy", 5.0, 2.0));
 
         assert_eq!(node.get_debug_label(), "dummy");
-        let leaf_ref = node.as_leaf().expect("expected leaf reference");
-        assert!(leaf_ref.eq_leaf(leaf_ref));
+        let leaf_ref = node.as_renderable().expect("expected leaf reference");
+        assert!(leaf_ref.eq(leaf_ref));
 
-        let leaf_rc = node.into_leaf().expect("expected leaf rc");
+        let leaf_rc = node.into_renderable().expect("expected leaf rc");
         let concrete = leaf_rc
             .as_ref()
             .as_any()
-            .downcast_ref::<DummyLeaf>()
+            .downcast_ref::<DummyRenderable>()
             .expect("expected DummyLeaf");
         assert_eq!(concrete.width, 5.0);
         assert_eq!(concrete.height, 2.0);
@@ -1134,9 +1134,9 @@ mod tests {
 
     #[test]
     fn leaf_partial_eq_delegates_to_widget() {
-        let a: Node<()> = leaf(DummyLeaf::new("widget", 3.0, 1.0));
-        let b: Node<()> = leaf(DummyLeaf::new("widget", 3.0, 1.0));
-        let c: Node<()> = leaf(DummyLeaf::new("widget", 4.0, 1.0));
+        let a: Node<()> = renderable(DummyRenderable::new("widget", 3.0, 1.0));
+        let b: Node<()> = renderable(DummyRenderable::new("widget", 3.0, 1.0));
+        let c: Node<()> = renderable(DummyRenderable::new("widget", 4.0, 1.0));
 
         assert_eq!(a, b);
         assert_ne!(a, c);

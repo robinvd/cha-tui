@@ -349,7 +349,7 @@ impl<Model, Msg> Program<Model, Msg> {
                     None
                 }
                 crate::dom::NodeContent::Text(_) => None,
-                crate::dom::NodeContent::Leaf(_) => None,
+                crate::dom::NodeContent::Renderable(_) => None,
             }
         }
 

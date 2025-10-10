@@ -2,10 +2,10 @@ use ropey::Rope;
 use termwiz::cell::unicode_column_width;
 
 use crate::Style;
-use crate::buffer::CursorShape;
-use crate::dom::{Color, Node, Renderable, TextSpan, leaf};
+use crate::buffer::{CellAttributes, CursorShape};
+use crate::dom::{Color, Node, Renderable, renderable};
 use crate::event::{Key, KeyCode, MouseEvent};
-use crate::render::LeafRenderContext;
+use crate::render::RenderContext;
 use taffy::AvailableSpace;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -739,69 +739,6 @@ impl Default for InputStyle {
     }
 }
 
-impl InputState {
-    pub fn spans(&self, style: &InputStyle) -> Vec<TextSpan> {
-        let selection = self.selection();
-        let len = self.len_chars();
-
-        if selection.is_none() && len == 0 {
-            return vec![TextSpan::new(style.cursor_symbol, style.cursor.clone())];
-        }
-
-        let mut spans = Vec::new();
-
-        match selection {
-            Some((start, end)) => {
-                if start > 0 {
-                    spans.push(TextSpan::new(
-                        self.rope.slice(..start).to_string(),
-                        style.text.clone(),
-                    ));
-                }
-
-                if end > start {
-                    spans.push(TextSpan::new(
-                        self.rope.slice(start..end).to_string(),
-                        style.selection.clone(),
-                    ));
-                }
-
-                if end < len {
-                    spans.push(TextSpan::new(
-                        self.rope.slice(end..).to_string(),
-                        style.text.clone(),
-                    ));
-                }
-            }
-            None => {
-                if self.cursor > 0 {
-                    spans.push(TextSpan::new(
-                        self.rope.slice(..self.cursor).to_string(),
-                        style.text.clone(),
-                    ));
-                }
-
-                if self.cursor < len {
-                    let cursor_char = self.rope.char(self.cursor).to_string();
-                    spans.push(TextSpan::new(cursor_char, style.cursor.clone()));
-
-                    let trailing = self.rope.slice((self.cursor + 1)..).to_string();
-                    if !trailing.is_empty() {
-                        spans.push(TextSpan::new(trailing, style.text.clone()));
-                    }
-                } else {
-                    spans.push(TextSpan::new(
-                        style.cursor_symbol.to_string(),
-                        style.cursor.clone(),
-                    ));
-                }
-            }
-        }
-
-        spans
-    }
-}
-
 #[derive(Clone, Debug)]
 pub enum InputMsg {
     InsertChar(char),
@@ -881,9 +818,8 @@ where
 {
     use std::rc::Rc;
 
-    let spans = state.spans(style);
-    let input_leaf = InputLeaf::new(spans, style);
-    let mut node = leaf::<Msg>(input_leaf)
+    let input_renderable = InputRenderable::new(state, style);
+    let mut node = renderable::<Msg>(input_renderable)
         .with_id(id)
         .with_scroll_x(state.scroll_x as f32)
         .with_scroll(state.scroll_y as f32);
@@ -916,110 +852,316 @@ where
 }
 
 #[derive(Clone, Debug)]
-struct InputLeaf {
-    lines: Vec<InputLine>,
+struct InputRenderable {
+    rope: Rope,
+    cursor: usize,
+    selection: Option<(usize, usize)>,
     base_style: Style,
+    selection_style: Style,
     cursor_style: Style,
+    cursor_symbol: String,
+    cursor_symbol_width: usize,
     max_width: usize,
+    line_count: usize,
+    cursor_line: usize,
+    len_chars: usize,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
-struct InputLine {
-    segments: Vec<LineSegment>,
-    width: usize,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunStyle {
+    Base,
+    Selection,
+    Cursor,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-struct LineSegment {
-    content: String,
-    style: Style,
-    width: usize,
-}
+impl InputRenderable {
+    fn new(state: &InputState, style: &InputStyle) -> Self {
+        let rope = state.rope.clone();
+        let len_chars = rope.len_chars();
+        let cursor = state.cursor.min(len_chars);
+        let selection = state.selection();
 
-impl InputLeaf {
-    fn new(spans: Vec<TextSpan>, style: &InputStyle) -> Self {
+        let base_style = style.text.clone();
+        let selection_style = style.selection.clone();
         let cursor_style = style.cursor.clone();
-        let cursor_symbol = style.cursor_symbol.to_string();
-        let mut lines = vec![InputLine::default()];
 
-        for span in spans {
-            let mut buffer = String::new();
-            for ch in span.content.chars() {
-                if ch == '\n' {
-                    if !buffer.is_empty() {
-                        let content = std::mem::take(&mut buffer);
-                        lines
-                            .last_mut()
-                            .expect("lines always has at least one entry")
-                            .push_segment(content, span.style.clone());
-                    }
-                    if span.style == cursor_style {
-                        lines
-                            .last_mut()
-                            .expect("lines always has at least one entry")
-                            .push_segment(cursor_symbol.clone(), cursor_style.clone());
-                    }
-                    lines.push(InputLine::default());
-                } else {
-                    buffer.push(ch);
+        let cursor_symbol = style.cursor_symbol.to_string();
+        let symbol_width_sum: usize = cursor_symbol
+            .chars()
+            .map(InputState::char_width)
+            .filter(|width| *width > 0)
+            .sum();
+        let cursor_symbol_width = if symbol_width_sum == 0 {
+            1
+        } else {
+            symbol_width_sum
+        };
+
+        let line_count = rope.len_lines().max(1);
+        let cursor_line = rope.char_to_line(cursor);
+        let max_width = Self::compute_max_width(
+            &rope,
+            selection,
+            cursor,
+            cursor_line,
+            len_chars,
+            cursor_symbol_width,
+        );
+
+        Self {
+            rope,
+            cursor,
+            selection,
+            base_style,
+            selection_style,
+            cursor_style,
+            cursor_symbol,
+            cursor_symbol_width,
+            max_width,
+            line_count,
+            cursor_line,
+            len_chars,
+        }
+    }
+
+    fn compute_max_width(
+        rope: &Rope,
+        selection: Option<(usize, usize)>,
+        cursor: usize,
+        cursor_line: usize,
+        len_chars: usize,
+        cursor_symbol_width: usize,
+    ) -> usize {
+        let mut max_width = 0;
+        let cursor_char = (cursor < len_chars).then(|| rope.char(cursor));
+
+        for line_idx in 0..rope.len_lines().max(1) {
+            let mut width = Self::line_display_width(rope, line_idx);
+            if selection.is_none()
+                && line_idx == cursor_line
+                && (cursor == len_chars || matches!(cursor_char, Some('\n')))
+            {
+                width += cursor_symbol_width;
+            }
+            max_width = max_width.max(width);
+        }
+
+        if max_width == 0 && selection.is_none() {
+            max_width = cursor_symbol_width.max(1);
+        }
+
+        max_width.max(1)
+    }
+
+    fn line_display_width(rope: &Rope, line_idx: usize) -> usize {
+        rope.line(line_idx)
+            .chars()
+            .filter(|&ch| ch != '\n')
+            .map(InputState::char_width)
+            .sum()
+    }
+
+    fn run_style_for_index(&self, idx: usize) -> RunStyle {
+        if let Some((start, end)) = self.selection {
+            if idx >= start && idx < end {
+                return RunStyle::Selection;
+            }
+        } else if idx == self.cursor && self.cursor < self.len_chars {
+            return RunStyle::Cursor;
+        }
+        RunStyle::Base
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn flush_run(
+        ctx: &mut RenderContext<'_>,
+        run_style: &mut Option<RunStyle>,
+        run_text: &mut String,
+        run_width: &mut usize,
+        run_start_x: &mut usize,
+        cursor_x: &mut usize,
+        remaining: &mut usize,
+        y: usize,
+        cursor_position: &mut Option<(usize, usize)>,
+        base_attrs: &CellAttributes,
+        selection_attrs: &CellAttributes,
+        cursor_attrs: &CellAttributes,
+    ) {
+        if run_text.is_empty() || *run_width == 0 {
+            run_text.clear();
+            *run_style = None;
+            *run_width = 0;
+            *run_start_x = *cursor_x;
+            return;
+        }
+
+        let style = match *run_style {
+            Some(style) => style,
+            None => {
+                run_text.clear();
+                *run_width = 0;
+                *run_start_x = *cursor_x;
+                return;
+            }
+        };
+
+        let attrs = match style {
+            RunStyle::Base => base_attrs,
+            RunStyle::Selection => selection_attrs,
+            RunStyle::Cursor => cursor_attrs,
+        };
+
+        ctx.write_text(*run_start_x, y, run_text, attrs);
+
+        if style == RunStyle::Cursor && cursor_position.is_none() {
+            cursor_position.replace((*run_start_x, y));
+        }
+
+        *cursor_x += *run_width;
+        *remaining = remaining.saturating_sub(*run_width);
+        run_text.clear();
+        *run_width = 0;
+        *run_style = None;
+        *run_start_x = *cursor_x;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_cursor_symbol(
+        &self,
+        ctx: &mut RenderContext<'_>,
+        skip_cols: &mut usize,
+        remaining: &mut usize,
+        cursor_x: &mut usize,
+        run_style: &mut Option<RunStyle>,
+        run_text: &mut String,
+        run_width: &mut usize,
+        run_start_x: &mut usize,
+        y: usize,
+        cursor_position: &mut Option<(usize, usize)>,
+        base_attrs: &CellAttributes,
+        selection_attrs: &CellAttributes,
+        cursor_attrs: &CellAttributes,
+    ) {
+        for ch in self.cursor_symbol.chars() {
+            let width = InputState::char_width(ch);
+            if width == 0 {
+                continue;
+            }
+            if *skip_cols >= width {
+                *skip_cols -= width;
+                continue;
+            } else if *skip_cols > 0 {
+                *skip_cols = 0;
+            }
+
+            if width > *remaining {
+                Self::flush_run(
+                    ctx,
+                    run_style,
+                    run_text,
+                    run_width,
+                    run_start_x,
+                    cursor_x,
+                    remaining,
+                    y,
+                    cursor_position,
+                    base_attrs,
+                    selection_attrs,
+                    cursor_attrs,
+                );
+                break;
+            }
+
+            if *run_style != Some(RunStyle::Cursor) {
+                Self::flush_run(
+                    ctx,
+                    run_style,
+                    run_text,
+                    run_width,
+                    run_start_x,
+                    cursor_x,
+                    remaining,
+                    y,
+                    cursor_position,
+                    base_attrs,
+                    selection_attrs,
+                    cursor_attrs,
+                );
+                if *remaining == 0 {
+                    break;
+                }
+                *run_style = Some(RunStyle::Cursor);
+                *run_start_x = *cursor_x;
+            }
+
+            if *run_width + width > *remaining {
+                Self::flush_run(
+                    ctx,
+                    run_style,
+                    run_text,
+                    run_width,
+                    run_start_x,
+                    cursor_x,
+                    remaining,
+                    y,
+                    cursor_position,
+                    base_attrs,
+                    selection_attrs,
+                    cursor_attrs,
+                );
+                if *remaining == 0 {
+                    break;
+                }
+                if *run_style != Some(RunStyle::Cursor) {
+                    *run_style = Some(RunStyle::Cursor);
+                    *run_start_x = *cursor_x;
                 }
             }
 
-            if !buffer.is_empty() {
-                lines
-                    .last_mut()
-                    .expect("lines always has at least one entry")
-                    .push_segment(buffer, span.style.clone());
+            if run_text.is_empty() {
+                *run_style = Some(RunStyle::Cursor);
+                *run_start_x = *cursor_x;
             }
+
+            run_text.push(ch);
+            *run_width += width;
         }
 
-        if lines.is_empty() {
-            lines.push(InputLine::default());
-        }
-
-        let max_width = lines
-            .iter()
-            .map(|line| line.width)
-            .max()
-            .unwrap_or(0)
-            .max(1);
-
-        Self {
-            lines,
-            base_style: style.text.clone(),
-            cursor_style: style.cursor.clone(),
-            max_width,
-        }
+        Self::flush_run(
+            ctx,
+            run_style,
+            run_text,
+            run_width,
+            run_start_x,
+            cursor_x,
+            remaining,
+            y,
+            cursor_position,
+            base_attrs,
+            selection_attrs,
+            cursor_attrs,
+        );
     }
 }
 
-impl InputLine {
-    fn push_segment(&mut self, content: String, style: Style) {
-        if content.is_empty() {
-            return;
-        }
-        let width = content.chars().map(InputState::char_width).sum();
-        if width == 0 {
-            return;
-        }
-        self.width += width;
-        self.segments.push(LineSegment {
-            content,
-            style,
-            width,
-        });
-    }
-}
-
-impl Renderable for InputLeaf {
-    fn eq_leaf(&self, other: &dyn Renderable) -> bool {
+impl Renderable for InputRenderable {
+    fn eq(&self, other: &dyn Renderable) -> bool {
         other
             .as_any()
             .downcast_ref::<Self>()
             .map(|o| {
-                o.lines == self.lines
+                o.rope == self.rope
+                    && o.cursor == self.cursor
+                    && o.selection == self.selection
                     && o.base_style == self.base_style
+                    && o.selection_style == self.selection_style
                     && o.cursor_style == self.cursor_style
+                    && o.cursor_symbol == self.cursor_symbol
+                    && o.cursor_symbol_width == self.cursor_symbol_width
+                    && o.max_width == self.max_width
+                    && o.line_count == self.line_count
+                    && o.cursor_line == self.cursor_line
+                    && o.len_chars == self.len_chars
             })
             .unwrap_or(false)
     }
@@ -1037,13 +1179,13 @@ impl Renderable for InputLeaf {
                 AvailableSpace::MinContent | AvailableSpace::MaxContent => self.max_width as f32,
             });
 
-        let content_height = self.lines.len().max(1) as f32;
+        let content_height = self.line_count.max(1) as f32;
         let height = known_dimensions.height.unwrap_or(content_height);
 
         taffy::Size { width, height }
     }
 
-    fn render(&self, ctx: &mut LeafRenderContext<'_>) {
+    fn render(&self, ctx: &mut RenderContext<'_>) {
         let area = ctx.area();
         if area.width == 0 || area.height == 0 {
             return;
@@ -1053,6 +1195,9 @@ impl Renderable for InputLeaf {
         let skip_cols = ctx.scroll_x().max(0.0).round() as usize;
 
         let base_attrs = ctx.style_to_attributes(&self.base_style);
+        let selection_attrs = ctx.style_to_attributes(&self.selection_style);
+        let cursor_attrs = ctx.style_to_attributes(&self.cursor_style);
+
         let blank_line = " ".repeat(area.width);
         let mut cursor_position: Option<(usize, usize)> = None;
 
@@ -1063,60 +1208,190 @@ impl Renderable for InputLeaf {
             }
 
             let line_idx = scroll_y + row;
-            let Some(line) = self.lines.get(line_idx) else {
+            if line_idx >= self.line_count {
                 continue;
-            };
+            }
 
             let mut remaining = area.width;
             let mut cursor_x = area.x;
             let mut line_skip = skip_cols;
 
-            for segment in &line.segments {
-                if remaining == 0 {
-                    break;
-                }
-                if line_skip >= segment.width {
-                    line_skip -= segment.width;
+            let mut run_style: Option<RunStyle> = None;
+            let mut run_text = String::new();
+            let mut run_width = 0usize;
+            let mut run_start_x = cursor_x;
+
+            let line_start = self.rope.line_to_char(line_idx).min(self.len_chars);
+            let line_end = if line_idx + 1 >= self.line_count {
+                self.len_chars
+            } else {
+                self.rope.line_to_char(line_idx + 1).min(self.len_chars)
+            };
+
+            let mut idx = line_start;
+            while idx < line_end {
+                let ch = self.rope.char(idx);
+                let style = self.run_style_for_index(idx);
+
+                if ch == '\n' {
+                    if style == RunStyle::Cursor && self.selection.is_none() {
+                        Self::flush_run(
+                            ctx,
+                            &mut run_style,
+                            &mut run_text,
+                            &mut run_width,
+                            &mut run_start_x,
+                            &mut cursor_x,
+                            &mut remaining,
+                            y,
+                            &mut cursor_position,
+                            &base_attrs,
+                            &selection_attrs,
+                            &cursor_attrs,
+                        );
+
+                        self.emit_cursor_symbol(
+                            ctx,
+                            &mut line_skip,
+                            &mut remaining,
+                            &mut cursor_x,
+                            &mut run_style,
+                            &mut run_text,
+                            &mut run_width,
+                            &mut run_start_x,
+                            y,
+                            &mut cursor_position,
+                            &base_attrs,
+                            &selection_attrs,
+                            &cursor_attrs,
+                        );
+                    }
+                    idx += 1;
                     continue;
                 }
 
-                let mut collected = String::new();
-                let mut taken = 0;
+                let width = InputState::char_width(ch);
+                if width == 0 {
+                    idx += 1;
+                    continue;
+                }
 
-                for ch in segment.content.chars() {
-                    let width = InputState::char_width(ch);
-                    if width == 0 {
-                        continue;
-                    }
-                    if line_skip >= width {
-                        line_skip -= width;
-                        continue;
-                    } else if line_skip > 0 {
-                        line_skip = 0;
-                    }
+                if line_skip >= width {
+                    line_skip -= width;
+                    idx += 1;
+                    continue;
+                } else if line_skip > 0 {
+                    line_skip = 0;
+                }
 
-                    if taken + width > remaining {
+                if run_style != Some(style) {
+                    Self::flush_run(
+                        ctx,
+                        &mut run_style,
+                        &mut run_text,
+                        &mut run_width,
+                        &mut run_start_x,
+                        &mut cursor_x,
+                        &mut remaining,
+                        y,
+                        &mut cursor_position,
+                        &base_attrs,
+                        &selection_attrs,
+                        &cursor_attrs,
+                    );
+                    if remaining == 0 {
                         break;
                     }
-
-                    collected.push(ch);
-                    taken += width;
+                    run_style = Some(style);
+                    run_start_x = cursor_x;
                 }
 
-                if collected.is_empty() {
-                    continue;
+                if width > remaining {
+                    Self::flush_run(
+                        ctx,
+                        &mut run_style,
+                        &mut run_text,
+                        &mut run_width,
+                        &mut run_start_x,
+                        &mut cursor_x,
+                        &mut remaining,
+                        y,
+                        &mut cursor_position,
+                        &base_attrs,
+                        &selection_attrs,
+                        &cursor_attrs,
+                    );
+                    break;
                 }
 
-                let attrs = ctx.style_to_attributes(&segment.style);
-                let start_x = cursor_x;
-                ctx.write_text(cursor_x, y, &collected, &attrs);
-
-                if cursor_position.is_none() && segment.style == self.cursor_style {
-                    cursor_position = Some((start_x, y));
+                if run_width + width > remaining {
+                    Self::flush_run(
+                        ctx,
+                        &mut run_style,
+                        &mut run_text,
+                        &mut run_width,
+                        &mut run_start_x,
+                        &mut cursor_x,
+                        &mut remaining,
+                        y,
+                        &mut cursor_position,
+                        &base_attrs,
+                        &selection_attrs,
+                        &cursor_attrs,
+                    );
+                    if remaining == 0 {
+                        break;
+                    }
+                    if run_style.is_none() {
+                        run_style = Some(style);
+                        run_start_x = cursor_x;
+                    }
                 }
 
-                cursor_x += taken;
-                remaining = remaining.saturating_sub(taken);
+                if run_style.is_none() {
+                    run_style = Some(style);
+                    run_start_x = cursor_x;
+                }
+
+                run_text.push(ch);
+                run_width += width;
+                idx += 1;
+            }
+
+            Self::flush_run(
+                ctx,
+                &mut run_style,
+                &mut run_text,
+                &mut run_width,
+                &mut run_start_x,
+                &mut cursor_x,
+                &mut remaining,
+                y,
+                &mut cursor_position,
+                &base_attrs,
+                &selection_attrs,
+                &cursor_attrs,
+            );
+
+            if self.selection.is_none()
+                && self.cursor == self.len_chars
+                && line_idx == self.cursor_line
+            {
+                self.emit_cursor_symbol(
+                    ctx,
+                    &mut line_skip,
+                    &mut remaining,
+                    &mut cursor_x,
+                    &mut run_style,
+                    &mut run_text,
+                    &mut run_width,
+                    &mut run_start_x,
+                    y,
+                    &mut cursor_position,
+                    &base_attrs,
+                    &selection_attrs,
+                    &cursor_attrs,
+                );
             }
         }
 
@@ -1300,10 +1575,9 @@ mod tests {
         let mut style = InputStyle::default();
         style.cursor_symbol = "|";
 
-        let spans = state.spans(&style);
-        let leaf = InputLeaf::new(spans.clone(), &style);
+        let renderable = InputRenderable::new(&state, &style);
         assert_eq!(state.scroll_x(), 0);
-        assert_eq!(leaf.lines.len(), 2);
+        assert_eq!(renderable.line_count, 2);
 
         let mut node = crate::input::<()>("input", &state, &style, |_| ());
 
@@ -1386,30 +1660,60 @@ mod tests {
     }
 
     #[test]
-    fn spans_highlight_character_under_cursor() {
+    fn cursor_highlights_character_under_cursor() {
         let mut state = InputState::with_value("abc");
         state.update(InputMsg::MoveToStart { extend: false });
         let style = InputStyle::default();
-        let spans = state.spans(&style);
+        let mut node = crate::input::<()>("input", &state, &style, |_| ());
 
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].content, "a");
-        assert_eq!(spans[0].style, style.cursor);
-        assert_eq!(spans[1].content, "bc");
-        assert_eq!(spans[1].style, style.text);
-    }
+        use crate::buffer::{CursorShape, CursorState, DoubleBuffer};
+        use crate::dom::rounding::round_layout;
+        use crate::event::Size;
+        use crate::palette::{Palette, Rgba};
+        use crate::render::Renderer;
+        use taffy::{AvailableSpace, compute_root_layout};
 
-    #[test]
-    fn spans_render_placeholder_when_cursor_at_end() {
-        let state = InputState::with_value("hi");
-        let style = InputStyle::default();
-        let spans = state.spans(&style);
+        let mut buffer = DoubleBuffer::new(4, 1);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
 
-        assert_eq!(spans.len(), 2);
-        assert_eq!(spans[0].content, "hi");
-        assert_eq!(spans[0].style, style.text);
-        assert_eq!(spans[1].content, style.cursor_symbol);
-        assert_eq!(spans[1].style, style.cursor);
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: AvailableSpace::Definite(4.0),
+                height: AvailableSpace::Definite(1.0),
+            },
+        );
+        round_layout(&mut node);
+
+        renderer
+            .render(&node, Size::new(4, 1))
+            .expect("render should succeed");
+
+        let back = renderer.buffer().back_buffer();
+        let cursor_cell = &back[0][0];
+        let expected_bg = Rgba::opaque(229, 229, 229);
+        let expected_fg = Rgba::opaque(0, 0, 0);
+
+        assert_eq!(cursor_cell.ch, 'a');
+        assert_eq!(cursor_cell.attrs.background(), Some(expected_bg));
+        assert_eq!(cursor_cell.attrs.foreground(), Some(expected_fg));
+        assert!(cursor_cell.attrs.is_bold());
+
+        let next_cell = &back[0][1];
+        assert_eq!(next_cell.ch, 'b');
+        assert_eq!(next_cell.attrs.background(), None);
+        assert!(!next_cell.attrs.is_bold());
+
+        assert_eq!(
+            renderer.buffer().cursor_state(),
+            CursorState::Position {
+                x: 0,
+                y: 0,
+                shape: CursorShape::BlinkingBar
+            }
+        );
     }
 
     #[test]

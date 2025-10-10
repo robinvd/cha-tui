@@ -9,9 +9,9 @@ use std::path::Path;
 use std::process::Command;
 
 use chatui::components::scroll::{ScrollMsg, ScrollState, ScrollTarget, scrollable_content};
-use chatui::dom::{Node, Renderable, TextSpan, leaf};
+use chatui::dom::{Node, Renderable, TextSpan, renderable};
 use chatui::event::{Event, Key, KeyCode};
-use chatui::render::LeafRenderContext;
+use chatui::render::RenderContext;
 use chatui::{
     InputMsg, InputState, InputStyle, Program, Style, Transition, block_with_title, column,
     default_input_keybindings, input, modal, rich_text, row, text,
@@ -848,7 +848,7 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
         .with_flex_basis(Dimension::ZERO);
     }
 
-    leaf(DiffLeaf::new(lines.to_vec()))
+    renderable(DiffLeaf::new(lines.to_vec()))
         .with_width(Dimension::percent(1.0))
         // .with_flex_grow(1.0)
         // .with_flex_basis(Dimension::ZERO)
@@ -868,7 +868,7 @@ impl DiffLeaf {
 }
 
 impl Renderable for DiffLeaf {
-    fn eq_leaf(&self, other: &dyn Renderable) -> bool {
+    fn eq(&self, other: &dyn Renderable) -> bool {
         other
             .as_any()
             .downcast_ref::<Self>()
@@ -900,7 +900,7 @@ impl Renderable for DiffLeaf {
         taffy::Size { width, height }
     }
 
-    fn render(&self, ctx: &mut LeafRenderContext<'_>) {
+    fn render(&self, ctx: &mut RenderContext<'_>) {
         let area = ctx.area();
         // Use the inherited scroll from ancestors to determine the first
         // content row to render. This allows the scrollbar to move the visible
