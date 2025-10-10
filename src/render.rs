@@ -1,4 +1,4 @@
-use crate::buffer::{CellAttributes, DoubleBuffer};
+use crate::buffer::{CellAttributes, CursorShape, DoubleBuffer};
 use crate::dom::{Color, ElementKind, ElementNode, Node, NodeContent, Style, TextNode};
 use crate::error::ProgramError;
 use crate::event::Size;
@@ -98,6 +98,14 @@ impl<'a> LeafRenderContext<'a> {
         self.buffer.clear_area(rect);
     }
 
+    pub fn set_cursor(&mut self, x: usize, y: usize, shape: CursorShape) {
+        self.buffer.set_cursor(x, y, shape);
+    }
+
+    pub fn clear_cursor(&mut self) {
+        self.buffer.clear_cursor();
+    }
+
     pub fn scroll_y(&self) -> f32 {
         self.inherited_scroll_y
     }
@@ -126,6 +134,7 @@ impl<'a> Renderer<'a> {
 
         self.buffer.resize(width, height);
         self.buffer.clear();
+        self.buffer.clear_cursor();
 
         let clip = Rect {
             x: 0,
@@ -293,7 +302,7 @@ impl<'a> Renderer<'a> {
         }
 
         if remaining > 0 {
-            let attrs = style_to_attributes(self.palette, &text.base_style());
+            let attrs = style_to_attributes(self.palette, text.base_style());
             let padding = " ".repeat(remaining);
             self.buffer.write_text(cursor_x, clip.y, &padding, &attrs);
         }

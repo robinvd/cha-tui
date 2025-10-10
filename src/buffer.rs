@@ -72,6 +72,63 @@ impl Cell {
     }
 }
 
+/// Cursor render shape options supported by the terminal
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorShape {
+    BlinkingBlock,
+    SteadyBlock,
+    BlinkingUnderline,
+    SteadyUnderline,
+    BlinkingBar,
+    SteadyBar,
+}
+
+impl CursorShape {
+    fn parameter(self) -> u8 {
+        match self {
+            Self::BlinkingBlock => 1,
+            Self::SteadyBlock => 2,
+            Self::BlinkingUnderline => 3,
+            Self::SteadyUnderline => 4,
+            Self::BlinkingBar => 5,
+            Self::SteadyBar => 6,
+        }
+    }
+}
+
+impl Default for CursorShape {
+    fn default() -> Self {
+        Self::BlinkingBlock
+    }
+}
+
+/// Cursor state tracked by the double buffer
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorState {
+    Hidden,
+    Position {
+        x: usize,
+        y: usize,
+        shape: CursorShape,
+    },
+}
+
+impl CursorState {
+    pub fn hidden() -> Self {
+        Self::Hidden
+    }
+
+    pub fn positioned(x: usize, y: usize, shape: CursorShape) -> Self {
+        Self::Position { x, y, shape }
+    }
+}
+
+impl Default for CursorState {
+    fn default() -> Self {
+        Self::Hidden
+    }
+}
+
 /// Double-buffered in-memory buffer that renders diffs to the terminal
 pub struct DoubleBuffer {
     width: usize,
@@ -82,6 +139,10 @@ pub struct DoubleBuffer {
     front_invalid: bool,
     /// The back buffer - what we're currently rendering to
     back: Vec<Vec<Cell>>,
+    /// Cursor state last rendered
+    front_cursor: CursorState,
+    /// Desired cursor state for next flush
+    back_cursor: CursorState,
 }
 
 impl DoubleBuffer {
@@ -97,6 +158,8 @@ impl DoubleBuffer {
             front,
             back,
             front_invalid: false,
+            front_cursor: CursorState::default(),
+            back_cursor: CursorState::default(),
         }
     }
 
@@ -118,6 +181,8 @@ impl DoubleBuffer {
         self.front = vec![blank_row.clone(); height];
         self.back = vec![blank_row; height];
         self.front_invalid = true;
+        self.front_cursor = CursorState::Hidden;
+        self.back_cursor = CursorState::Hidden;
     }
 
     /// Clear the back buffer to blank cells
@@ -224,6 +289,41 @@ impl DoubleBuffer {
         self.back.get_mut(y).and_then(|row| row.get_mut(x))
     }
 
+    /// Set the desired cursor state for the next flush
+    pub fn set_cursor_state(&mut self, state: CursorState) {
+        self.back_cursor = match state {
+            CursorState::Position { x, y, shape } => {
+                if self.width == 0 || self.height == 0 {
+                    CursorState::Hidden
+                } else {
+                    let clamped_x = x.min(self.width.saturating_sub(1));
+                    let clamped_y = y.min(self.height.saturating_sub(1));
+                    CursorState::Position {
+                        x: clamped_x,
+                        y: clamped_y,
+                        shape,
+                    }
+                }
+            }
+            CursorState::Hidden => CursorState::Hidden,
+        };
+    }
+
+    /// Convenience helper to configure a visible cursor
+    pub fn set_cursor(&mut self, x: usize, y: usize, shape: CursorShape) {
+        self.set_cursor_state(CursorState::Position { x, y, shape });
+    }
+
+    /// Hide the cursor on next flush
+    pub fn clear_cursor(&mut self) {
+        self.set_cursor_state(CursorState::Hidden);
+    }
+
+    /// Inspect the desired cursor state (exposed for testing)
+    pub fn cursor_state(&self) -> CursorState {
+        self.back_cursor
+    }
+
     /// Fill a rectangular area with the given character and attributes
     pub fn fill_rect(&mut self, rect: Rect, ch: char, attrs: &CellAttributes) {
         let end_y = (rect.y + rect.height).min(self.height);
@@ -241,6 +341,7 @@ impl DoubleBuffer {
         let mut buffer = String::new();
         let mut current_attrs = CellAttributes::default();
         let mut wrote_anything = false;
+        let cursor_changed = self.front_invalid || self.front_cursor != self.back_cursor;
 
         for y in 0..self.height {
             let mut run_start = None;
@@ -319,6 +420,19 @@ impl DoubleBuffer {
             write!(buffer, "\x1b[0m")?;
         }
 
+        if cursor_changed {
+            match self.back_cursor {
+                CursorState::Hidden => {
+                    buffer.push_str("\x1b[?25l");
+                }
+                CursorState::Position { x, y, shape } => {
+                    write!(buffer, "\x1b[{} q", shape.parameter())?;
+                    buffer.push_str("\x1b[?25h");
+                    write!(buffer, "\x1b[{};{}H", y + 1, x + 1)?;
+                }
+            }
+        }
+
         // Send all changes to the terminal
         if !buffer.is_empty() {
             writer.write_all(buffer.as_bytes())?;
@@ -327,6 +441,8 @@ impl DoubleBuffer {
 
         // Swap buffers - back becomes front
         std::mem::swap(&mut self.front, &mut self.back);
+        self.front_cursor = self.back_cursor;
+        self.front_invalid = false;
 
         Ok(())
     }
@@ -799,5 +915,62 @@ mod tests {
             !positions.is_empty(),
             "Should have at least one reset sequence"
         );
+    }
+
+    #[test]
+    fn flush_emits_cursor_sequences_when_position_changes() {
+        let mut buffer = DoubleBuffer::new(4, 2);
+        buffer.set_cursor(1, 1, CursorShape::SteadyUnderline);
+
+        let mut output = Vec::new();
+        buffer.flush(&mut output).expect("flush should succeed");
+        let output_str = String::from_utf8(output).expect("cursor output must be valid UTF-8");
+
+        assert!(
+            output_str.contains("\x1b[4 q"),
+            "Expected steady underline cursor shape sequence"
+        );
+        assert!(
+            output_str.contains("\x1b[?25h"),
+            "Expected cursor to be made visible"
+        );
+        assert!(
+            output_str.contains("\x1b[2;2H"),
+            "Expected cursor to move to requested position"
+        );
+    }
+
+    #[test]
+    fn flush_hides_cursor_when_cleared() {
+        let mut buffer = DoubleBuffer::new(3, 1);
+        buffer.set_cursor(0, 0, CursorShape::BlinkingBlock);
+        buffer
+            .flush(&mut Vec::new())
+            .expect("initial flush should succeed");
+
+        buffer.clear_cursor();
+
+        let mut output = Vec::new();
+        buffer.flush(&mut output).expect("flush should succeed");
+        let output_str = String::from_utf8(output).expect("cursor hide output must be valid UTF-8");
+
+        assert!(
+            output_str.contains("\x1b[?25l"),
+            "Expected cursor hide sequence to be emitted"
+        );
+    }
+
+    #[test]
+    fn set_cursor_clamps_to_buffer_bounds() {
+        let mut buffer = DoubleBuffer::new(2, 2);
+        buffer.set_cursor(10, 5, CursorShape::BlinkingBar);
+
+        match buffer.cursor_state() {
+            CursorState::Position { x, y, .. } => {
+                assert_eq!(x, 1);
+                assert_eq!(y, 1);
+            }
+            other => panic!("Expected positioned cursor, got {:?}", other),
+        }
     }
 }

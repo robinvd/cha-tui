@@ -2,6 +2,7 @@ use ropey::Rope;
 use termwiz::cell::unicode_column_width;
 
 use crate::Style;
+use crate::buffer::CursorShape;
 use crate::dom::{Color, Node, Renderable, TextSpan, leaf};
 use crate::event::{Key, KeyCode, MouseEvent};
 use crate::render::LeafRenderContext;
@@ -918,6 +919,7 @@ where
 struct InputLeaf {
     lines: Vec<InputLine>,
     base_style: Style,
+    cursor_style: Style,
     max_width: usize,
 }
 
@@ -985,6 +987,7 @@ impl InputLeaf {
         Self {
             lines,
             base_style: style.text.clone(),
+            cursor_style: style.cursor.clone(),
             max_width,
         }
     }
@@ -1013,7 +1016,11 @@ impl Renderable for InputLeaf {
         other
             .as_any()
             .downcast_ref::<Self>()
-            .map(|o| o.lines == self.lines && o.base_style == self.base_style)
+            .map(|o| {
+                o.lines == self.lines
+                    && o.base_style == self.base_style
+                    && o.cursor_style == self.cursor_style
+            })
             .unwrap_or(false)
     }
 
@@ -1047,6 +1054,7 @@ impl Renderable for InputLeaf {
 
         let base_attrs = ctx.style_to_attributes(&self.base_style);
         let blank_line = " ".repeat(area.width);
+        let mut cursor_position: Option<(usize, usize)> = None;
 
         for row in 0..area.height {
             let y = area.y + row;
@@ -1100,11 +1108,20 @@ impl Renderable for InputLeaf {
                 }
 
                 let attrs = ctx.style_to_attributes(&segment.style);
+                let start_x = cursor_x;
                 ctx.write_text(cursor_x, y, &collected, &attrs);
+
+                if cursor_position.is_none() && segment.style == self.cursor_style {
+                    cursor_position = Some((start_x, y));
+                }
 
                 cursor_x += taken;
                 remaining = remaining.saturating_sub(taken);
             }
+        }
+
+        if let Some((x, y)) = cursor_position {
+            ctx.set_cursor(x, y, CursorShape::BlinkingBar);
         }
     }
 
@@ -1485,7 +1502,7 @@ mod tests {
         let style = InputStyle::default();
         let mut node = crate::input::<()>("input", &state, &style, |_| ());
 
-        use crate::buffer::DoubleBuffer;
+        use crate::buffer::{CursorShape, CursorState, DoubleBuffer};
         use crate::dom::rounding::round_layout;
         use crate::event::Size;
         use crate::palette::{Palette, Rgba};
@@ -1533,6 +1550,15 @@ mod tests {
             assert_eq!(cell.attrs.background(), None);
             assert!(!cell.attrs.is_bold());
         }
+
+        assert_eq!(
+            renderer.buffer().cursor_state(),
+            CursorState::Position {
+                x: 2,
+                y: 0,
+                shape: CursorShape::BlinkingBar
+            }
+        );
     }
 
     #[test]
