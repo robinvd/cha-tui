@@ -141,8 +141,6 @@ impl Default for LayoutState {
             layout: TaffyLayout::new(),
             size_dirty: false,
         };
-        new.style.overflow.x = Overflow::Clip;
-        new.style.overflow.y = Overflow::Clip;
         new.style.scrollbar_width = 1.;
         new
     }
