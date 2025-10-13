@@ -1429,15 +1429,82 @@ impl DirBuilder {
     }
 
     fn into_tree_node(self) -> TreeNode<FileNodeId> {
-        let children = self
-            .children
+        let DirBuilder {
+            name,
+            path,
+            children,
+            codes,
+        } = self;
+
+        let mut labels = Vec::new();
+        if !name.is_empty() {
+            labels.push(name);
+        }
+
+        let mut path_acc = path;
+        let mut children_map = children;
+        let code = aggregate_code(&codes);
+        let mut collapsed = false;
+
+        loop {
+            if children_map.len() != 1 {
+                break;
+            }
+
+            let (child_key, child_builder) = children_map.into_iter().next().unwrap();
+            match child_builder {
+                NodeBuilder::Dir(dir) => {
+                    collapsed = true;
+                    let DirBuilder {
+                        name: child_name,
+                        path: child_path,
+                        children: child_children,
+                        codes: _,
+                    } = dir;
+                    if !child_name.is_empty() {
+                        labels.push(child_name);
+                    } else if !child_key.is_empty() {
+                        labels.push(child_key);
+                    }
+                    path_acc = child_path;
+                    children_map = child_children;
+                }
+                NodeBuilder::File(file) => {
+                    let mut map = BTreeMap::new();
+                    map.insert(child_key, NodeBuilder::File(file));
+                    children_map = map;
+                    break;
+                }
+            }
+        }
+
+        let label_name = if collapsed {
+            let joined = if labels.is_empty() {
+                path_acc.clone()
+            } else {
+                labels.join("/")
+            };
+            if joined.is_empty() {
+                String::from("/")
+            } else {
+                format!("{joined}/")
+            }
+        } else if let Some(last) = labels.last() {
+            last.clone()
+        } else if !path_acc.is_empty() {
+            path_acc.clone()
+        } else {
+            String::from(".")
+        };
+
+        let children = children_map
             .into_values()
             .map(|child| child.into_tree_node())
             .collect();
-        let code = aggregate_code(&self.codes);
-        let label = format!("{} {}", code, self.name);
+
+        let label = format!("{} {}", code, label_name);
         let node = TreeNode::branch(
-            FileNodeId::Dir(self.path),
+            FileNodeId::Dir(path_acc),
             vec![TextSpan::new(label, Style::default())],
             children,
         );
@@ -2628,6 +2695,55 @@ mod tests {
                 .first()
                 .map(|span| span.content.starts_with('*'))
                 .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn collapses_single_child_directories_into_path_segments() {
+        let entries = vec![FileEntry::new(
+            "src/dom/mod.rs".into(),
+            'M',
+            "M src/dom/mod.rs".into(),
+        )];
+
+        let nodes = build_file_tree(&entries);
+        assert_eq!(nodes.len(), 1);
+
+        let directory = nodes.first().expect("directory node");
+        match &directory.id {
+            FileNodeId::Dir(path) => assert_eq!(path, "src/dom"),
+            other => panic!("expected collapsed directory id, got {other:?}"),
+        }
+
+        let dir_label = directory
+            .label
+            .first()
+            .expect("directory label span")
+            .content
+            .clone();
+        assert!(
+            dir_label.starts_with('M'),
+            "expected status marker, got {dir_label:?}"
+        );
+        assert!(
+            dir_label.contains("src/dom/"),
+            "expected directory label to include collapsed path, got {dir_label:?}"
+        );
+
+        assert_eq!(directory.children.len(), 1);
+        let file = directory.children.first().expect("file node");
+        match &file.id {
+            FileNodeId::File(path) => assert_eq!(path, "src/dom/mod.rs"),
+            other => panic!("expected file id, got {other:?}"),
+        }
+        let file_label = file.label.first().expect("file label span").content.clone();
+        assert!(
+            file_label.starts_with('M'),
+            "expected status marker, got {file_label:?}"
+        );
+        assert!(
+            file_label.ends_with("mod.rs"),
+            "expected file label to show file name, got {file_label:?}"
         );
     }
 

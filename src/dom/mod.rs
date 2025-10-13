@@ -146,7 +146,6 @@ impl Default for LayoutState {
     }
 }
 
-// #[derive(Clone)]
 pub struct ElementNode<Msg> {
     pub kind: ElementKind,
     pub attrs: Attributes,
