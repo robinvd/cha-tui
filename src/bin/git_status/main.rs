@@ -340,6 +340,18 @@ mod shortcuts {
             msg: Some(Msg::ScrollDiffHorizontal(-4)),
         },
         Shortcut {
+            label: "n",
+            description: "Toggle line numbers",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('n'),
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::ToggleDiffLineNumbers),
+        },
+        Shortcut {
             label: "r",
             description: "Refresh status",
             show_in_bar: true,
@@ -501,6 +513,10 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
         }
         Msg::ToggleShortcutsHelp => {
             model.toggle_shortcuts_help();
+            Transition::Continue
+        }
+        Msg::ToggleDiffLineNumbers => {
+            model.toggle_diff_line_numbers();
             Transition::Continue
         }
         Msg::SubmitCommit => model.submit_commit(),
@@ -788,7 +804,13 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
         &model.diff_scroll,
         3,
         Msg::DiffScroll,
-        block_with_title(diff_title, vec![render_diff_lines(&model.diff_lines)]),
+        block_with_title(
+            diff_title,
+            vec![render_diff_lines(
+                &model.diff_lines,
+                model.show_diff_line_numbers,
+            )],
+        ),
     )
     .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
@@ -868,7 +890,7 @@ fn render_shortcuts_bar(model: &Model) -> Node<Msg> {
     .with_id("shortcuts-bar")
 }
 
-fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
+fn render_diff_lines(lines: &[DiffLine], show_line_numbers: bool) -> Node<Msg> {
     if lines.is_empty() {
         return column(vec![
             text::<Msg>("No diff available").with_style(inactive_style()),
@@ -878,7 +900,7 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
         .with_flex_basis(Dimension::ZERO);
     }
 
-    renderable(DiffLeaf::new(lines.to_vec()))
+    renderable(DiffLeaf::new(lines.to_vec(), show_line_numbers))
         .with_flex_shrink(0.)
         .with_overflow_y(taffy::Overflow::Visible)
         .with_overflow_x(taffy::Overflow::Visible)
@@ -888,11 +910,18 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
 #[derive(Clone, Debug)]
 struct DiffLeaf {
     lines: Vec<DiffLine>,
+    gutter: Option<GutterConfig>,
 }
 
 impl DiffLeaf {
-    fn new(lines: Vec<DiffLine>) -> Self {
-        Self { lines }
+    fn new(lines: Vec<DiffLine>, show_line_numbers: bool) -> Self {
+        let gutter = if show_line_numbers {
+            GutterConfig::from_lines(&lines)
+        } else {
+            None
+        };
+
+        Self { lines, gutter }
     }
 }
 
@@ -901,7 +930,7 @@ impl Renderable for DiffLeaf {
         other
             .as_any()
             .downcast_ref::<Self>()
-            .map(|o| o.lines == self.lines)
+            .map(|o| o.lines == self.lines && o.gutter == self.gutter)
             .unwrap_or(false)
     }
 
@@ -912,10 +941,15 @@ impl Renderable for DiffLeaf {
         available_space: taffy::Size<taffy::AvailableSpace>,
     ) -> taffy::Size<f32> {
         let height = self.lines.len() as f32;
+        let gutter_width = self
+            .gutter
+            .as_ref()
+            .map(|gutter| gutter.total_width())
+            .unwrap_or_default();
         let max_width = self
             .lines
             .iter()
-            .map(|l| l.spans.iter().map(|s| s.content.len()).sum::<usize>())
+            .map(|l| gutter_width + l.spans.iter().map(|s| s.content.len()).sum::<usize>())
             .max()
             .unwrap_or(0) as f32;
 
@@ -943,6 +977,8 @@ impl Renderable for DiffLeaf {
 
         info!("diff render, {}:{}", ctx.scroll_x(), ctx.scroll_y());
 
+        let gutter_style = line_number_style();
+
         for (i, line_idx) in (0..visible_height).enumerate() {
             let idx = start_idx + line_idx;
             let y = area.y + i;
@@ -954,6 +990,35 @@ impl Renderable for DiffLeaf {
             let mut cursor_x = area.x;
             let mut fill_style: Option<Style> = None;
             let mut remaining_skip = skip_cols;
+
+            if let Some(gutter) = &self.gutter {
+                let gutter_text = gutter.format_line(&self.lines[idx]);
+                let mut chars = gutter_text.chars();
+
+                if remaining_skip > 0 {
+                    let skipped = chars.by_ref().take(remaining_skip).count();
+                    remaining_skip = remaining_skip.saturating_sub(skipped);
+                }
+
+                if remaining_skip == 0 && remaining > 0 {
+                    let mut collected = String::new();
+                    let mut taken = 0;
+                    for ch in chars {
+                        if remaining == 0 {
+                            break;
+                        }
+                        collected.push(ch);
+                        taken += 1;
+                        remaining = remaining.saturating_sub(1);
+                    }
+
+                    if !collected.is_empty() {
+                        let attrs = ctx.style_to_attributes(&gutter_style);
+                        ctx.write_text(cursor_x, y, &collected, &attrs);
+                        cursor_x += taken;
+                    }
+                }
+            }
             for span in &self.lines[idx].spans {
                 if remaining == 0 {
                     break;
@@ -1006,6 +1071,91 @@ impl Renderable for DiffLeaf {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct GutterConfig {
+    old_width: usize,
+    new_width: usize,
+}
+
+impl GutterConfig {
+    fn from_lines(lines: &[DiffLine]) -> Option<Self> {
+        let mut has_numbers = false;
+        let mut old_width = 0;
+        let mut new_width = 0;
+
+        for line in lines {
+            if let Some(numbers) = &line.line_numbers {
+                if let Some(old) = numbers.old {
+                    has_numbers = true;
+                    old_width = old_width.max(digit_count(old));
+                }
+                if let Some(new) = numbers.new {
+                    has_numbers = true;
+                    new_width = new_width.max(digit_count(new));
+                }
+            }
+        }
+
+        has_numbers.then_some(Self {
+            old_width,
+            new_width,
+        })
+    }
+
+    fn total_width(&self) -> usize {
+        self.old_display_width() + 1 + self.new_display_width() + 3
+    }
+
+    fn format_line(&self, line: &DiffLine) -> String {
+        let (old, new) = line
+            .line_numbers
+            .as_ref()
+            .map(|numbers| {
+                (
+                    numbers
+                        .old
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                    numbers
+                        .new
+                        .map(|value| value.to_string())
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap_or_else(|| (String::new(), String::new()));
+
+        format!(
+            "{old:>old_width$} {new:>new_width$} | ",
+            old = old,
+            new = new,
+            old_width = self.old_display_width(),
+            new_width = self.new_display_width(),
+        )
+    }
+
+    fn old_display_width(&self) -> usize {
+        self.old_width.max(1)
+    }
+
+    fn new_display_width(&self) -> usize {
+        self.new_width.max(1)
+    }
+}
+
+fn digit_count(value: usize) -> usize {
+    let mut digits = 1;
+    let mut n = value;
+    while n >= 10 {
+        n /= 10;
+        digits += 1;
+    }
+    digits
+}
+
+fn normalized_number(value: usize) -> Option<usize> {
+    (value != 0).then_some(value)
 }
 
 fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
@@ -1085,6 +1235,12 @@ fn title_style() -> Style {
 
 fn error_style() -> Style {
     Style::fg(highlight::EVERFOREST_RED)
+}
+
+fn line_number_style() -> Style {
+    let mut style = Style::fg(highlight::EVERFOREST_GREY2);
+    style.dim = true;
+    style
 }
 
 fn inactive_style() -> Style {
@@ -1387,6 +1543,7 @@ struct Model {
     commit_modal: Option<CommitModal>,
     delete_modal: Option<DeleteModal>,
     show_all_shortcuts: bool,
+    show_diff_line_numbers: bool,
     current_branch: Option<String>,
 }
 
@@ -1571,6 +1728,10 @@ impl Model {
 
     fn toggle_shortcuts_help(&mut self) {
         self.show_all_shortcuts = !self.show_all_shortcuts;
+    }
+
+    fn toggle_diff_line_numbers(&mut self) {
+        self.show_diff_line_numbers = !self.show_diff_line_numbers;
     }
 
     fn submit_commit(&mut self) -> Transition {
@@ -2003,6 +2164,7 @@ enum Msg {
     OpenCommitModal,
     OpenDeleteModal,
     ToggleShortcutsHelp,
+    ToggleDiffLineNumbers,
     SubmitCommit,
     CancelCommit,
     CommitInput(InputMsg),
@@ -2023,6 +2185,13 @@ enum SectionMsg {
 #[derive(Clone, Debug, PartialEq)]
 struct DiffLine {
     spans: Vec<TextSpan>,
+    line_numbers: Option<LineNumbers>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct LineNumbers {
+    old: Option<usize>,
+    new: Option<usize>,
 }
 
 impl DiffLine {
@@ -2030,6 +2199,7 @@ impl DiffLine {
         let content = content.into();
         Self {
             spans: vec![TextSpan::new(content, Style::default())],
+            line_numbers: None,
         }
     }
 
@@ -2040,11 +2210,20 @@ impl DiffLine {
         }
         Self {
             spans: vec![TextSpan::new(content, style)],
+            line_numbers: None,
         }
     }
 
     fn from_spans(spans: Vec<TextSpan>) -> Self {
-        Self { spans }
+        Self {
+            spans,
+            line_numbers: None,
+        }
+    }
+
+    fn with_line_numbers(mut self, old: Option<usize>, new: Option<usize>) -> Self {
+        self.line_numbers = Some(LineNumbers { old, new });
+        self
     }
 }
 
@@ -2426,21 +2605,39 @@ fn build_diff_lines(diff: &str, versions: &FileVersions) -> Vec<DiffLine> {
 
         if let Some(content) = line.strip_prefix('+') {
             let spans = highlight_with_fallback(versions.new.as_ref(), new_line, content);
-            result.push(DiffLine::from_spans(with_prefix('+', spans)));
+            let mut diff_line = DiffLine::from_spans(with_prefix('+', spans));
+            let old_number = None;
+            let new_number = normalized_number(new_line);
+            if old_number.is_some() || new_number.is_some() {
+                diff_line = diff_line.with_line_numbers(old_number, new_number);
+            }
+            result.push(diff_line);
             new_line = new_line.saturating_add(1);
             continue;
         }
 
         if let Some(content) = line.strip_prefix('-') {
             let spans = highlight_with_fallback(versions.old.as_ref(), old_line, content);
-            result.push(DiffLine::from_spans(with_prefix('-', spans)));
+            let mut diff_line = DiffLine::from_spans(with_prefix('-', spans));
+            let old_number = normalized_number(old_line);
+            let new_number = None;
+            if old_number.is_some() || new_number.is_some() {
+                diff_line = diff_line.with_line_numbers(old_number, new_number);
+            }
+            result.push(diff_line);
             old_line = old_line.saturating_add(1);
             continue;
         }
 
         if let Some(content) = line.strip_prefix(' ') {
             let spans = highlight_with_fallback(versions.new.as_ref(), new_line, content);
-            result.push(DiffLine::from_spans(with_prefix(' ', spans)));
+            let mut diff_line = DiffLine::from_spans(with_prefix(' ', spans));
+            let old_number = normalized_number(old_line);
+            let new_number = normalized_number(new_line);
+            if old_number.is_some() || new_number.is_some() {
+                diff_line = diff_line.with_line_numbers(old_number, new_number);
+            }
+            result.push(diff_line);
             new_line = new_line.saturating_add(1);
             old_line = old_line.saturating_add(1);
             continue;
@@ -2664,6 +2861,62 @@ mod tests {
     }
 
     #[test]
+    fn build_diff_lines_produces_line_numbers() {
+        let versions = FileVersions {
+            old: None,
+            new: None,
+            truncated: false,
+        };
+        let diff = "@@ -1 +1 @@\n-foo\n+bar\n";
+
+        let lines = build_diff_lines(diff, &versions);
+
+        assert!(matches!(lines.get(0), Some(line) if line.line_numbers.is_none()));
+
+        let removed = lines.get(1).expect("removed line");
+        let removed_numbers = removed.line_numbers.as_ref().expect("removed line numbers");
+        assert_eq!(removed_numbers.old, Some(1));
+        assert!(removed_numbers.new.is_none());
+
+        let added = lines.get(2).expect("added line");
+        let added_numbers = added.line_numbers.as_ref().expect("added line numbers");
+        assert!(added_numbers.old.is_none());
+        assert_eq!(added_numbers.new, Some(1));
+
+        let mut node = render_diff_lines(&lines, true)
+            .with_width(Dimension::percent(1.0))
+            .with_height(Dimension::percent(1.0));
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: AvailableSpace::Definite(20.0),
+                height: AvailableSpace::Definite(3.0),
+            },
+        );
+        chatui::dom::rounding::round_layout(&mut node);
+
+        let mut buffer = DoubleBuffer::new(20, 3);
+        let palette = Palette::default();
+        Renderer::new(&mut buffer, &palette)
+            .render(&node, Size::new(20, 3))
+            .expect("render diff lines with gutter");
+
+        let back = buffer.back_buffer();
+        let removed_row: String = back[1].iter().map(|cell| cell.ch).collect();
+        assert!(
+            removed_row.starts_with("1   | -foo"),
+            "expected removed row to show gutter, got {removed_row:?}"
+        );
+
+        let added_row: String = back[2].iter().map(|cell| cell.ch).collect();
+        assert!(
+            added_row.starts_with("  1 | +bar"),
+            "expected added row to show gutter, got {added_row:?}"
+        );
+    }
+
+    #[test]
     fn diff_pane_renders_horizontal_scrollbar() {
         let mut model = Model::default();
         model.diff_scroll = ScrollState::both();
@@ -2698,8 +2951,11 @@ mod tests {
             .expect("render diff pane");
 
         let back = buffer.back_buffer();
+        let has_horizontal_thumb = back
+            .iter()
+            .any(|row| row.iter().any(|cell| matches!(cell.ch, '█' | '▀')));
         assert!(
-            back.iter().any(|row| row.iter().any(|cell| cell.ch == '█')),
+            has_horizontal_thumb,
             "expected horizontal scrollbar thumb to be rendered"
         );
 
