@@ -122,6 +122,7 @@ pub struct Renderer<'a> {
 
 const SCROLLBAR_TRACK_CHAR: char = ' ';
 const SCROLLBAR_THUMB_CHAR: char = '█';
+const SCROLLBAR_HORZ_THUMB_CHAR: char = '▀';
 
 impl<'a> Renderer<'a> {
     pub fn new(buffer: &'a mut DoubleBuffer, palette: &'a Palette) -> Self {
@@ -457,11 +458,9 @@ impl<'a> Renderer<'a> {
             return;
         }
 
-        let mut content_width = layout.content_size.width.max(viewport_width);
-        // If layout doesn't report horizontal overflow but the node scrolls horizontally,
-        // still render a minimal scrollbar to indicate horizontal scroll capability.
+        let content_width = layout.content_size.width.max(viewport_width);
         if content_width <= viewport_width + f32::EPSILON {
-            content_width = viewport_width + 1.0;
+            return;
         }
 
         let raw_scrollbar_height = layout.scrollbar_size.height.max(0.0).round() as usize;
@@ -531,7 +530,7 @@ impl<'a> Renderer<'a> {
 
         for y in scrollbar_y..(scrollbar_y + scrollbar_height) {
             for x in thumb_left..thumb_right {
-                self.write_char(x, y, SCROLLBAR_THUMB_CHAR, &thumb_attrs);
+                self.write_char(x, y, SCROLLBAR_HORZ_THUMB_CHAR, &thumb_attrs);
             }
         }
     }

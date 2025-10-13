@@ -8,7 +8,9 @@ use std::io::{BufReader, ErrorKind, Read};
 use std::path::Path;
 use std::process::Command;
 
-use chatui::components::scroll::{ScrollMsg, ScrollState, ScrollTarget, scrollable_content};
+use chatui::components::scroll::{
+    ScrollAxis, ScrollMsg, ScrollState, ScrollTarget, scrollable_content,
+};
 use chatui::dom::{Node, Renderable, TextSpan, renderable};
 use chatui::event::{Event, Key, KeyCode};
 use chatui::render::RenderContext;
@@ -314,6 +316,30 @@ mod shortcuts {
             msg: Some(Msg::ScrollDiff(-1)),
         },
         Shortcut {
+            label: "l",
+            description: "Scroll diff right",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('l'),
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::ScrollDiffHorizontal(4)),
+        },
+        Shortcut {
+            label: "h",
+            description: "Scroll diff left",
+            show_in_bar: true,
+            binding: Some(Binding::new(
+                KeyCode::Char('h'),
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Disabled,
+                ModifierRequirement::Any,
+            )),
+            msg: Some(Msg::ScrollDiffHorizontal(-4)),
+        },
+        Shortcut {
             label: "r",
             description: "Refresh status",
             show_in_bar: true,
@@ -457,6 +483,10 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
         }
         Msg::ScrollDiff(delta) => {
             model.scroll_diff(delta);
+            Transition::Continue
+        }
+        Msg::ScrollDiffHorizontal(delta) => {
+            model.scroll_diff_horizontal(delta);
             Transition::Continue
         }
         Msg::RefreshStatus => {
@@ -849,10 +879,9 @@ fn render_diff_lines(lines: &[DiffLine]) -> Node<Msg> {
     }
 
     renderable(DiffLeaf::new(lines.to_vec()))
-        .with_width(Dimension::percent(1.0))
-        // .with_flex_grow(1.0)
-        // .with_flex_basis(Dimension::ZERO)
-        // .with_min_height(Dimension::ZERO)
+        .with_flex_shrink(0.)
+        .with_overflow_y(taffy::Overflow::Visible)
+        .with_overflow_x(taffy::Overflow::Visible)
         .with_id("diff_lines")
 }
 
@@ -891,7 +920,7 @@ impl Renderable for DiffLeaf {
             .unwrap_or(0) as f32;
 
         let width = match available_space.width {
-            taffy::AvailableSpace::Definite(w) => w,
+            taffy::AvailableSpace::Definite(w) => w.max(max_width),
             taffy::AvailableSpace::MinContent => max_width,
             taffy::AvailableSpace::MaxContent => max_width,
         };
@@ -906,10 +935,13 @@ impl Renderable for DiffLeaf {
         // content row to render. This allows the scrollbar to move the visible
         // window through the diff lines.
         let start_idx = ctx.scroll_y().max(0.0).floor() as usize;
+        let skip_cols = ctx.scroll_x().max(0.0).floor() as usize;
         let end_row = area.y.saturating_add(area.height);
         let visible_height = end_row
             .saturating_sub(area.y)
             .min(self.lines.len().saturating_sub(start_idx));
+
+        info!("diff render, {}:{}", ctx.scroll_x(), ctx.scroll_y());
 
         for (i, line_idx) in (0..visible_height).enumerate() {
             let idx = start_idx + line_idx;
@@ -921,29 +953,41 @@ impl Renderable for DiffLeaf {
             let mut remaining = area.width;
             let mut cursor_x = area.x;
             let mut fill_style: Option<Style> = None;
+            let mut remaining_skip = skip_cols;
             for span in &self.lines[idx].spans {
                 if remaining == 0 {
                     break;
                 }
+                let mut chars = span.content.chars();
+
+                if span.style.bg.is_some() || span.style.dim {
+                    fill_style = Some(span.style.clone());
+                }
+                if remaining_skip > 0 {
+                    let skipped = chars.by_ref().take(remaining_skip).count();
+                    remaining_skip = remaining_skip.saturating_sub(skipped);
+                    if remaining_skip > 0 {
+                        continue;
+                    }
+                }
+
                 let mut collected = String::new();
                 let mut taken = 0;
-                for ch in span.content.chars() {
-                    if taken == remaining {
+                for ch in chars {
+                    if remaining == 0 {
                         break;
                     }
                     collected.push(ch);
                     taken += 1;
+                    remaining = remaining.saturating_sub(1);
                 }
+
                 if collected.is_empty() {
                     continue;
-                }
-                if span.style.bg.is_some() || span.style.dim {
-                    fill_style = Some(span.style.clone());
                 }
                 let attrs = ctx.style_to_attributes(&span.style);
                 ctx.write_text(cursor_x, y, &collected, &attrs);
                 cursor_x += taken;
-                remaining = remaining.saturating_sub(taken);
             }
             if remaining > 0
                 && let Some(style) = &fill_style
@@ -1353,7 +1397,10 @@ impl Model {
     const STAGED_ITEM_ID: &'static str = "staged-entry";
 
     fn new() -> Self {
-        let mut model = Self::default();
+        let mut model = Self {
+            diff_scroll: ScrollState::both(),
+            ..Default::default()
+        };
 
         if let Err(err) = model.refresh_status() {
             model.set_error(err);
@@ -1594,10 +1641,13 @@ impl Model {
         } else {
             None
         };
-        let previous_diff_offset = if preserve_diff_scroll {
-            Some(self.diff_scroll.offset())
+        let (previous_diff_offset_y, previous_diff_offset_x) = if preserve_diff_scroll {
+            (
+                Some(self.diff_scroll.offset_y()),
+                Some(self.diff_scroll.offset_x()),
+            )
         } else {
-            None
+            (None, None)
         };
 
         let status = load_git_status()?;
@@ -1619,16 +1669,21 @@ impl Model {
         self.ensure_focus_valid();
         self.clear_error();
         self.update_diff();
-        if let (Some(offset), Some(prev_focus), Some(prev_selection)) =
-            (previous_diff_offset, previous_focus, previous_selection)
+        if let (Some(prev_focus), Some(prev_selection)) = (previous_focus, previous_selection)
             && self.focus == prev_focus
             && self
                 .tree_state(self.focus)
                 .selected()
-                .map(|current| current == &prev_selection)
-                .unwrap_or(false)
+                .is_some_and(|current| current == &prev_selection)
         {
-            self.diff_scroll.set_offset(offset);
+            if let Some(offset) = previous_diff_offset_y {
+                self.diff_scroll
+                    .set_offset_for(ScrollAxis::Vertical, offset);
+            }
+            if let Some(offset) = previous_diff_offset_x {
+                self.diff_scroll
+                    .set_offset_for(ScrollAxis::Horizontal, offset);
+            }
         }
         Ok(())
     }
@@ -1860,6 +1915,13 @@ impl Model {
         self.diff_scroll.update(ScrollMsg::Delta(delta));
     }
 
+    fn scroll_diff_horizontal(&mut self, delta: i32) {
+        self.diff_scroll.update(ScrollMsg::AxisDelta {
+            axis: ScrollAxis::Horizontal,
+            amount: delta,
+        });
+    }
+
     fn scroll_files(&mut self, focus: Focus, delta: i32) {
         self.update_section_scroll(focus, ScrollMsg::Delta(delta));
     }
@@ -1893,7 +1955,9 @@ impl Model {
     }
 
     fn update_section_scroll(&mut self, focus: Focus, msg: ScrollMsg) {
-        if matches!(msg, ScrollMsg::Delta(_)) && self.tree_state(focus).visible().is_empty() {
+        if matches!(msg, ScrollMsg::Delta(_) | ScrollMsg::AxisDelta { .. })
+            && self.tree_state(focus).visible().is_empty()
+        {
             return;
         }
         self.scroll_state_mut(focus).update(msg);
@@ -1934,6 +1998,7 @@ enum Msg {
     ExpandNode,
     ScrollFiles(i32),
     ScrollDiff(i32),
+    ScrollDiffHorizontal(i32),
     RefreshStatus,
     OpenCommitModal,
     OpenDeleteModal,
@@ -2526,7 +2591,8 @@ fn discard_unstaged_changes(path: &str, code: char) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chatui::TreeNodeKind;
+    use chatui::{Size, TreeNodeKind, buffer::DoubleBuffer, palette::Palette, render::Renderer};
+    use taffy::{AvailableSpace, Dimension, compute_root_layout};
 
     #[test]
     fn tree_label_truncates_to_file_name() {
@@ -2594,6 +2660,69 @@ mod tests {
                 .first()
                 .map(|span| span.content.starts_with('*'))
                 .unwrap_or(false)
+        );
+    }
+
+    #[test]
+    fn diff_pane_renders_horizontal_scrollbar() {
+        let mut model = Model::default();
+        model.diff_scroll = ScrollState::both();
+        let content = "0123456789abcdefghijklmnopqrstuvwxyz";
+        model.diff_lines = vec![DiffLine::plain(content)];
+        let content_width = content.len() as u16;
+        model.diff_scroll.update(ScrollMsg::Resize {
+            viewport: Size::new(18, 1),
+            content: Size::new(content_width, 1),
+        });
+        model
+            .diff_scroll
+            .set_offset_for(ScrollAxis::Horizontal, 8.0);
+
+        let mut pane = render_diff_pane(&model)
+            .with_width(Dimension::percent(1.0))
+            .with_height(Dimension::percent(1.0));
+        compute_root_layout(
+            &mut pane,
+            u64::MAX.into(),
+            taffy::Size {
+                width: AvailableSpace::Definite(24.0),
+                height: AvailableSpace::Definite(6.0),
+            },
+        );
+        chatui::dom::rounding::round_layout(&mut pane);
+
+        let mut buffer = DoubleBuffer::new(24, 6);
+        let palette = Palette::default();
+        Renderer::new(&mut buffer, &palette)
+            .render(&pane, Size::new(24, 6))
+            .expect("render diff pane");
+
+        let back = buffer.back_buffer();
+        assert!(
+            back.iter().any(|row| row.iter().any(|cell| cell.ch == '█')),
+            "expected horizontal scrollbar thumb to be rendered"
+        );
+
+        let mut scrolled_row = None;
+        for (y, row) in back.iter().enumerate() {
+            for x in 0..row.len().saturating_sub(1) {
+                if row[x].ch == '│' && row[x + 1].ch == '8' {
+                    scrolled_row = Some((y, x));
+                    break;
+                }
+            }
+            if scrolled_row.is_some() {
+                break;
+            }
+        }
+
+        let (row_idx, col_idx) =
+            scrolled_row.expect("expected diff content with horizontal offset");
+        let row = &back[row_idx];
+        assert_ne!(
+            row.get(col_idx + 1).map(|cell| cell.ch),
+            Some('0'),
+            "expected diff content to start after horizontal offset"
         );
     }
 }

@@ -7,20 +7,41 @@ use crate::{
     scroll::ScrollAlignment,
 };
 use taffy::Overflow;
-use tracing::info;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollAxis {
+    Vertical,
+    Horizontal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScrollBehavior {
+    Vertical,
+    Horizontal,
+    Both,
+}
 
 #[derive(Clone, Debug)]
 pub struct ScrollState {
-    offset: f32,
+    offset_x: f32,
+    offset_y: f32,
     viewport: Size,
     content: Size,
     pending_request: Cell<Option<PendingScrollRequest>>,
+    behavior: ScrollBehavior,
 }
 
 impl Default for ScrollState {
     fn default() -> Self {
+        Self::vertical()
+    }
+}
+
+impl ScrollState {
+    pub fn new(behavior: ScrollBehavior) -> Self {
         Self {
-            offset: 0.0,
+            offset_x: 0.0,
+            offset_y: 0.0,
             viewport: Size {
                 width: 0,
                 height: 0,
@@ -30,15 +51,30 @@ impl Default for ScrollState {
                 height: 0,
             },
             pending_request: Cell::new(None),
+            behavior,
         }
+    }
+
+    pub fn vertical() -> Self {
+        Self::new(ScrollBehavior::Vertical)
+    }
+
+    pub fn horizontal() -> Self {
+        Self::new(ScrollBehavior::Horizontal)
+    }
+
+    pub fn both() -> Self {
+        Self::new(ScrollBehavior::Both)
     }
 }
 
 #[derive(Clone, Copy, Debug)]
 pub enum ScrollMsg {
     Delta(i32),
+    AxisDelta { axis: ScrollAxis, amount: i32 },
     Resize { viewport: Size, content: Size },
     JumpTo(f32),
+    AxisJumpTo { axis: ScrollAxis, offset: f32 },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -86,30 +122,65 @@ pub(crate) struct PendingScrollRequest {
 
 impl ScrollState {
     pub fn offset(&self) -> f32 {
-        self.offset
+        self.offset_for(self.primary_axis())
+    }
+
+    pub fn offset_x(&self) -> f32 {
+        self.offset_x
+    }
+
+    pub fn offset_y(&self) -> f32 {
+        self.offset_y
+    }
+
+    pub fn offset_for(&self, axis: ScrollAxis) -> f32 {
+        match axis {
+            ScrollAxis::Vertical => self.offset_y,
+            ScrollAxis::Horizontal => self.offset_x,
+        }
+    }
+
+    pub fn behavior(&self) -> ScrollBehavior {
+        self.behavior
     }
 
     pub fn set_offset(&mut self, offset: f32) {
-        self.offset = offset;
-        self.clamp_offset();
+        let axis = self.primary_axis();
+        self.set_offset_for(axis, offset);
+    }
+
+    pub fn set_offset_for(&mut self, axis: ScrollAxis, offset: f32) {
+        match axis {
+            ScrollAxis::Vertical => self.offset_y = offset,
+            ScrollAxis::Horizontal => self.offset_x = offset,
+        }
+        self.clamp_offsets();
     }
 
     pub fn update(&mut self, msg: ScrollMsg) {
         match msg {
-            ScrollMsg::Delta(delta) => self.apply_delta(delta),
+            ScrollMsg::Delta(delta) => {
+                let axis = self.primary_axis();
+                self.apply_delta(axis, delta);
+            }
+            ScrollMsg::AxisDelta { axis, amount } => self.apply_delta(axis, amount),
             ScrollMsg::Resize { viewport, content } => {
                 self.viewport = viewport;
                 self.content = content;
-                self.clamp_offset();
+                self.clamp_offsets();
             }
-            ScrollMsg::JumpTo(offset) => self.set_offset(offset),
+            ScrollMsg::JumpTo(offset) => {
+                let axis = self.primary_axis();
+                self.set_offset_for(axis, offset);
+            }
+            ScrollMsg::AxisJumpTo { axis, offset } => self.set_offset_for(axis, offset),
         }
-        info!("scroll state update {self:?}");
     }
 
     pub fn reset(&mut self) {
-        self.offset = 0.0;
-        self.clamp_offset();
+        self.offset_x = 0.0;
+        self.offset_y = 0.0;
+        self.clamp_offsets();
     }
 
     pub fn request_scroll_to(
@@ -141,31 +212,66 @@ impl ScrollState {
         None
     }
 
-    fn apply_delta(&mut self, delta: i32) {
-        let mut next = self.offset as i32 + delta;
+    fn primary_axis(&self) -> ScrollAxis {
+        match self.behavior {
+            ScrollBehavior::Vertical => ScrollAxis::Vertical,
+            ScrollBehavior::Horizontal => ScrollAxis::Horizontal,
+            ScrollBehavior::Both => ScrollAxis::Vertical,
+        }
+    }
+
+    fn apply_delta(&mut self, axis: ScrollAxis, delta: i32) {
+        let max_offset = self.max_offset_for(axis);
+        let offset = match axis {
+            ScrollAxis::Vertical => &mut self.offset_y,
+            ScrollAxis::Horizontal => &mut self.offset_x,
+        };
+        let mut next = *offset as i32 + delta;
         if next < 0 {
             next = 0;
         }
-        let max_offset = self.max_offset();
         if next > max_offset {
             next = max_offset;
         }
-        self.offset = next as f32;
+        *offset = next as f32;
     }
 
-    fn max_offset(&self) -> i32 {
-        let viewport_height = i32::from(self.viewport.height);
-        let content_height = i32::from(self.content.height);
-        let available = content_height.saturating_sub(viewport_height);
+    fn max_offset_for(&self, axis: ScrollAxis) -> i32 {
+        let (viewport, content) = match axis {
+            ScrollAxis::Vertical => (
+                i32::from(self.viewport.height),
+                i32::from(self.content.height),
+            ),
+            ScrollAxis::Horizontal => (
+                i32::from(self.viewport.width),
+                i32::from(self.content.width),
+            ),
+        };
+        let available = content.saturating_sub(viewport);
         available.max(0)
     }
 
-    fn clamp_offset(&mut self) {
-        let max_offset = self.max_offset() as f32;
+    fn clamp_offsets(&mut self) {
+        match self.behavior {
+            ScrollBehavior::Vertical => self.clamp_offset_for(ScrollAxis::Vertical),
+            ScrollBehavior::Horizontal => self.clamp_offset_for(ScrollAxis::Horizontal),
+            ScrollBehavior::Both => {
+                self.clamp_offset_for(ScrollAxis::Vertical);
+                self.clamp_offset_for(ScrollAxis::Horizontal);
+            }
+        }
+    }
+
+    fn clamp_offset_for(&mut self, axis: ScrollAxis) {
+        let max_offset = self.max_offset_for(axis) as f32;
+        let offset = match axis {
+            ScrollAxis::Vertical => &mut self.offset_y,
+            ScrollAxis::Horizontal => &mut self.offset_x,
+        };
         if max_offset <= 0.0 {
-            self.offset = 0.0;
+            *offset = 0.0;
         } else {
-            self.offset = self.offset.clamp(0.0, max_offset);
+            *offset = offset.clamp(0.0, max_offset);
         }
     }
 }
@@ -177,6 +283,7 @@ pub fn scrollable_content<Msg>(
     map_msg: impl Fn(ScrollMsg) -> Msg + 'static,
     child: Node<Msg>,
 ) -> Node<Msg> {
+    let behavior = state.behavior();
     let map_msg = Rc::new(map_msg);
     let mouse_handler = Rc::clone(&map_msg);
     let resize_handler = Rc::clone(&map_msg);
@@ -184,22 +291,70 @@ pub fn scrollable_content<Msg>(
     let container_hash = hash::hash_str(0, id);
     let pending_request = state.take_pending_request(container_hash);
 
-    info!("scoll offset {} {}", id, state.offset());
+    let mut node = child.with_id(id);
+    node = match behavior {
+        ScrollBehavior::Vertical => node
+            .with_overflow_y(Overflow::Scroll)
+            .with_scroll(state.offset()),
+        ScrollBehavior::Horizontal => node
+            .with_overflow_x(Overflow::Scroll)
+            .with_scroll_x(state.offset()),
+        ScrollBehavior::Both => node
+            .with_overflow_y(Overflow::Scroll)
+            .with_scroll(state.offset_y())
+            .with_overflow_x(Overflow::Scroll)
+            .with_scroll_x(state.offset_x()),
+    };
 
-    let mut node = child
-        .with_id(id)
-        .with_overflow_y(Overflow::Scroll)
-        .with_scroll(state.offset());
-
-    node = node.on_mouse(move |event| {
-        if event.buttons.vert_wheel {
+    node = node.on_mouse(move |event| match behavior {
+        ScrollBehavior::Vertical => {
+            if !event.buttons.vert_wheel {
+                return None;
+            }
             let delta = if event.buttons.wheel_positive {
                 -step
             } else {
                 step
             };
             Some(mouse_handler(ScrollMsg::Delta(delta)))
-        } else {
+        }
+        ScrollBehavior::Horizontal => {
+            let wheel_triggered =
+                event.buttons.horz_wheel || (event.buttons.vert_wheel && event.shift);
+            if !wheel_triggered {
+                return None;
+            }
+            let delta = if event.buttons.wheel_positive {
+                -step
+            } else {
+                step
+            };
+            Some(mouse_handler(ScrollMsg::Delta(delta)))
+        }
+        ScrollBehavior::Both => {
+            if event.buttons.horz_wheel || (event.buttons.vert_wheel && event.shift) {
+                let delta = if event.buttons.wheel_positive {
+                    -step
+                } else {
+                    step
+                };
+                return Some(mouse_handler(ScrollMsg::AxisDelta {
+                    axis: ScrollAxis::Horizontal,
+                    amount: delta,
+                }));
+            }
+
+            if event.buttons.vert_wheel {
+                let delta = if event.buttons.wheel_positive {
+                    -step
+                } else {
+                    step
+                };
+                return Some(mouse_handler(ScrollMsg::AxisDelta {
+                    axis: ScrollAxis::Vertical,
+                    amount: delta,
+                }));
+            }
             None
         }
     });
