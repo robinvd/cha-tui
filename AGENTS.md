@@ -1,6 +1,7 @@
 # Agent Specification
 
 ## Spec
+- written in rust
 - Provide a minimal Elm-style terminal UI framework without exposing terminal backend types to applications.
 - Core runtime lives in `src/program.rs`: `Program::new(model, update, view)` wires the loop, `Program::map_event` installs a translator from `event::Event` to application messages, `Program::run` drives a buffered terminal (alternate screen + raw mode) using the renderer, and `Program::send` replays events for tests.
 - State transitions use `Transition::{Continue, Quit}`; updates mutate the model directly. Rendering is triggered for resize events or `Transition::Continue` results.
