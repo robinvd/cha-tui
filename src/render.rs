@@ -886,15 +886,18 @@ mod tests {
         let mut buffer = DoubleBuffer::new(12, 8);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
+
         // Many long lines to overflow both width and height
         let lines: Vec<Node<()>> = (0..30)
             .map(|idx| text::<()>(format!("Item {idx} 1234567890abcdef")))
             .collect();
-        let mut root = block::<()>(vec![column(lines)])
+        let col = column(lines).with_flex_shrink(0.);
+        let mut root = block::<()>(vec![col])
             .with_scroll(y_scroll)
             .with_scroll_x(x_scroll)
             .with_width(Dimension::percent(1.0))
             .with_height(Dimension::percent(1.0));
+
         prepare_layout(&mut root, Size::new(12, 8));
 
         renderer
@@ -926,7 +929,7 @@ mod tests {
         // Bottom row contains horizontal scrollbar thumb somewhere in interior columns
         let bottom = lines.last().expect("expected bottom line");
         assert!(
-            bottom.contains(SCROLLBAR_THUMB_CHAR),
+            bottom.contains(SCROLLBAR_HORZ_THUMB_CHAR),
             "expected horizontal thumb present in bottom row"
         );
     }
