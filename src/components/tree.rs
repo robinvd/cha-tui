@@ -20,6 +20,8 @@ pub struct TreeNode<Id> {
     pub label: Vec<TextSpan>,
     pub kind: TreeNodeKind,
     pub children: Vec<TreeNode<Id>>,
+    pub row_style: Option<Style>,
+    pub selected_row_style: Option<Style>,
 }
 
 impl<Id> TreeNode<Id> {
@@ -29,6 +31,8 @@ impl<Id> TreeNode<Id> {
             label,
             kind: TreeNodeKind::Leaf,
             children: Vec::new(),
+            row_style: None,
+            selected_row_style: None,
         }
     }
 
@@ -38,7 +42,19 @@ impl<Id> TreeNode<Id> {
             label,
             kind: TreeNodeKind::Branch,
             children,
+            row_style: None,
+            selected_row_style: None,
         }
+    }
+
+    pub fn with_row_style(mut self, style: Style) -> Self {
+        self.row_style = Some(style);
+        self
+    }
+
+    pub fn with_selected_row_style(mut self, style: Style) -> Self {
+        self.selected_row_style = Some(style);
+        self
     }
 }
 
@@ -49,6 +65,8 @@ pub struct VisibleNode<Id> {
     pub has_children: bool,
     pub is_expanded: bool,
     pub label: Vec<TextSpan>,
+    pub row_style: Option<Style>,
+    pub selected_row_style: Option<Style>,
 }
 
 pub struct TreeState<Id> {
@@ -244,6 +262,8 @@ where
             has_children,
             is_expanded,
             label: node.label.clone(),
+            row_style: node.row_style.clone(),
+            selected_row_style: node.selected_row_style.clone(),
         });
 
         if is_expanded {
@@ -340,7 +360,7 @@ where
             .map(|selected| selected == &visible.id)
             .unwrap_or(false);
 
-        let row_style = if selected {
+        let base_style = if selected {
             if is_active {
                 style.active_selected_row.clone()
             } else {
@@ -350,6 +370,22 @@ where
             style.active_row.clone()
         } else {
             style.inactive_row.clone()
+        };
+
+        let row_style = if selected {
+            let mut merged = base_style;
+            if let Some(custom) = visible.selected_row_style.as_ref() {
+                merged = merged.merged(custom);
+            } else if let Some(custom) = visible.row_style.as_ref() {
+                merged = merged.merged(custom);
+            }
+            merged
+        } else {
+            let mut merged = base_style;
+            if let Some(custom) = visible.row_style.as_ref() {
+                merged = merged.merged(custom);
+            }
+            merged
         };
 
         let row_text = rich_text::<Msg>(spans)
@@ -629,5 +665,44 @@ mod tests {
 
         let message = row.mouse_message(event);
         assert_eq!(message, Some(TreeMsg::Activate("root")));
+    }
+
+    #[test]
+    fn row_style_sets_background() {
+        let mut state = TreeState::new();
+        let node = TreeNode::leaf("leaf", vec![TextSpan::new("leaf", Style::default())])
+            .with_row_style(Style::bg(Color::Green));
+        state.set_items(vec![node]);
+
+        let buffer = render_buffer(&state, &TreeStyle::default(), true, 8, 1);
+        let first_cell = &buffer.back_buffer()[0][0];
+        assert_eq!(first_cell.attrs.background(), Some(Rgba::opaque(0, 205, 0)));
+    }
+
+    #[test]
+    fn selected_row_style_overrides_row_style_when_present() {
+        let mut state = TreeState::new();
+        let node = TreeNode::leaf("leaf", vec![TextSpan::new("leaf", Style::default())])
+            .with_row_style(Style::bg(Color::Green))
+            .with_selected_row_style(Style::bg(Color::Red));
+        state.set_items(vec![node]);
+        state.select("leaf");
+
+        let buffer = render_buffer(&state, &TreeStyle::default(), true, 8, 1);
+        let first_cell = &buffer.back_buffer()[0][0];
+        assert_eq!(first_cell.attrs.background(), Some(Rgba::opaque(205, 0, 0)));
+    }
+
+    #[test]
+    fn selected_row_falls_back_to_row_style_when_not_overridden() {
+        let mut state = TreeState::new();
+        let node = TreeNode::leaf("leaf", vec![TextSpan::new("leaf", Style::default())])
+            .with_row_style(Style::bg(Color::Green));
+        state.set_items(vec![node]);
+        state.select("leaf");
+
+        let buffer = render_buffer(&state, &TreeStyle::default(), true, 8, 1);
+        let first_cell = &buffer.back_buffer()[0][0];
+        assert_eq!(first_cell.attrs.background(), Some(Rgba::opaque(0, 205, 0)));
     }
 }

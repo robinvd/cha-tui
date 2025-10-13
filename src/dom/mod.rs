@@ -741,6 +741,32 @@ impl Style {
             ..Self::default()
         }
     }
+
+    /// Overlay another style on top of this one, with the overlay taking precedence
+    /// whenever it specifies a foreground/background color or enables a flag.
+    pub fn apply_overlay(&mut self, overlay: &Self) {
+        if let Some(fg) = overlay.fg {
+            self.fg = Some(fg);
+        }
+        if let Some(bg) = overlay.bg {
+            self.bg = Some(bg);
+        }
+        if overlay.bold {
+            self.bold = true;
+        }
+        if overlay.dim {
+            self.dim = true;
+        }
+        if overlay.border {
+            self.border = true;
+        }
+    }
+
+    /// Return a new style with the overlay applied on top of `self`.
+    pub fn merged(mut self, overlay: &Self) -> Self {
+        self.apply_overlay(overlay);
+        self
+    }
 }
 
 impl Default for Attributes {

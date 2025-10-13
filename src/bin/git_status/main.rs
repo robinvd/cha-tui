@@ -11,12 +11,12 @@ use std::process::Command;
 use chatui::components::scroll::{
     ScrollAxis, ScrollMsg, ScrollState, ScrollTarget, scrollable_content,
 };
-use chatui::dom::{Node, Renderable, TextSpan, renderable};
+use chatui::dom::{Color, Node, Renderable, TextSpan, renderable};
 use chatui::event::{Event, Key, KeyCode};
 use chatui::render::RenderContext;
 use chatui::{
-    InputMsg, InputState, InputStyle, Program, Style, Transition, block_with_title, column,
-    default_input_keybindings, input, modal, rich_text, row, text,
+    InputMsg, InputState, InputStyle, Program, Style, Transition, TreeNodeKind, block_with_title,
+    column, default_input_keybindings, input, modal, rich_text, row, text,
 };
 use chatui::{TreeMsg, TreeNode, TreeState, TreeStyle, tree_view};
 use color_eyre::eyre::{Context, Result, eyre};
@@ -1275,6 +1275,38 @@ fn shortcut_description_style() -> Style {
     Style::dim()
 }
 
+fn status_row_styles(code: char) -> Option<(Style, Style)> {
+    let bg = status_forground(code)?;
+
+    let normal = Style {
+        fg: Some(bg),
+        // bg: Some(highlight::EVERFOREST_FG),
+        ..Style::default()
+    };
+
+    let selected = Style {
+        // fg: None,
+        bg: Some(bg),
+        ..Style::default()
+    };
+
+    Some((normal, selected))
+}
+
+fn status_forground(code: char) -> Option<Color> {
+    match code {
+        // New
+        'A' | '?' => Some(highlight::EVERFOREST_GREEN),
+        // Removed
+        'D' => Some(highlight::EVERFOREST_RED),
+        // Modified
+        'M' | 'T' => Some(highlight::EVERFOREST_YELLOW),
+        // Renamed
+        'R' | 'C' => Some(highlight::EVERFOREST_PURPLE),
+        _ => Some(highlight::EVERFOREST_AQUA),
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum Focus {
     #[default]
@@ -1441,12 +1473,14 @@ impl DirBuilder {
             .into_values()
             .map(|child| child.into_tree_node())
             .collect();
-        let label = format!("{} {}", aggregate_code(&self.codes), self.name);
-        TreeNode::branch(
+        let code = aggregate_code(&self.codes);
+        let label = format!("{} {}", code, self.name);
+        let node = TreeNode::branch(
             FileNodeId::Dir(self.path),
             vec![TextSpan::new(label, Style::default())],
             children,
-        )
+        );
+        apply_status_styles(node, code)
     }
 }
 
@@ -1454,13 +1488,15 @@ impl NodeBuilder {
     fn into_tree_node(self) -> TreeNode<FileNodeId> {
         match self {
             Self::Dir(dir) => dir.into_tree_node(),
-            Self::File(entry) => TreeNode::leaf(
-                FileNodeId::File(entry.path.clone()),
-                vec![TextSpan::new(
-                    format!("{} {}", entry.code, entry.tree_label()),
-                    Style::default(),
-                )],
-            ),
+            Self::File(entry) => {
+                let code = entry.code;
+                let label = format!("{} {}", code, entry.tree_label());
+                let node = TreeNode::leaf(
+                    FileNodeId::File(entry.path.clone()),
+                    vec![TextSpan::new(label, Style::default())],
+                );
+                apply_status_styles(node, code)
+            }
         }
     }
 }
@@ -1484,6 +1520,16 @@ fn aggregate_code(codes: &BTreeSet<char>) -> char {
         *codes.iter().next().unwrap()
     } else {
         '*'
+    }
+}
+
+fn apply_status_styles(node: TreeNode<FileNodeId>, code: char) -> TreeNode<FileNodeId> {
+    if node.kind == TreeNodeKind::Leaf
+        && let Some((row, selected)) = status_row_styles(code)
+    {
+        node.with_row_style(row).with_selected_row_style(selected)
+    } else {
+        node
     }
 }
 
