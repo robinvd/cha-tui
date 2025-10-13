@@ -1,12 +1,13 @@
+mod git;
+mod highlight;
+
 use std::collections::btree_map::Entry;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsStr;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, ErrorKind, Read};
 use std::path::Path;
-use std::process::Command;
 
 use chatui::components::scroll::{
     ScrollAxis, ScrollMsg, ScrollState, ScrollTarget, scrollable_content,
@@ -26,9 +27,7 @@ use taffy::style::FlexWrap;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-mod highlight;
-
-const PREVIEW_BYTE_LIMIT: usize = 1_048_576;
+use crate::git::{FileEntry, LoadedContent};
 mod shortcuts {
     use super::{Key, KeyCode, Model, Msg};
 
@@ -1314,44 +1313,6 @@ enum Focus {
     Staged,
 }
 
-#[derive(Clone, Debug)]
-struct FileEntry {
-    path: String,
-    display: String,
-    code: char,
-}
-
-impl FileEntry {
-    fn new(path: String, code: char, display: String) -> Self {
-        Self {
-            path,
-            display,
-            code,
-        }
-    }
-
-    fn tree_label(&self) -> String {
-        let rest = self
-            .display
-            .split_once(' ')
-            .map(|(_, tail)| tail)
-            .unwrap_or(self.display.as_str());
-
-        if let Some((before, after)) = rest.split_once(" -> ") {
-            format!("{} -> {}", last_component(before), last_component(after))
-        } else {
-            last_component(rest).to_string()
-        }
-    }
-}
-
-fn last_component(path: &str) -> &str {
-    path.rsplit('/')
-        .next()
-        .filter(|component| !component.is_empty())
-        .unwrap_or(path)
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum FileNodeId {
     File(String),
@@ -1791,7 +1752,7 @@ impl Model {
             return Transition::Continue;
         }
 
-        match run_git(["commit", "-m", message.as_str()]) {
+        match git::run_git(["commit", "-m", message.as_str()]) {
             Ok(_) => {
                 self.commit_modal = None;
                 if let Err(err) = self.refresh_status() {
@@ -1818,7 +1779,7 @@ impl Model {
             Focus::Staged => ' ',
         };
 
-        let result = discard_unstaged_changes(&path, code);
+        let result = git::discard_unstaged_changes(&path, code);
         self.delete_modal = None;
 
         match result.and_then(|_| self.refresh_status()) {
@@ -1857,7 +1818,7 @@ impl Model {
             (None, None)
         };
 
-        let status = load_git_status()?;
+        let status = git::load_status()?;
         self.unstaged = status.unstaged;
         self.staged = status.staged;
         self.current_branch = status.branch;
@@ -2078,8 +2039,8 @@ impl Model {
     fn toggle_stage_for_id(&mut self, focus: Focus, id: &FileNodeId) {
         let path = id.path();
         let result = match focus {
-            Focus::Unstaged => stage_path(path),
-            Focus::Staged => unstage_path(path),
+            Focus::Unstaged => git::stage_path(path),
+            Focus::Staged => git::unstage_path(path),
         };
 
         if let Err(err) = result {
@@ -2278,118 +2239,10 @@ struct DiffPreview {
     truncated: bool,
 }
 
-struct GitStatus {
-    unstaged: Vec<FileEntry>,
-    staged: Vec<FileEntry>,
-    branch: Option<String>,
-}
-
-fn load_git_status() -> Result<GitStatus> {
-    let output = run_git(["status", "--porcelain"])?;
-
-    let mut unstaged = Vec::new();
-    let mut staged = Vec::new();
-
-    for line in output.lines() {
-        if line.trim().is_empty() {
-            continue;
-        }
-
-        if let Some(parsed) = ParsedStatus::parse(line) {
-            if parsed.include_unstaged() {
-                unstaged.push(FileEntry::new(
-                    parsed.path.clone(),
-                    parsed.unstaged_code,
-                    parsed.unstaged_display(),
-                ));
-            }
-
-            if parsed.include_staged() {
-                staged.push(FileEntry::new(
-                    parsed.path.clone(),
-                    parsed.staged_code,
-                    parsed.staged_display(),
-                ));
-            }
-        }
-    }
-
-    let branch = load_current_branch();
-
-    Ok(GitStatus {
-        unstaged,
-        staged,
-        branch,
-    })
-}
-
-fn load_current_branch() -> Option<String> {
-    let branch = run_git(["symbolic-ref", "--short", "HEAD"])
-        .or_else(|_| run_git(["rev-parse", "--short", "HEAD"]))
-        .ok()?;
-
-    let trimmed = branch.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
-}
-
-struct ParsedStatus {
-    staged_code: char,
-    unstaged_code: char,
-    path: String,
-    display_path: String,
-}
-
-impl ParsedStatus {
-    fn parse(line: &str) -> Option<Self> {
-        if line.len() < 4 {
-            return None;
-        }
-
-        let mut chars = line.chars();
-        let staged_code = chars.next()?;
-        let unstaged_code = chars.next()?;
-
-        // Skip the space after status codes.
-        let remainder = line[3..].to_string();
-        let path = remainder
-            .split(" -> ")
-            .last()
-            .map(str::to_string)
-            .unwrap_or_else(|| remainder.clone());
-
-        Some(Self {
-            staged_code,
-            unstaged_code,
-            path,
-            display_path: remainder,
-        })
-    }
-
-    fn include_unstaged(&self) -> bool {
-        self.unstaged_code != ' ' || self.staged_code == '?'
-    }
-
-    fn include_staged(&self) -> bool {
-        self.staged_code != ' ' && self.staged_code != '?'
-    }
-
-    fn unstaged_display(&self) -> String {
-        format!("{} {}", self.unstaged_code, self.display_path)
-    }
-
-    fn staged_display(&self) -> String {
-        format!("{} {}", self.staged_code, self.display_path)
-    }
-}
-
 fn diff_for(entry: &FileEntry, focus: Focus) -> Result<DiffPreview> {
     let mut diff_output = match focus {
-        Focus::Unstaged => diff_unstaged(entry),
-        Focus::Staged => diff_staged(entry),
+        Focus::Unstaged => git::diff_unstaged(entry),
+        Focus::Staged => git::diff_staged(entry),
     }?;
 
     if diff_output.trim().is_empty() {
@@ -2399,7 +2252,7 @@ fn diff_for(entry: &FileEntry, focus: Focus) -> Result<DiffPreview> {
         });
     }
 
-    let diff_truncated = truncate_string(&mut diff_output, PREVIEW_BYTE_LIMIT);
+    let diff_truncated = truncate_string(&mut diff_output, git::PREVIEW_BYTE_LIMIT);
     let versions = load_file_versions(entry, focus)?;
     let truncated = diff_truncated || versions.truncated;
     let lines = build_diff_lines(&diff_output, &versions);
@@ -2407,33 +2260,9 @@ fn diff_for(entry: &FileEntry, focus: Focus) -> Result<DiffPreview> {
     Ok(DiffPreview { lines, truncated })
 }
 
-fn diff_unstaged(entry: &FileEntry) -> Result<String> {
-    if entry.code == '?' {
-        return run_git_allow_diff([
-            "diff",
-            "--color=never",
-            "--no-index",
-            "--",
-            "/dev/null",
-            &entry.path,
-        ]);
-    }
-
-    run_git_allow_diff(["diff", "--color=never", "--", &entry.path])
-}
-
-fn diff_staged(entry: &FileEntry) -> Result<String> {
-    run_git_allow_diff(["diff", "--cached", "--color=never", "--", &entry.path])
-}
-
 struct FileVersions {
     old: Option<FileContent>,
     new: Option<FileContent>,
-    truncated: bool,
-}
-
-struct LoadedContent {
-    text: String,
     truncated: bool,
 }
 
@@ -2496,15 +2325,15 @@ fn load_file_versions(entry: &FileEntry, focus: Focus) -> Result<FileVersions> {
             if entry.code == '?' {
                 None
             } else {
-                read_index_file(&entry.path)?
+                git::read_index_file(&entry.path)?
             }
         }
-        Focus::Staged => read_head_file(&entry.path)?,
+        Focus::Staged => git::read_head_file(&entry.path)?,
     };
 
     let new_source = match focus {
         Focus::Unstaged => read_worktree_file(&entry.path)?,
-        Focus::Staged => read_index_file(&entry.path)?,
+        Focus::Staged => git::read_index_file(&entry.path)?,
     };
 
     let old_truncated = old_source.as_ref().is_some_and(|content| content.truncated);
@@ -2527,55 +2356,16 @@ fn read_worktree_file(path: &str) -> Result<Option<LoadedContent>> {
     }
 }
 
-fn read_index_file(path: &str) -> Result<Option<LoadedContent>> {
-    git_show(&format!(":{}", path))
-}
-
-fn read_head_file(path: &str) -> Result<Option<LoadedContent>> {
-    git_show(&format!("HEAD:{}", path))
-}
-
-fn git_show(spec: &str) -> Result<Option<LoadedContent>> {
-    let output = Command::new("git")
-        .arg("show")
-        .arg(spec)
-        .env("GIT_PAGER", "cat")
-        .output()
-        .wrap_err_with(|| format!("git show {}", spec))?;
-
-    if output.status.success() {
-        let stdout = output.stdout;
-        let truncated = stdout.len() > PREVIEW_BYTE_LIMIT;
-        let slice = if truncated {
-            &stdout[..PREVIEW_BYTE_LIMIT]
-        } else {
-            stdout.as_slice()
-        };
-        let text = String::from_utf8_lossy(slice).into_owned();
-        return Ok(Some(LoadedContent { text, truncated }));
-    }
-
-    if matches!(output.status.code(), Some(128)) {
-        return Ok(None);
-    }
-
-    Err(eyre!(
-        "git show {} failed: {}",
-        spec,
-        String::from_utf8_lossy(&output.stderr)
-    ))
-}
-
 fn load_limited_from_file(file: File) -> Result<LoadedContent> {
     let mut reader = BufReader::new(file);
     let mut buffer = Vec::new();
     reader
         .by_ref()
-        .take(PREVIEW_BYTE_LIMIT as u64)
+        .take(git::PREVIEW_BYTE_LIMIT as u64)
         .read_to_end(&mut buffer)
         .wrap_err("failed to read file prefix")?;
 
-    let truncated = if buffer.len() == PREVIEW_BYTE_LIMIT {
+    let truncated = if buffer.len() == git::PREVIEW_BYTE_LIMIT {
         let mut probe = [0u8; 1];
         loop {
             match reader.read(&mut probe) {
@@ -2764,71 +2554,6 @@ fn with_prefix(prefix: char, mut spans: Vec<TextSpan>) -> Vec<TextSpan> {
     result.push(TextSpan::new(prefix.to_string(), style));
     result.append(&mut spans);
     result
-}
-
-fn stage_path(path: &str) -> Result<()> {
-    run_git(["add", "--", path]).map(|_| ())
-}
-
-fn unstage_path(path: &str) -> Result<()> {
-    run_git(["reset", "HEAD", "--", path]).map(|_| ())
-}
-
-fn run_git<I, S>(args: I) -> Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    run_git_internal(args, false)
-}
-
-fn run_git_allow_diff<I, S>(args: I) -> Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    run_git_internal(args, true)
-}
-
-fn run_git_internal<I, S>(args: I, allow_diff_exit: bool) -> Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let args_vec: Vec<String> = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_string_lossy().into_owned())
-        .collect();
-
-    let output = Command::new("git")
-        .args(&args_vec)
-        .env("GIT_PAGER", "cat")
-        .output()
-        .wrap_err_with(|| format!("failed to execute git {}", args_vec.join(" ")))?;
-
-    let status = output.status;
-    let acceptable = status.success() || (allow_diff_exit && matches!(status.code(), Some(1)));
-
-    if !acceptable {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(eyre!(
-            "git {} failed: {}",
-            args_vec.join(" "),
-            stderr.trim()
-        ));
-    }
-
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
-}
-
-fn discard_unstaged_changes(path: &str, code: char) -> Result<()> {
-    // Untracked files ('?') are removed; tracked files are restored from index/HEAD.
-    if code == '?' {
-        return run_git(["clean", "-f", "--", path]).map(|_| ());
-    }
-
-    // Restore the worktree copy to the index state (discarding unstaged changes).
-    run_git(["restore", "--worktree", "--", path]).map(|_| ())
 }
 
 #[cfg(test)]
