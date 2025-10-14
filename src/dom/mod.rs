@@ -870,7 +870,12 @@ impl<Msg> TraversePartialTree for Node<Msg> {
 
     fn child_ids(&self, parent_node_id: NodeId) -> Self::ChildIter<'_> {
         let node = self.node_from_id(parent_node_id);
-        (0..node.child_count(parent_node_id)).map(Into::into)
+        let count = match &node.content {
+            NodeContent::Element(element_node) => element_node.children.len(),
+            NodeContent::Text(_) => 0,
+            NodeContent::Renderable(_) => 0,
+        };
+        (0..count).map(Into::into)
     }
 
     fn child_count(&self, parent_node_id: NodeId) -> usize {
@@ -884,6 +889,17 @@ impl<Msg> TraversePartialTree for Node<Msg> {
 
     fn get_child_id(&self, parent_node_id: NodeId, child_index: usize) -> NodeId {
         self.child_ids(parent_node_id).nth(child_index).unwrap()
+    }
+}
+
+impl<Msg> Node<Msg> {
+    /// Returns the number of children this node has, without requiring a NodeId.
+    fn child_count_direct(&self) -> usize {
+        match &self.content {
+            NodeContent::Element(element_node) => element_node.children.len(),
+            NodeContent::Text(_) => 0,
+            NodeContent::Renderable(_) => 0,
+        }
     }
 }
 
@@ -973,7 +989,7 @@ impl<Msg> LayoutPartialTree for Node<Msg> {
                     },
                 ),
                 NodeContent::Element(element) => match element.kind {
-                    ElementKind::Table => compute_grid_layout(node, node_id, inputs),
+                    ElementKind::Table => compute_grid_layout(node, u64::MAX.into(), inputs),
                     _ => compute_flexbox_layout(node, u64::MAX.into(), inputs),
                 },
             }

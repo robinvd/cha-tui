@@ -1128,6 +1128,36 @@ mod tests {
     }
 
     #[test]
+    fn table_in_flexbox_container() {
+        // Regression test for bug where grid layout inside flexbox would panic with
+        // "text has no children" when trying to measure text nodes as grid cells.
+        use crate::dom::{column, text};
+        
+        let columns = vec![
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("A")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("B")),
+        ];
+        let rows = vec![
+            TableRow::new(vec![text::<()>("1"), text::<()>("2")]),
+            TableRow::new(vec![text::<()>("3"), text::<()>("4")]),
+        ];
+        let table_node = table(columns, rows);
+        
+        // Wrap table in a column (flexbox container)
+        let mut view = column(vec![text::<()>("Title"), table_node]);
+        
+        // This should not panic - before the fix in child_count(), this would panic
+        let lines = render_to_lines(&mut view, 20, 6);
+        assert!(lines.len() > 0, "Should render without panicking");
+        
+        // ACTUALLY CHECK THE CONTENT
+        let all_content = lines.join("\n");
+        eprintln!("Table in flexbox content:\n{}", all_content);
+        assert!(all_content.contains("A"), "Should contain header A");
+        assert!(all_content.contains("1"), "Should contain data 1");
+    }
+
+    #[test]
     fn fullwidth_char_windowing_contains_wide_char() {
         let mut buffer = DoubleBuffer::new(6, 1);
         let palette = Palette::default();
