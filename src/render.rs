@@ -322,7 +322,7 @@ impl<'a> Renderer<'a> {
                 self.render_block(element, parent_origin, clip, scroll_y, scroll_x)
             }
             ElementKind::Modal => self.render_modal(element, parent_origin, clip, scroll_y),
-            ElementKind::Column | ElementKind::Row => self.render_children(
+            ElementKind::Column | ElementKind::Row | ElementKind::Table => self.render_children(
                 &element.children,
                 parent_origin,
                 clip,
@@ -732,7 +732,8 @@ mod tests {
     use super::*;
     use crate::dom::rounding::round_layout;
     use crate::dom::{
-        Color, Style, TextSpan, block, block_with_title, column, modal, rich_text, row, text,
+        Color, Style, TableColumn, TableColumnWidth, TableRow, TextSpan, block, block_with_title,
+        column, table, modal, rich_text, row, text,
     };
     use crate::palette::Palette;
     use taffy::{AvailableSpace, Dimension, compute_root_layout};
@@ -747,6 +748,26 @@ mod tests {
             },
         );
         round_layout(node);
+    }
+
+    fn render_to_lines(node: &mut Node<()>, width: usize, height: usize) -> Vec<String> {
+        let size = Size::new(
+            width.try_into().expect("width fits in u16"),
+            height.try_into().expect("height fits in u16"),
+        );
+        prepare_layout(node, size);
+
+        let mut buffer = DoubleBuffer::new(width, height);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
+        renderer.render(node, size).expect("render should succeed");
+
+        renderer
+            .buffer()
+            .to_string()
+            .lines()
+            .map(|line| line.to_string())
+            .collect()
     }
 
     fn render_scrollable_lines(scroll_offset: f32) -> Vec<String> {
@@ -932,6 +953,178 @@ mod tests {
             bottom.contains(SCROLLBAR_HORZ_THUMB_CHAR),
             "expected horizontal thumb present in bottom row"
         );
+    }
+
+    #[test]
+    fn table_renders_header_and_rows_aligned() {
+        let columns = vec![
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Name")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Role")),
+        ];
+        let rows = vec![
+            TableRow::new(vec![text::<()>("Alice"), text::<()>("Engineer")]),
+            TableRow::new(vec![text::<()>("Bob"), text::<()>("Designer")]),
+        ];
+        let mut table = table(columns, rows);
+
+        let lines = render_to_lines(&mut table, 18, 4);
+        assert!(lines[0].contains("Name"));
+        assert!(lines[0].contains("Role"));
+        assert!(lines[1].contains("Alice"));
+        assert!(lines[1].contains("Engineer"));
+        assert!(lines[2].contains("Bob"));
+        assert!(lines[2].contains("Designer"));
+
+        let name_col = lines[0].find("Name").expect("header Name present");
+        let role_col = lines[0].find("Role").expect("header Role present");
+        let alice_col = lines[1].find("Alice").expect("row Alice present");
+        let engineer_col = lines[1].find("Engineer").expect("row Engineer present");
+        let bob_col = lines[2].find("Bob").expect("row Bob present");
+        let designer_col = lines[2].find("Designer").expect("row Designer present");
+
+        assert_eq!(name_col, alice_col, "first column aligned");
+        assert_eq!(name_col, bob_col, "first column aligned across rows");
+        assert_eq!(role_col, engineer_col, "second column aligned");
+        assert_eq!(role_col, designer_col, "second column aligned across rows");
+    }
+
+    #[test]
+    fn table_respects_fixed_column_width() {
+        let columns = vec![
+            TableColumn::new(TableColumnWidth::Fixed(6.0)).with_header(text::<()>("Key")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Value")),
+        ];
+        let rows = vec![
+            TableRow::new(vec![text::<()>("A"), text::<()>("One")]),
+            TableRow::new(vec![text::<()>("B"), text::<()>("Two")]),
+        ];
+        let mut table = table(columns, rows);
+
+        let lines = render_to_lines(&mut table, 12, 4);
+        let value_col = lines[0].find("Value").expect("header Value present");
+        let one_col = lines[1].find("One").expect("row One present");
+        let two_col = lines[2].find("Two").expect("row Two present");
+
+        assert_eq!(value_col, one_col, "fixed width column aligns cells");
+        assert_eq!(value_col, two_col, "fixed width column aligns cells");
+        assert!(
+            value_col >= 6,
+            "Value column should start after fixed-width first column"
+        );
+
+        let first_row = &lines[1];
+        assert_eq!(
+            first_row.chars().nth(0),
+            Some('A'),
+            "first column retains its content"
+        );
+        assert_eq!(
+            first_row.chars().nth(1),
+            Some(' '),
+            "fixed width column pads remaining space"
+        );
+    }
+
+    #[test]
+    fn table_with_gap_spacing() {
+        let columns = vec![
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("A")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("B")),
+        ];
+        let rows = vec![
+            TableRow::new(vec![text::<()>("X"), text::<()>("Y")]),
+            TableRow::new(vec![text::<()>("Z"), text::<()>("W")]),
+        ];
+        let mut table = table(columns, rows).with_gap(2, 1);
+
+        let lines = render_to_lines(&mut table, 10, 5);
+        
+        // With a gap of 2 columns, the second column should be further right
+        let a_pos = lines[0].find('A').expect("A present");
+        let b_pos = lines[0].find('B').expect("B present");
+        
+        // Gap should create separation between columns
+        assert!(b_pos > a_pos + 1, "Column gap should separate columns");
+    }
+
+    #[test]
+    fn table_without_header_renders_only_data() {
+        let columns = vec![
+            TableColumn::new(TableColumnWidth::Auto),
+            TableColumn::new(TableColumnWidth::Auto),
+        ];
+        let rows = vec![
+            TableRow::new(vec![text::<()>("Data1"), text::<()>("Data2")]),
+            TableRow::new(vec![text::<()>("Data3"), text::<()>("Data4")]),
+        ];
+        let mut table = table(columns, rows);
+
+        let lines = render_to_lines(&mut table, 15, 3);
+        
+        // First line should contain first row data, not headers
+        assert!(lines[0].contains("Data1"), "First line should have first row data");
+        assert!(lines[0].contains("Data2"), "First line should have first row data");
+        assert!(lines[1].contains("Data3"), "Second line should have second row data");
+        assert!(lines[1].contains("Data4"), "Second line should have second row data");
+    }
+
+    #[test]
+    fn table_single_column() {
+        let columns = vec![
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Column")),
+        ];
+        let rows = vec![
+            TableRow::new(vec![text::<()>("Row1")]),
+            TableRow::new(vec![text::<()>("Row2")]),
+            TableRow::new(vec![text::<()>("Row3")]),
+        ];
+        let mut table = table(columns, rows);
+
+        let lines = render_to_lines(&mut table, 10, 5);
+        
+        assert!(lines[0].contains("Column"), "Header should render");
+        assert!(lines[1].contains("Row1"), "First row should render");
+        assert!(lines[2].contains("Row2"), "Second row should render");
+        assert!(lines[3].contains("Row3"), "Third row should render");
+    }
+
+    #[test]
+    fn table_with_mixed_column_widths() {
+        let columns = vec![
+            TableColumn::new(TableColumnWidth::Fixed(5.0)).with_header(text::<()>("ID")),
+            TableColumn::new(TableColumnWidth::Flexible(1.0)).with_header(text::<()>("Name")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Val")),
+        ];
+        let rows = vec![
+            TableRow::new(vec![text::<()>("1"), text::<()>("Alice"), text::<()>("X")]),
+            TableRow::new(vec![text::<()>("2"), text::<()>("Bob"), text::<()>("Y")]),
+        ];
+        let mut table = table(columns, rows);
+
+        let lines = render_to_lines(&mut table, 20, 4);
+        
+        // Verify all content is present
+        assert!(lines[0].contains("ID"), "ID header present");
+        assert!(lines[0].contains("Name"), "Name header present");
+        assert!(lines[0].contains("Val"), "Val header present");
+        assert!(lines[1].contains("Alice"), "First row data present");
+        assert!(lines[2].contains("Bob"), "Second row data present");
+    }
+
+    #[test]
+    fn table_empty_with_headers_only() {
+        let columns = vec![
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Col1")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Col2")),
+        ];
+        let rows = vec![];
+        let mut table = table(columns, rows);
+
+        let lines = render_to_lines(&mut table, 15, 2);
+        
+        // Only headers should render
+        assert!(lines[0].contains("Col1"), "First header present");
+        assert!(lines[0].contains("Col2"), "Second header present");
     }
 
     #[test]

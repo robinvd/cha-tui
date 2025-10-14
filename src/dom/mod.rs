@@ -1,6 +1,9 @@
 pub mod patch;
 pub mod print;
 pub mod rounding;
+pub mod table;
+
+pub use table::{TableColumn, TableColumnWidth, TableRow, table};
 
 use std::any::Any;
 use std::fmt;
@@ -10,12 +13,12 @@ use crate::event::{MouseEvent, Size};
 use crate::render::RenderContext;
 use crate::scroll::ScrollAlignment;
 use taffy::{
-    CacheTree, LayoutFlexboxContainer, Overflow, compute_cached_layout, compute_flexbox_layout,
-    compute_leaf_layout,
+    CacheTree, LayoutFlexboxContainer, LayoutGridContainer, Overflow, compute_cached_layout,
+    compute_flexbox_layout, compute_grid_layout, compute_leaf_layout,
 };
 use taffy::{
     LayoutPartialTree,
-    geometry::Rect,
+    geometry::{Rect, Size as TaffySize},
     style::{
         AlignItems, FlexDirection, FlexWrap, JustifyContent, LengthPercentage,
         LengthPercentageAuto, Position, Style as TaffyStyle,
@@ -200,6 +203,7 @@ pub enum ElementKind {
     Row,
     Block,
     Modal,
+    Table,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -374,6 +378,7 @@ impl<Msg> Node<Msg> {
                 ElementKind::Row => "row",
                 ElementKind::Block => "block",
                 ElementKind::Modal => "modal",
+                ElementKind::Table => "table",
             },
             NodeContent::Text(_text_node) => "text",
             NodeContent::Renderable(leaf) => leaf.debug_label(),
@@ -500,6 +505,14 @@ impl<Msg> Node<Msg> {
             bottom: LengthPercentage::length(y as f32),
             left: LengthPercentage::length(x as f32),
             right: LengthPercentage::length(x as f32),
+        };
+        self
+    }
+
+    pub fn with_gap(mut self, column: u16, row: u16) -> Self {
+        self.layout_state.style.gap = TaffySize {
+            width: LengthPercentage::length(column as f32),
+            height: LengthPercentage::length(row as f32),
         };
         self
     }
@@ -959,7 +972,10 @@ impl<Msg> LayoutPartialTree for Node<Msg> {
                         leaf.measure(&node.layout_state.style, known_dimensions, available_space)
                     },
                 ),
-                NodeContent::Element(_) => compute_flexbox_layout(node, u64::MAX.into(), inputs),
+                NodeContent::Element(element) => match element.kind {
+                    ElementKind::Table => compute_grid_layout(node, node_id, inputs),
+                    _ => compute_flexbox_layout(node, u64::MAX.into(), inputs),
+                },
             }
         })
     }
@@ -981,6 +997,26 @@ impl<Msg> LayoutFlexboxContainer for Node<Msg> {
     }
 
     fn get_flexbox_child_style(&self, child_node_id: NodeId) -> Self::FlexboxItemStyle<'_> {
+        self.node_from_id(child_node_id).layout_state.style.clone()
+    }
+}
+
+impl<Msg> LayoutGridContainer for Node<Msg> {
+    type GridContainerStyle<'a>
+        = TaffyStyle
+    where
+        Self: 'a;
+
+    type GridItemStyle<'a>
+        = TaffyStyle
+    where
+        Self: 'a;
+
+    fn get_grid_container_style(&self, node_id: NodeId) -> Self::GridContainerStyle<'_> {
+        self.node_from_id(node_id).layout_state.style.clone()
+    }
+
+    fn get_grid_child_style(&self, child_node_id: NodeId) -> Self::GridItemStyle<'_> {
         self.node_from_id(child_node_id).layout_state.style.clone()
     }
 }

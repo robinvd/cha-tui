@@ -15,8 +15,9 @@ pub mod scroll;
 pub use termina::OneBased;
 
 pub use crate::dom::{
-    Attributes, ElementKind, ElementNode, Node, SizePolicy, Style, TextNode, TextSpan, block,
-    block_with_title, column, modal, rich_text, row, text,
+    Attributes, ElementKind, ElementNode, Node, SizePolicy, Style, TableColumn, TableColumnWidth,
+    TableRow, TextNode, TextSpan, block, block_with_title, column, modal, rich_text, row, table,
+    text,
 };
 pub use crate::error::ProgramError;
 pub use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};
