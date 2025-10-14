@@ -12,6 +12,7 @@ pub struct CellAttributes {
     pub background: Option<Rgba>,
     pub bold: bool,
     pub dim: bool,
+    pub reverse: bool,
 }
 
 impl CellAttributes {
@@ -43,12 +44,20 @@ impl CellAttributes {
         self.dim = dim;
     }
 
+    pub fn set_reverse(&mut self, reverse: bool) {
+        self.reverse = reverse;
+    }
+
     pub fn is_bold(&self) -> bool {
         self.bold
     }
 
     pub fn is_dim(&self) -> bool {
         self.dim
+    }
+
+    pub fn is_reverse(&self) -> bool {
+        self.reverse
     }
 }
 
@@ -449,8 +458,11 @@ impl DoubleBuffer {
 
     fn write_sgr_attrs(buffer: &mut String, attrs: &CellAttributes) -> Result<(), ProgramError> {
         // Check if we need to write anything at all
-        let has_any_attrs =
-            attrs.bold || attrs.dim || attrs.foreground.is_some() || attrs.background.is_some();
+        let has_any_attrs = attrs.bold
+            || attrs.dim
+            || attrs.reverse
+            || attrs.foreground.is_some()
+            || attrs.background.is_some();
 
         if !has_any_attrs {
             // Just reset to defaults
@@ -467,6 +479,11 @@ impl DoubleBuffer {
             write!(buffer, ";1")?;
         } else if attrs.dim {
             write!(buffer, ";2")?;
+        }
+
+        // Write reverse
+        if attrs.reverse {
+            write!(buffer, ";7")?;
         }
 
         // Write foreground
@@ -837,6 +854,28 @@ mod tests {
         assert!(
             output_str.contains(";2m") || output_str.contains(";2;"),
             "Should contain dim code (2)"
+        );
+    }
+
+    #[test]
+    fn flush_handles_reverse() {
+        let mut buffer = DoubleBuffer::new(10, 2);
+
+        // Reverse text
+        let mut reverse_attrs = CellAttributes::default();
+        reverse_attrs.set_reverse(true);
+        buffer.write_char(0, 0, 'R', &reverse_attrs);
+
+        let mut output = Vec::new();
+        buffer.flush(&mut output).expect("flush should succeed");
+        let output_str = String::from_utf8(output).expect("output should be valid UTF-8");
+
+        // Should contain SGR code 7 for reverse
+        // Format is: ESC[0;7m
+        assert!(
+            output_str.contains(";7m") || output_str.contains(";7;"),
+            "Should contain reverse code (7), got: {}",
+            output_str
         );
     }
 

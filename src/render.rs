@@ -29,6 +29,9 @@ fn style_to_attributes(palette: &Palette, style: &Style) -> CellAttributes {
     } else if style.dim {
         attrs.set_dim(true);
     }
+    if style.reverse {
+        attrs.set_reverse(true);
+    }
     attrs
 }
 
@@ -692,6 +695,9 @@ impl<'a> Renderer<'a> {
                 } else if style.dim {
                     attrs.set_dim(true);
                 }
+                if style.reverse {
+                    attrs.set_reverse(true);
+                }
 
                 // Use write_char which will handle color blending if needed
                 self.buffer.write_char(x, y, ch, &attrs);
@@ -733,7 +739,7 @@ mod tests {
     use crate::dom::rounding::round_layout;
     use crate::dom::{
         Color, Style, TableColumn, TableColumnWidth, TableRow, TextSpan, block, block_with_title,
-        column, table, modal, rich_text, row, text,
+        column, modal, rich_text, row, table, text,
     };
     use crate::palette::Palette;
     use taffy::{AvailableSpace, Dimension, compute_root_layout};
@@ -1038,11 +1044,11 @@ mod tests {
         let mut table = table(columns, rows).with_gap(2, 1);
 
         let lines = render_to_lines(&mut table, 10, 5);
-        
+
         // With a gap of 2 columns, the second column should be further right
         let a_pos = lines[0].find('A').expect("A present");
         let b_pos = lines[0].find('B').expect("B present");
-        
+
         // Gap should create separation between columns
         assert!(b_pos > a_pos + 1, "Column gap should separate columns");
     }
@@ -1060,19 +1066,30 @@ mod tests {
         let mut table = table(columns, rows);
 
         let lines = render_to_lines(&mut table, 15, 3);
-        
+
         // First line should contain first row data, not headers
-        assert!(lines[0].contains("Data1"), "First line should have first row data");
-        assert!(lines[0].contains("Data2"), "First line should have first row data");
-        assert!(lines[1].contains("Data3"), "Second line should have second row data");
-        assert!(lines[1].contains("Data4"), "Second line should have second row data");
+        assert!(
+            lines[0].contains("Data1"),
+            "First line should have first row data"
+        );
+        assert!(
+            lines[0].contains("Data2"),
+            "First line should have first row data"
+        );
+        assert!(
+            lines[1].contains("Data3"),
+            "Second line should have second row data"
+        );
+        assert!(
+            lines[1].contains("Data4"),
+            "Second line should have second row data"
+        );
     }
 
     #[test]
     fn table_single_column() {
-        let columns = vec![
-            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Column")),
-        ];
+        let columns =
+            vec![TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Column"))];
         let rows = vec![
             TableRow::new(vec![text::<()>("Row1")]),
             TableRow::new(vec![text::<()>("Row2")]),
@@ -1081,7 +1098,7 @@ mod tests {
         let mut table = table(columns, rows);
 
         let lines = render_to_lines(&mut table, 10, 5);
-        
+
         assert!(lines[0].contains("Column"), "Header should render");
         assert!(lines[1].contains("Row1"), "First row should render");
         assert!(lines[2].contains("Row2"), "Second row should render");
@@ -1102,7 +1119,7 @@ mod tests {
         let mut table = table(columns, rows);
 
         let lines = render_to_lines(&mut table, 20, 4);
-        
+
         // Verify all content is present
         assert!(lines[0].contains("ID"), "ID header present");
         assert!(lines[0].contains("Name"), "Name header present");
@@ -1121,7 +1138,7 @@ mod tests {
         let mut table = table(columns, rows);
 
         let lines = render_to_lines(&mut table, 15, 2);
-        
+
         // Only headers should render
         assert!(lines[0].contains("Col1"), "First header present");
         assert!(lines[0].contains("Col2"), "Second header present");
@@ -1132,7 +1149,7 @@ mod tests {
         // Regression test for bug where grid layout inside flexbox would panic with
         // "text has no children" when trying to measure text nodes as grid cells.
         use crate::dom::{column, text};
-        
+
         let columns = vec![
             TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("A")),
             TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("B")),
@@ -1142,14 +1159,14 @@ mod tests {
             TableRow::new(vec![text::<()>("3"), text::<()>("4")]),
         ];
         let table_node = table(columns, rows);
-        
+
         // Wrap table in a column (flexbox container)
         let mut view = column(vec![text::<()>("Title"), table_node]);
-        
+
         // This should not panic - before the fix in child_count(), this would panic
         let lines = render_to_lines(&mut view, 20, 6);
         assert!(lines.len() > 0, "Should render without panicking");
-        
+
         // ACTUALLY CHECK THE CONTENT
         let all_content = lines.join("\n");
         eprintln!("Table in flexbox content:\n{}", all_content);
@@ -1396,6 +1413,15 @@ mod tests {
         let palette = Palette::default();
         let attrs = style_to_attributes(&palette, &Style::dim());
         assert!(attrs.is_dim());
+    }
+
+    #[test]
+    fn reverse_style_sets_reverse() {
+        let palette = Palette::default();
+        let mut style = Style::default();
+        style.reverse = true;
+        let attrs = style_to_attributes(&palette, &style);
+        assert!(attrs.is_reverse());
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use std::hash::Hash;
 
-use crate::dom::{Node, Style, TableColumn, TableColumnWidth, TableRow, TextSpan, rich_text, table};
+use crate::dom::{
+    Node, Style, TableColumn, TableColumnWidth, TableRow, TextSpan, rich_text, table,
+};
 
 /// Selection mode for the data table.
 ///
@@ -355,7 +357,10 @@ impl<Id> DataTableState<Id> {
     /// Selects the next cell (moves right, wraps to next row).
     /// Only applicable in Cell mode.
     pub fn select_next_cell(&mut self) {
-        if self.selection_mode != SelectionMode::Cell || self.rows.is_empty() || self.columns.is_empty() {
+        if self.selection_mode != SelectionMode::Cell
+            || self.rows.is_empty()
+            || self.columns.is_empty()
+        {
             return;
         }
 
@@ -374,7 +379,10 @@ impl<Id> DataTableState<Id> {
     /// Selects the previous cell (moves left, wraps to previous row).
     /// Only applicable in Cell mode.
     pub fn select_prev_cell(&mut self) {
-        if self.selection_mode != SelectionMode::Cell || self.rows.is_empty() || self.columns.is_empty() {
+        if self.selection_mode != SelectionMode::Cell
+            || self.rows.is_empty()
+            || self.columns.is_empty()
+        {
             return;
         }
 
@@ -407,7 +415,10 @@ impl<Id> DataTableState<Id> {
     /// Moves selection to the last cell in the current row.
     /// Only applicable in Cell mode.
     pub fn select_last_cell_in_row(&mut self) {
-        if self.selection_mode != SelectionMode::Cell || self.rows.is_empty() || self.columns.is_empty() {
+        if self.selection_mode != SelectionMode::Cell
+            || self.rows.is_empty()
+            || self.columns.is_empty()
+        {
             return;
         }
 
@@ -454,13 +465,14 @@ impl<Id> DataTableState<Id> {
         match self.selection_mode {
             SelectionMode::Row => {
                 if let Some(idx) = self.selected_row
-                    && idx >= self.rows.len() {
-                        self.selected_row = if self.rows.is_empty() {
-                            None
-                        } else {
-                            Some(self.rows.len() - 1)
-                        };
-                    }
+                    && idx >= self.rows.len()
+                {
+                    self.selected_row = if self.rows.is_empty() {
+                        None
+                    } else {
+                        Some(self.rows.len() - 1)
+                    };
+                }
             }
             SelectionMode::Cell => {
                 if let Some(pos) = self.selected_cell {
@@ -548,7 +560,7 @@ where
             if let Some(header_text) = col_def.header() {
                 let header_spans = vec![TextSpan::new(header_text, style.header_style.clone())];
                 let header_node = rich_text::<Msg>(header_spans);
-                
+
                 // Note: Cannot add click handlers to text nodes directly
                 // Header clicks would need to be handled at a higher level
                 table_col = table_col.with_header(header_node);
@@ -584,7 +596,17 @@ where
                     // Create cell with styled text
                     // Note: Cannot add mouse handlers to text nodes directly
                     // Mouse interaction would need to be handled at a higher level or via keyboard
-                    rich_text::<Msg>(cell_spans.clone()).with_style(cell_style)
+                    rich_text::<Msg>(
+                        cell_spans
+                            .iter()
+                            .map(|span| {
+                                let mut span = span.clone();
+                                span.style.apply_overlay(&cell_style);
+                                span
+                            })
+                            .collect::<Vec<_>>(),
+                    )
+                    .with_style(cell_style)
                 })
                 .collect();
 
@@ -620,7 +642,10 @@ fn get_cell_style(ctx: CellStyleContext) -> Style {
             if Some(ctx.row_idx) == ctx.selected_row {
                 ctx.style.selected_row_style.clone()
             } else if ctx.is_alternate {
-                ctx.style.alternate_row_style.clone().unwrap_or_else(|| ctx.style.row_style.clone())
+                ctx.style
+                    .alternate_row_style
+                    .clone()
+                    .unwrap_or_else(|| ctx.style.row_style.clone())
             } else {
                 ctx.style.row_style.clone()
             }
@@ -629,7 +654,10 @@ fn get_cell_style(ctx: CellStyleContext) -> Style {
             if Some(CellPosition::new(ctx.row_idx, ctx.col_idx)) == ctx.selected_cell {
                 ctx.style.selected_cell_style.clone()
             } else if ctx.is_alternate {
-                ctx.style.alternate_row_style.clone().unwrap_or_else(|| ctx.style.row_style.clone())
+                ctx.style
+                    .alternate_row_style
+                    .clone()
+                    .unwrap_or_else(|| ctx.style.row_style.clone())
             } else {
                 ctx.style.row_style.clone()
             }
@@ -837,15 +865,13 @@ mod tests {
         assert_eq!(state.selected_row(), Some(2));
 
         // Remove last row
-        state.set_rows(vec![
-            RowData::new(
-                1,
-                vec![
-                    vec![TextSpan::new("A", Style::default())],
-                    vec![TextSpan::new("B", Style::default())],
-                ],
-            ),
-        ]);
+        state.set_rows(vec![RowData::new(
+            1,
+            vec![
+                vec![TextSpan::new("A", Style::default())],
+                vec![TextSpan::new("B", Style::default())],
+            ],
+        )]);
 
         assert_eq!(state.selected_row(), Some(0));
     }
@@ -869,7 +895,9 @@ mod tests {
         state.select_cell(CellPosition::new(1, 1));
 
         // Remove last column
-        state.set_columns(vec![ColumnDef::new(TableColumnWidth::Auto).with_header("Col1")]);
+        state.set_columns(vec![
+            ColumnDef::new(TableColumnWidth::Auto).with_header("Col1"),
+        ]);
 
         assert_eq!(state.selected_cell(), Some(CellPosition::new(1, 0)));
     }
@@ -949,7 +977,9 @@ mod tests {
     #[test]
     fn renders_single_column_table() {
         let mut state = DataTableState::new(SelectionMode::Row);
-        state.set_columns(vec![ColumnDef::new(TableColumnWidth::Auto).with_header("Col")]);
+        state.set_columns(vec![
+            ColumnDef::new(TableColumnWidth::Auto).with_header("Col"),
+        ]);
         state.set_rows(vec![
             RowData::new(1, vec![vec![TextSpan::new("A", Style::default())]]),
             RowData::new(2, vec![vec![TextSpan::new("B", Style::default())]]),
@@ -996,7 +1026,7 @@ mod tests {
     fn renders_with_custom_row_style() {
         let mut state = DataTableState::new(SelectionMode::Row);
         state.set_columns(make_test_columns());
-        
+
         let custom_style = Style::fg(crate::dom::Color::Red);
         let rows = vec![
             RowData::new(
@@ -1028,8 +1058,7 @@ mod tests {
 
     #[test]
     fn column_def_accessors() {
-        let col = ColumnDef::<u32>::new(TableColumnWidth::Fixed(10.0))
-            .with_header("Test Header");
+        let col = ColumnDef::<u32>::new(TableColumnWidth::Fixed(10.0)).with_header("Test Header");
 
         assert_eq!(col.header(), Some("Test Header"));
         assert_eq!(col.width(), TableColumnWidth::Fixed(10.0));

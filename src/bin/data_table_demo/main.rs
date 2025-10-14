@@ -358,11 +358,11 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chatui::event::Size;
     use chatui::buffer::DoubleBuffer;
-    use chatui::render::Renderer;
-    use chatui::palette::Palette;
     use chatui::dom::rounding::round_layout;
+    use chatui::event::Size;
+    use chatui::palette::Palette;
+    use chatui::render::Renderer;
     use taffy::{AvailableSpace, compute_root_layout};
 
     fn render_to_lines(node: &mut chatui::Node<Msg>, width: usize, height: usize) -> Vec<String> {
@@ -370,7 +370,7 @@ mod tests {
             width.try_into().expect("width fits in u16"),
             height.try_into().expect("height fits in u16"),
         );
-        
+
         // Prepare layout
         compute_root_layout(
             node,
@@ -388,7 +388,7 @@ mod tests {
             let mut renderer = Renderer::new(&mut buffer, &palette);
             renderer.render(node, size).expect("render should succeed");
         }
-        
+
         // Extract text from buffer manually
         let mut lines = Vec::new();
         for y in 0..height {
@@ -407,8 +407,8 @@ mod tests {
 
     #[test]
     fn simple_table_in_column_renders() {
-        use chatui::dom::{table, TableColumn, TableColumnWidth, TableRow, text, column};
-        
+        use chatui::dom::{TableColumn, TableColumnWidth, TableRow, column, table, text};
+
         let columns = vec![
             TableColumn::new(TableColumnWidth::Auto).with_header(text::<Msg>("A")),
             TableColumn::new(TableColumnWidth::Auto).with_header(text::<Msg>("B")),
@@ -418,17 +418,21 @@ mod tests {
             TableRow::new(vec![text::<Msg>("3"), text::<Msg>("4")]),
         ];
         let table_node = table(columns, rows);
-        
-        let mut view = column(vec![text::<Msg>("Title"), table_node, text::<Msg>("Footer")]);
-        
+
+        let mut view = column(vec![
+            text::<Msg>("Title"),
+            table_node,
+            text::<Msg>("Footer"),
+        ]);
+
         let lines = render_to_lines(&mut view, 30, 10);
-        
+
         println!("\n=== Simple Table in Column ===");
         for (i, line) in lines.iter().enumerate() {
             println!("{:2}: '{}'", i, line);
         }
         println!("=== End ===\n");
-        
+
         let all_content = lines.join("\n");
         assert!(all_content.contains("A"), "Should contain header A");
         assert!(all_content.contains("B"), "Should contain header B");
@@ -444,22 +448,22 @@ mod tests {
         style.column_gap = 2;
 
         let mut table_node = data_table_view(&model.table_state_row, &style, |_| Msg::Quit);
-        
+
         // Render the table directly without wrapping in column
         let lines = render_to_lines(&mut table_node, 100, 30);
-        
+
         println!("\n=== Direct Table Render ({} lines) ===", lines.len());
         for (i, line) in lines.iter().take(15).enumerate() {
             println!("{:3}: '{}'", i, line);
         }
         println!("=== End ===\n");
-        
+
         let all_content = lines.join("\n");
-        
+
         // Check for headers
         assert!(all_content.contains("ID"), "Should contain ID header");
         assert!(all_content.contains("Name"), "Should contain Name header");
-        
+
         // Check for data
         assert!(all_content.contains("Alice"), "Should contain Alice");
     }
@@ -468,44 +472,69 @@ mod tests {
     fn initial_model_renders_table_with_employee_data() {
         let model = init_model();
         let mut view_node = view(&model);
-        
+
         // Render with a large terminal size
         let lines = render_to_lines(&mut view_node, 100, 50);
-        
+
         // Print the actual output for debugging
         println!("\n=== Rendered Output ({} lines) ===", lines.len());
         for (i, line) in lines.iter().take(20).enumerate() {
             println!("{:3}: '{}'", i, line);
         }
         println!("=== End Output ===\n");
-        
+
         // Check that we have multiple lines (not just 2)
-        assert!(lines.len() > 10, "Should have more than 10 lines, got {}", lines.len());
-        
+        assert!(
+            lines.len() > 10,
+            "Should have more than 10 lines, got {}",
+            lines.len()
+        );
+
         // Join all lines to make assertions easier
         let all_content = lines.join("\n");
-        
+
         // Check for title
-        assert!(all_content.contains("Employee Directory"), "Should contain title");
-        
+        assert!(
+            all_content.contains("Employee Directory"),
+            "Should contain title"
+        );
+
         // Check for column headers
         assert!(all_content.contains("ID"), "Should contain ID header");
         assert!(all_content.contains("Name"), "Should contain Name header");
         assert!(all_content.contains("Role"), "Should contain Role header");
-        assert!(all_content.contains("Department"), "Should contain Department header");
-        assert!(all_content.contains("Salary"), "Should contain Salary header");
-        
+        assert!(
+            all_content.contains("Department"),
+            "Should contain Department header"
+        );
+        assert!(
+            all_content.contains("Salary"),
+            "Should contain Salary header"
+        );
+
         // Check for employee data
         assert!(all_content.contains("Alice"), "Should contain Alice");
         assert!(all_content.contains("Bob"), "Should contain Bob");
         assert!(all_content.contains("Carol"), "Should contain Carol");
-        assert!(all_content.contains("Software Engineer"), "Should contain Software Engineer");
-        assert!(all_content.contains("Product Manager"), "Should contain Product Manager");
+        assert!(
+            all_content.contains("Software Engineer"),
+            "Should contain Software Engineer"
+        );
+        assert!(
+            all_content.contains("Product Manager"),
+            "Should contain Product Manager"
+        );
         assert!(all_content.contains("Designer"), "Should contain Designer");
-        
+
         // Check for salary data
-        assert!(all_content.contains("95000") || all_content.contains("$95000"), "Should contain salary 95000");
-        assert!(all_content.contains("110000") || all_content.contains("$110000"), "Should contain salary 110000");
+        assert!(
+            all_content.contains("95000") || all_content.contains("$95000"),
+            "Should contain salary 95000"
+        );
+        assert!(
+            all_content.contains("110000") || all_content.contains("$110000"),
+            "Should contain salary 110000"
+        );
     }
 }
 

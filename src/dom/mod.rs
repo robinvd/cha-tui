@@ -226,6 +226,7 @@ pub struct Style {
     pub bold: bool,
     pub dim: bool,
     pub border: bool,
+    pub reverse: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -772,6 +773,9 @@ impl Style {
         if overlay.border {
             self.border = true;
         }
+        if overlay.reverse {
+            self.reverse = true;
+        }
     }
 
     /// Return a new style with the overlay applied on top of `self`.
@@ -889,17 +893,6 @@ impl<Msg> TraversePartialTree for Node<Msg> {
 
     fn get_child_id(&self, parent_node_id: NodeId, child_index: usize) -> NodeId {
         self.child_ids(parent_node_id).nth(child_index).unwrap()
-    }
-}
-
-impl<Msg> Node<Msg> {
-    /// Returns the number of children this node has, without requiring a NodeId.
-    fn child_count_direct(&self) -> usize {
-        match &self.content {
-            NodeContent::Element(element_node) => element_node.children.len(),
-            NodeContent::Text(_) => 0,
-            NodeContent::Renderable(_) => 0,
-        }
     }
 }
 

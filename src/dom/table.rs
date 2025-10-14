@@ -1,6 +1,7 @@
 use super::{ElementKind, ElementNode, Node, NodeContent, text};
 use taffy::style::{
-    CoreStyle, Dimension, GridTemplateComponent, Style as TaffyStyle, TrackSizingFunction,
+    AlignContent, CoreStyle, Dimension, GridTemplateComponent, Style as TaffyStyle,
+    TrackSizingFunction,
 };
 use taffy::style_helpers::{flex, length, line, percent, span};
 
@@ -33,8 +34,8 @@ impl<Msg> TableColumn<Msg> {
     /// ```
     /// use chatui::{TableColumn, TableColumnWidth};
     ///
-    /// let auto_column = TableColumn::new(TableColumnWidth::Auto);
-    /// let fixed_column = TableColumn::new(TableColumnWidth::Fixed(100.0));
+    /// let auto_column: TableColumn<()> = TableColumn::new(TableColumnWidth::Auto);
+    /// let fixed_column: TableColumn<()> = TableColumn::new(TableColumnWidth::Fixed(100.0));
     /// ```
     pub fn new(width: TableColumnWidth) -> Self {
         Self {
@@ -127,10 +128,10 @@ impl<Msg> TableRow<Msg> {
 /// ```
 /// use chatui::{TableColumn, TableColumnWidth};
 ///
-/// let auto = TableColumn::new(TableColumnWidth::Auto);
-/// let fixed = TableColumn::new(TableColumnWidth::Fixed(20.0));
-/// let percent = TableColumn::new(TableColumnWidth::Percent(50.0));
-/// let flex = TableColumn::new(TableColumnWidth::Flexible(2.0));
+/// let auto: TableColumn<()> = TableColumn::new(TableColumnWidth::Auto);
+/// let fixed: TableColumn<()> = TableColumn::new(TableColumnWidth::Fixed(20.0));
+/// let percent: TableColumn<()> = TableColumn::new(TableColumnWidth::Percent(50.0));
+/// let flex: TableColumn<()> = TableColumn::new(TableColumnWidth::Flexible(2.0));
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TableColumnWidth {
@@ -253,6 +254,7 @@ pub fn table<Msg>(columns: Vec<TableColumn<Msg>>, rows: Vec<TableRow<Msg>>) -> N
     let mut node = Node::new(NodeContent::Element(element));
     node.layout_state.style.display = taffy::style::Display::Grid;
     node.layout_state.style.grid_template_columns = column_components;
+    node.layout_state.style.align_content = Some(AlignContent::Start);
     node
 }
 
@@ -288,7 +290,10 @@ mod tests {
         assert_eq!(element.kind, ElementKind::Table);
         assert_eq!(element.children.len(), 6);
         assert_eq!(table_node.layout_state().style.display, Display::Grid);
-        assert_eq!(table_node.layout_state().style.grid_template_columns.len(), 2);
+        assert_eq!(
+            table_node.layout_state().style.grid_template_columns.len(),
+            2
+        );
 
         let first_child = &element.children[0];
         let style = &first_child.layout_state().style;
@@ -322,16 +327,17 @@ mod tests {
         let table_node = table(columns, rows);
         let element = table_node.as_element().expect("element");
         assert_eq!(element.children.len(), 2);
-        assert_eq!(table_node.layout_state().style.grid_template_columns.len(), 2);
+        assert_eq!(
+            table_node.layout_state().style.grid_template_columns.len(),
+            2
+        );
     }
 
     #[test]
     fn mixed_column_widths() {
         let columns = vec![
-            TableColumn::new(TableColumnWidth::Fixed(10.0))
-                .with_header(dom::text::<()>("ID")),
-            TableColumn::new(TableColumnWidth::Auto)
-                .with_header(dom::text::<()>("Name")),
+            TableColumn::new(TableColumnWidth::Fixed(10.0)).with_header(dom::text::<()>("ID")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(dom::text::<()>("Name")),
             TableColumn::new(TableColumnWidth::Flexible(2.0))
                 .with_header(dom::text::<()>("Description")),
             TableColumn::new(TableColumnWidth::Percent(15.0))
@@ -347,44 +353,60 @@ mod tests {
         let table_node = table(columns, rows);
         let element = table_node.as_element().expect("element");
         assert_eq!(element.children.len(), 8); // 4 header + 4 data cells
-        assert_eq!(table_node.layout_state().style.grid_template_columns.len(), 4);
+        assert_eq!(
+            table_node.layout_state().style.grid_template_columns.len(),
+            4
+        );
 
         // Verify first data cell is positioned correctly
         let first_data_cell = &element.children[4];
         assert_eq!(first_data_cell.layout_state().style.grid_row.start, line(2));
-        assert_eq!(first_data_cell.layout_state().style.grid_column.start, line(1));
+        assert_eq!(
+            first_data_cell.layout_state().style.grid_column.start,
+            line(1)
+        );
     }
 
     #[test]
     fn empty_table_with_only_headers() {
         let columns = vec![
-            TableColumn::new(TableColumnWidth::Auto)
-                .with_header(dom::text::<()>("Column 1")),
-            TableColumn::new(TableColumnWidth::Auto)
-                .with_header(dom::text::<()>("Column 2")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(dom::text::<()>("Column 1")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(dom::text::<()>("Column 2")),
         ];
         let rows = vec![];
 
         let table_node = table(columns, rows);
         let element = table_node.as_element().expect("element");
         assert_eq!(element.children.len(), 2); // Only header cells
-        assert_eq!(table_node.layout_state().style.grid_template_columns.len(), 2);
+        assert_eq!(
+            table_node.layout_state().style.grid_template_columns.len(),
+            2
+        );
 
         // Verify headers are in first row
-        assert_eq!(element.children[0].layout_state().style.grid_row.start, line(1));
-        assert_eq!(element.children[1].layout_state().style.grid_row.start, line(1));
+        assert_eq!(
+            element.children[0].layout_state().style.grid_row.start,
+            line(1)
+        );
+        assert_eq!(
+            element.children[1].layout_state().style.grid_row.start,
+            line(1)
+        );
     }
 
     #[test]
     fn single_cell_table() {
-        let columns = vec![TableColumn::new(TableColumnWidth::Auto)
-            .with_header(dom::text::<()>("Header"))];
+        let columns =
+            vec![TableColumn::new(TableColumnWidth::Auto).with_header(dom::text::<()>("Header"))];
         let rows = vec![TableRow::new(vec![dom::text::<()>("Cell")])];
 
         let table_node = table(columns, rows);
         let element = table_node.as_element().expect("element");
         assert_eq!(element.children.len(), 2); // 1 header + 1 data cell
-        assert_eq!(table_node.layout_state().style.grid_template_columns.len(), 1);
+        assert_eq!(
+            table_node.layout_state().style.grid_template_columns.len(),
+            1
+        );
 
         let data_cell = &element.children[1];
         assert_eq!(data_cell.layout_state().style.grid_row.start, line(2));
@@ -409,8 +431,14 @@ mod tests {
 
         // Verify third row positioning
         let third_row_first_cell = &element.children[4];
-        assert_eq!(third_row_first_cell.layout_state().style.grid_row.start, line(3));
-        assert_eq!(third_row_first_cell.layout_state().style.grid_column.start, line(1));
+        assert_eq!(
+            third_row_first_cell.layout_state().style.grid_row.start,
+            line(3)
+        );
+        assert_eq!(
+            third_row_first_cell.layout_state().style.grid_column.start,
+            line(1)
+        );
     }
 
     #[test]

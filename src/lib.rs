@@ -10,6 +10,7 @@ pub mod palette;
 pub mod program;
 pub mod render;
 pub mod scroll;
+pub mod test_utils;
 
 // Re-export termina's OneBased type
 pub use termina::OneBased;
