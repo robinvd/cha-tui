@@ -47,7 +47,6 @@ impl Employee {
 }
 
 struct Model {
-    employees: Vec<Employee>,
     table_state_row: DataTableState<u32>,
     table_state_cell: DataTableState<u32>,
     current_mode: ModeSelection,
@@ -61,8 +60,8 @@ enum ModeSelection {
 }
 
 enum Msg {
-    TableRowMsg(DataTableMsg<u32>),
-    TableCellMsg(DataTableMsg<u32>),
+    TableRow(DataTableMsg<u32>),
+    TableCell(DataTableMsg<u32>),
     NextRow,
     PrevRow,
     FirstRow,
@@ -114,7 +113,6 @@ fn init_model() -> Model {
     table_state_cell.select_cell(CellPosition::new(0, 0));
 
     Model {
-        employees,
         table_state_row,
         table_state_cell,
         current_mode: ModeSelection::RowMode,
@@ -124,10 +122,10 @@ fn init_model() -> Model {
 
 fn update(model: &mut Model, msg: Msg) -> Transition {
     match msg {
-        Msg::TableRowMsg(table_msg) => {
+        Msg::TableRow(table_msg) => {
             model.status_message = format!("Row Mode - Event: {:?}", table_msg);
         }
-        Msg::TableCellMsg(table_msg) => {
+        Msg::TableCell(table_msg) => {
             model.status_message = format!("Cell Mode - Event: {:?}", table_msg);
         }
         Msg::NextRow => match model.current_mode {
@@ -266,15 +264,15 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
 }
 
 fn view(model: &Model) -> chatui::Node<Msg> {
-    let mut style = DataTableStyle::default();
-    style.alternate_row_style = Some(Style::bg(Color::rgba(20, 20, 30, 255)));
-    style.column_gap = 2;
+    let style = DataTableStyle {
+        alternate_row_style: Some(Style::bg(Color::rgba(20, 20, 30, 255))),
+        column_gap: 2,
+        ..Default::default()
+    };
 
     let table = match model.current_mode {
-        ModeSelection::RowMode => data_table_view(&model.table_state_row, &style, Msg::TableRowMsg),
-        ModeSelection::CellMode => {
-            data_table_view(&model.table_state_cell, &style, Msg::TableCellMsg)
-        }
+        ModeSelection::RowMode => data_table_view(&model.table_state_row, &style, Msg::TableRow),
+        ModeSelection::CellMode => data_table_view(&model.table_state_cell, &style, Msg::TableCell),
     }
     .with_height(Dimension::length(5.));
 
@@ -443,9 +441,11 @@ mod tests {
     #[test]
     fn table_renders_directly_without_column() {
         let model = init_model();
-        let mut style = DataTableStyle::default();
-        style.alternate_row_style = Some(Style::bg(Color::rgba(20, 20, 30, 255)));
-        style.column_gap = 2;
+        let style = DataTableStyle {
+            alternate_row_style: Some(Style::bg(Color::rgba(20, 20, 30, 255))),
+            column_gap: 2,
+            ..Default::default()
+        };
 
         let mut table_node = data_table_view(&model.table_state_row, &style, |_| Msg::Quit);
 
