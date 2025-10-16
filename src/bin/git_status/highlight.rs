@@ -1,4 +1,6 @@
+use std::collections::{HashMap, VecDeque};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use once_cell::sync::Lazy;
 use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
@@ -8,14 +10,6 @@ use chatui::dom::{Color, Style, TextSpan};
 use color_eyre::eyre::Result;
 
 use super::runtime::{self, LibraryHandle};
-
-#[derive(Clone, Copy)]
-pub enum LanguageKind {
-    Rust,
-    Markdown,
-    Python,
-    Go,
-}
 
 const HIGHLIGHT_NAMES: &[&str] = &[
     "attribute",
@@ -77,6 +71,295 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "variable.parameter",
 ];
 
+const LANGUAGE_CACHE_CAPACITY: usize = 10;
+
+static EXTENSION_LANGUAGE_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
+    let mut map = HashMap::new();
+    map.insert("rs", "rust");
+    map.insert("md", "markdown");
+    map.insert("markdown", "markdown");
+    map.insert("mdown", "markdown");
+    map.insert("mkd", "markdown");
+    map.insert("mkdn", "markdown");
+    map.insert("mdwn", "markdown");
+    map.insert("mdtxt", "markdown");
+    map.insert("mdtext", "markdown");
+    map.insert("mdx", "markdown");
+    map.insert("livemd", "markdown");
+    map.insert("markdn", "markdown");
+    map.insert("workbook", "markdown");
+    map.insert("py", "python");
+    map.insert("pyw", "python");
+    map.insert("pyi", "python");
+    map.insert("py3", "python");
+    map.insert("cpy", "python");
+    map.insert("ipy", "python");
+    map.insert("ptl", "python");
+    map.insert("pyt", "python");
+    map.insert("rpy", "python");
+    map.insert("go", "go");
+    map.insert("js", "javascript");
+    map.insert("mjs", "javascript");
+    map.insert("cjs", "javascript");
+    map.insert("es6", "javascript");
+    map.insert("pac", "javascript");
+    map.insert("rules", "javascript");
+    map.insert("ts", "typescript");
+    map.insert("mts", "typescript");
+    map.insert("cts", "typescript");
+    map.insert("tsx", "tsx");
+    map.insert("jsx", "jsx");
+    map.insert("json", "json");
+    map.insert("jsonl", "json");
+    map.insert("geojson", "json");
+    map.insert("gltf", "json");
+    map.insert("ipynb", "json");
+    map.insert("webmanifest", "json");
+    map.insert("arb", "json");
+    map.insert("avsc", "json");
+    map.insert("ldtk", "json");
+    map.insert("ldtkl", "json");
+    map.insert("sublime-build", "json");
+    map.insert("sublime-color-scheme", "json");
+    map.insert("sublime-commands", "json");
+    map.insert("sublime-completions", "json");
+    map.insert("sublime-keymap", "json");
+    map.insert("sublime-macro", "json");
+    map.insert("sublime-menu", "json");
+    map.insert("sublime-mousemap", "json");
+    map.insert("sublime-project", "json");
+    map.insert("sublime-settings", "json");
+    map.insert("sublime-theme", "json");
+    map.insert("sublime-workspace", "json");
+    map.insert("json5", "json5");
+    map.insert("jsonc", "jsonc");
+    map.insert("jsonnet", "jsonnet");
+    map.insert("libsonnet", "jsonnet");
+    map.insert("yml", "yaml");
+    map.insert("yaml", "yaml");
+    map.insert("sublime-syntax", "yaml");
+    map.insert("toml", "toml");
+    map.insert("sh", "bash");
+    map.insert("bash", "bash");
+    map.insert("zsh", "bash");
+    map.insert("ksh", "bash");
+    map.insert("mksh", "bash");
+    map.insert("ash", "bash");
+    map.insert("dash", "bash");
+    map.insert("zprofile", "bash");
+    map.insert("zlogin", "bash");
+    map.insert("zlogout", "bash");
+    map.insert("zshenv", "bash");
+    map.insert("zshrc", "bash");
+    map.insert("zshrc_apple_terminal", "bash");
+    map.insert("bashrc_apple_terminal", "bash");
+    map.insert("zsh-theme", "bash");
+    map.insert("ebuild", "bash");
+    map.insert("eclass", "bash");
+    map.insert("bazelrc", "bash");
+    map.insert("cshrc", "bash");
+    map.insert("tcshrc", "bash");
+    map.insert("renviron", "bash");
+    map.insert("sql", "sql");
+    map.insert("dsql", "sql");
+    map.insert("html", "html");
+    map.insert("htm", "html");
+    map.insert("xhtml", "html");
+    map.insert("xht", "html");
+    map.insert("shtml", "html");
+    map.insert("jsp", "html");
+    map.insert("asp", "html");
+    map.insert("aspx", "html");
+    map.insert("cshtml", "html");
+    map.insert("jshtm", "html");
+    map.insert("rhtml", "html");
+    map.insert("volt", "html");
+    map.insert("css", "css");
+    map.insert("scss", "scss");
+    map.insert("svelte", "svelte");
+    map.insert("vue", "vue");
+    map.insert("java", "java");
+    map.insert("jav", "java");
+    map.insert("pde", "java");
+    map.insert("kt", "kotlin");
+    map.insert("kts", "kotlin");
+    map.insert("swift", "swift");
+    map.insert("swiftinterface", "swift");
+    map.insert("c", "c");
+    map.insert("h", "c");
+    map.insert("cc", "cpp");
+    map.insert("cpp", "cpp");
+    map.insert("cxx", "cpp");
+    map.insert("hpp", "cpp");
+    map.insert("hh", "cpp");
+    map.insert("hxx", "cpp");
+    map.insert("h++", "cpp");
+    map.insert("ipp", "cpp");
+    map.insert("tpp", "cpp");
+    map.insert("txx", "cpp");
+    map.insert("ixx", "cpp");
+    map.insert("ino", "cpp");
+    map.insert("cu", "cpp");
+    map.insert("cuh", "cpp");
+    map.insert("cppm", "cpp");
+    map.insert("ii", "cpp");
+    map.insert("inl", "cpp");
+    map.insert("cs", "c-sharp");
+    map.insert("csx", "c-sharp");
+    map.insert("cake", "c-sharp");
+    map.insert("clj", "clojure");
+    map.insert("cljs", "clojure");
+    map.insert("cljc", "clojure");
+    map.insert("clje", "clojure");
+    map.insert("cljr", "clojure");
+    map.insert("cljx", "clojure");
+    map.insert("boot", "clojure");
+    map.insert("edn", "clojure");
+    map.insert("cmake", "cmake");
+    map.insert("lua", "lua");
+    map.insert("rockspec", "lua");
+    map.insert("php", "php");
+    map.insert("php4", "php");
+    map.insert("php5", "php");
+    map.insert("phtml", "php");
+    map.insert("ctp", "php");
+    map.insert("inc", "php");
+    map.insert("rb", "ruby");
+    map.insert("rake", "ruby");
+    map.insert("gemspec", "ruby");
+    map.insert("podspec", "ruby");
+    map.insert("rabl", "ruby");
+    map.insert("rjs", "ruby");
+    map.insert("irb", "ruby");
+    map.insert("rbi", "ruby");
+    map.insert("rbs", "ruby");
+    map.insert("jb", "ruby");
+    map.insert("jbuilder", "ruby");
+    map.insert("scala", "scala");
+    map.insert("sc", "scala");
+    map.insert("sbt", "scala");
+    map.insert("hs", "haskell");
+    map.insert("hsc", "haskell");
+    map.insert("hs-boot", "haskell");
+    map.insert("ex", "elixir");
+    map.insert("exs", "elixir");
+    map.insert("erl", "erlang");
+    map.insert("hrl", "erlang");
+    map.insert("app", "erlang");
+    map.insert("fs", "fsharp");
+    map.insert("fsi", "fsharp");
+    map.insert("fsx", "fsharp");
+    map.insert("fsscript", "fsharp");
+    map.insert("f", "fortran");
+    map.insert("f90", "fortran");
+    map.insert("f95", "fortran");
+    map.insert("f03", "fortran");
+    map.insert("for", "fortran");
+    map.insert("groovy", "groovy");
+    map.insert("gradle", "groovy");
+    map.insert("jenkinsfile", "groovy");
+    map.insert("dart", "dart");
+    map.insert("graphql", "graphql");
+    map.insert("gql", "graphql");
+    map.insert("graphqls", "graphql");
+    map.insert("prisma", "prisma");
+    map.insert("properties", "properties");
+    map.insert("prefs", "properties");
+    map.insert("ini", "ini");
+    map.insert("cfg", "ini");
+    map.insert("desktop", "ini");
+    map.insert("container", "ini");
+    map.insert("volume", "ini");
+    map.insert("kube", "ini");
+    map.insert("network", "ini");
+    map.insert("directory", "ini");
+    map.insert("nix", "nix");
+    map.insert("ml", "ocaml");
+    map.insert("mli", "ocaml-interface");
+    map.insert("pl", "perl");
+    map.insert("pm", "perl");
+    map.insert("t", "perl");
+    map.insert("psgi", "perl");
+    map.insert("raku", "perl");
+    map.insert("rakumod", "perl");
+    map.insert("rakudoc", "perl");
+    map.insert("rakutest", "perl");
+    map.insert("nqp", "perl");
+    map.insert("p6", "perl");
+    map.insert("pl6", "perl");
+    map.insert("pm6", "perl");
+    map.insert("ps1", "powershell");
+    map.insert("psm1", "powershell");
+    map.insert("psd1", "powershell");
+    map.insert("pscc", "powershell");
+    map.insert("psrc", "powershell");
+    map.insert("textproto", "textproto");
+    map.insert("txtpb", "textproto");
+    map.insert("textpb", "textproto");
+    map.insert("templ", "templ");
+    map.insert("typ", "typst");
+    map.insert("typst", "typst");
+    map.insert("bzl", "starlark");
+    map.insert("bazel", "starlark");
+    map.insert("star", "starlark");
+    map.insert("make", "make");
+    map.insert("mk", "make");
+    map.insert("mak", "make");
+    map.insert("just", "just");
+    map.insert("j2", "jinja");
+    map.insert("jinja", "jinja");
+    map.insert("jinja2", "jinja");
+    map.insert("tex", "latex");
+    map.insert("sty", "latex");
+    map.insert("cls", "latex");
+    map.insert("bbx", "latex");
+    map.insert("cbx", "latex");
+    map.insert("rd", "latex");
+    map.insert("res", "rescript");
+    map.insert("r", "r");
+    map.insert("rkt", "racket");
+    map.insert("rktd", "racket");
+    map.insert("rktl", "racket");
+    map.insert("scrbl", "racket");
+    map.insert("scm", "scheme");
+    map.insert("ss", "scheme");
+    map.insert("sld", "scheme");
+    map.insert("zig", "zig");
+    map.insert("zon", "zig");
+    map.insert("gitconfig", "git-config");
+    map.insert("hcl", "hcl");
+    map.insert("tf", "hcl");
+    map.insert("nomad", "hcl");
+    map.insert("dockerfile", "dockerfile");
+    map.insert("containerfile", "dockerfile");
+    map
+});
+
+static FILE_LANGUAGE_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
+    let mut map = HashMap::new();
+    map.insert("dockerfile", "dockerfile");
+    map.insert("containerfile", "dockerfile");
+    map.insert("justfile", "just");
+    map.insert("makefile", "make");
+    map.insert("gnumakefile", "make");
+    map.insert("cmakelists.txt", "cmake");
+    map.insert("jenkinsfile", "groovy");
+    map.insert("build", "starlark");
+    map.insert("build.bazel", "starlark");
+    map.insert("workspace", "starlark");
+    map.insert("workspace.bazel", "starlark");
+    map.insert("cargo.lock", "toml");
+    map.insert("poetry.lock", "toml");
+    map.insert("pdm.lock", "toml");
+    map.insert("uv.lock", "toml");
+    map.insert("mix.lock", "elixir");
+    map.insert("gemfile", "ruby");
+    map.insert("gemfile.lock", "ruby");
+    map.insert("podfile", "ruby");
+    map.insert("vagrantfile", "ruby");
+    map
+});
+
 static REGISTRY: Lazy<HighlightRegistry> =
     Lazy::new(|| HighlightRegistry::new().expect("failed to initialize highlight registry"));
 
@@ -93,15 +376,22 @@ pub(crate) const EVERFOREST_GREY2: Color = Color::rgb(0x9d, 0xa9, 0xa0);
 pub(crate) const EVERFOREST_BG_GREEN: Color = Color::rgb(0x42, 0x50, 0x47);
 pub(crate) const EVERFOREST_BG_RED: Color = Color::rgb(0x51, 0x40, 0x45);
 
-pub fn language_for_path(path: &Path) -> Option<LanguageKind> {
-    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    match ext.as_str() {
-        "rs" => Some(LanguageKind::Rust),
-        "py" => Some(LanguageKind::Python),
-        "go" => Some(LanguageKind::Go),
-        "md" | "markdown" | "mdown" | "mkd" => Some(LanguageKind::Markdown),
-        _ => None,
+pub fn language_for_path(path: &Path) -> Option<&'static str> {
+    if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {
+        let key = ext.to_ascii_lowercase();
+        if let Some(language) = EXTENSION_LANGUAGE_MAP.get(key.as_str()) {
+            return Some(*language);
+        }
     }
+
+    if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+        let key = file_name.to_ascii_lowercase();
+        if let Some(language) = FILE_LANGUAGE_MAP.get(key.as_str()) {
+            return Some(*language);
+        }
+    }
+
+    None
 }
 
 pub fn highlight_lines(path: &Path, source: &str) -> Option<Vec<Vec<TextSpan>>> {
@@ -110,140 +400,158 @@ pub fn highlight_lines(path: &Path, source: &str) -> Option<Vec<Vec<TextSpan>>> 
 }
 
 struct HighlightRegistry {
-    rust: HighlightConfiguration,
-    markdown: HighlightConfiguration,
-    markdown_inline: HighlightConfiguration,
-    python: HighlightConfiguration,
-    go: HighlightConfiguration,
     styles: Vec<Style>,
-    _libraries: Vec<LibraryHandle>,
+    cache: Mutex<LanguageCache>,
 }
 
 impl HighlightRegistry {
     fn new() -> Result<Self> {
-        let runtime = runtime::runtime()?;
-        let mut libraries: Vec<LibraryHandle> = Vec::new();
-
-        let rust_highlights = runtime.load_query("rust", "highlights.scm")?;
-        let rust_injections = runtime.load_query("rust", "injections.scm")?;
-        let rust_locals = runtime.load_query_or_empty("rust", "locals.scm")?;
-        let (rust_language, rust_library) = runtime.load_language("rust")?.into_parts();
-        let mut rust = HighlightConfiguration::new(
-            rust_language,
-            "rust",
-            rust_highlights.as_str(),
-            rust_injections.as_str(),
-            rust_locals.as_str(),
-        )?;
-        rust.configure(HIGHLIGHT_NAMES);
-
-        libraries.push(rust_library);
-
-        let markdown_highlights = runtime.load_query_or_empty("markdown", "highlights.scm")?;
-        let markdown_injections = runtime.load_query_or_empty("markdown", "injections.scm")?;
-        let (markdown_language, markdown_library) = runtime.load_language("markdown")?.into_parts();
-        let mut markdown = HighlightConfiguration::new(
-            markdown_language,
-            "markdown",
-            markdown_highlights.as_str(),
-            markdown_injections.as_str(),
-            "",
-        )?;
-        markdown.configure(HIGHLIGHT_NAMES);
-
-        libraries.push(markdown_library);
-
-        let markdown_inline_highlights =
-            runtime.load_query_or_empty("markdown_inline", "highlights.scm")?;
-        let markdown_inline_injections =
-            runtime.load_query_or_empty("markdown_inline", "injections.scm")?;
-        let (markdown_inline_language, markdown_inline_library) =
-            runtime.load_language("markdown_inline")?.into_parts();
-        let mut markdown_inline = HighlightConfiguration::new(
-            markdown_inline_language,
-            "markdown_inline",
-            markdown_inline_highlights.as_str(),
-            markdown_inline_injections.as_str(),
-            "",
-        )?;
-        markdown_inline.configure(HIGHLIGHT_NAMES);
-
-        libraries.push(markdown_inline_library);
-
-        let python_highlights = runtime.load_query("python", "highlights.scm")?;
-        let python_injections = runtime.load_query("python", "injections.scm")?;
-        let python_locals = runtime.load_query_or_empty("python", "locals.scm")?;
-        let (python_language, python_library) = runtime.load_language("python")?.into_parts();
-        let mut python = HighlightConfiguration::new(
-            python_language,
-            "python",
-            python_highlights.as_str(),
-            python_injections.as_str(),
-            python_locals.as_str(),
-        )?;
-        python.configure(HIGHLIGHT_NAMES);
-
-        libraries.push(python_library);
-
-        let go_highlights = runtime.load_query("go", "highlights.scm")?;
-        let go_injections = runtime.load_query("go", "injections.scm")?;
-        let go_locals = runtime.load_query_or_empty("go", "locals.scm")?;
-        let (go_language, go_library) = runtime.load_language("go")?.into_parts();
-        let mut go = HighlightConfiguration::new(
-            go_language,
-            "go",
-            go_highlights.as_str(),
-            go_injections.as_str(),
-            go_locals.as_str(),
-        )?;
-        go.configure(HIGHLIGHT_NAMES);
-
-        libraries.push(go_library);
-
-        let styles = HIGHLIGHT_NAMES.iter().map(|name| style_for(name)).collect();
-
         Ok(Self {
-            rust,
-            markdown,
-            markdown_inline,
-            python,
-            go,
-            styles,
-            _libraries: libraries,
+            styles: HIGHLIGHT_NAMES.iter().map(|name| style_for(name)).collect(),
+            cache: Mutex::new(LanguageCache::new(LANGUAGE_CACHE_CAPACITY)),
         })
     }
 
-    fn highlight(&self, language: LanguageKind, source: &str) -> Result<Vec<Vec<TextSpan>>> {
+    fn highlight(&self, language: &str, source: &str) -> Result<Vec<Vec<TextSpan>>> {
+        let base_config = self.get_or_load(language)?;
         let mut highlighter = Highlighter::new();
-        match language {
-            LanguageKind::Rust => {
-                let iterator =
-                    highlighter.highlight(&self.rust, source.as_bytes(), None, |_| None)?;
-                events_to_lines(iterator, source, &self.styles)
-            }
-            LanguageKind::Python => {
-                let iterator =
-                    highlighter.highlight(&self.python, source.as_bytes(), None, |_| None)?;
-                events_to_lines(iterator, source, &self.styles)
-            }
-            LanguageKind::Go => {
-                let iterator =
-                    highlighter.highlight(&self.go, source.as_bytes(), None, |_| None)?;
-                events_to_lines(iterator, source, &self.styles)
-            }
-            LanguageKind::Markdown => {
-                let iterator =
-                    highlighter.highlight(&self.markdown, source.as_bytes(), None, |name| {
-                        if name == "markdown_inline" {
-                            Some(&self.markdown_inline)
-                        } else {
-                            None
-                        }
-                    })?;
-                events_to_lines(iterator, source, &self.styles)
+        let mut injection_configs: Vec<Arc<HighlightConfiguration>> = Vec::new();
+        let mut injection_refs: Vec<*const HighlightConfiguration> = Vec::new();
+        let mut injection_lookup: HashMap<String, usize> = HashMap::new();
+
+        let iterator =
+            highlighter.highlight(base_config.as_ref(), source.as_bytes(), None, |name| {
+                if let Some(&idx) = injection_lookup.get(name) {
+                    // SAFETY: Pointers originate from Arcs stored in `injection_configs`
+                    // and remain valid for the duration of the highlight call.
+                    return Some(unsafe { &*injection_refs[idx] });
+                }
+                match self.get_or_load(name) {
+                    Ok(config) => {
+                        let idx = injection_configs.len();
+                        injection_lookup.insert(name.to_owned(), idx);
+                        injection_refs.push(Arc::as_ptr(&config));
+                        injection_configs.push(config);
+                        // SAFETY: Pointer references the newly stored Arc.
+                        Some(unsafe { &*injection_refs[idx] })
+                    }
+                    Err(_) => None,
+                }
+            })?;
+        events_to_lines(iterator, source, &self.styles)
+    }
+
+    fn get_or_load(&self, language: &str) -> Result<Arc<HighlightConfiguration>> {
+        if let Some(config) = self.try_get_cached(language) {
+            return Ok(config);
+        }
+
+        let runtime = runtime::runtime()?;
+        let highlights = runtime
+            .load_query(language, "highlights.scm")
+            .or_else(|_| runtime.load_query_or_empty(language, "highlights.scm"))?;
+        let injections = runtime.load_query_or_empty(language, "injections.scm")?;
+        let locals = runtime.load_query_or_empty(language, "locals.scm")?;
+        let (ts_language, library) = runtime.load_language(language)?.into_parts();
+
+        let mut configuration = HighlightConfiguration::new(
+            ts_language,
+            language,
+            highlights.as_str(),
+            injections.as_str(),
+            locals.as_str(),
+        )?;
+        configuration.configure(HIGHLIGHT_NAMES);
+
+        let configuration = Arc::new(configuration);
+
+        let mut cache = self.cache.lock().expect("highlight cache poisoned");
+        if let Some(config) = cache.get(language) {
+            return Ok(config);
+        }
+
+        Ok(cache.insert(language.to_string(), configuration, library))
+    }
+
+    fn try_get_cached(&self, language: &str) -> Option<Arc<HighlightConfiguration>> {
+        let mut cache = self.cache.lock().expect("highlight cache poisoned");
+        cache.get(language)
+    }
+}
+
+struct LanguageCache {
+    max_size: usize,
+    entries: HashMap<String, CacheEntry>,
+    order: VecDeque<String>,
+}
+
+impl LanguageCache {
+    fn new(max_size: usize) -> Self {
+        Self {
+            max_size,
+            entries: HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn get(&mut self, name: &str) -> Option<Arc<HighlightConfiguration>> {
+        if let Some(entry) = self.entries.get(name) {
+            let config = Arc::clone(&entry.config);
+            self.touch(name);
+            Some(config)
+        } else {
+            None
+        }
+    }
+
+    fn insert(
+        &mut self,
+        name: String,
+        config: Arc<HighlightConfiguration>,
+        library: LibraryHandle,
+    ) -> Arc<HighlightConfiguration> {
+        if let Some(existing) = self
+            .entries
+            .get(&name)
+            .map(|entry| Arc::clone(&entry.config))
+        {
+            self.touch(&name);
+            return existing;
+        }
+
+        self.entries.insert(
+            name.clone(),
+            CacheEntry {
+                config: Arc::clone(&config),
+                _library: library,
+            },
+        );
+        self.touch(&name);
+        self.evict_if_needed();
+        config
+    }
+
+    fn touch(&mut self, name: &str) {
+        if let Some(pos) = self.order.iter().position(|existing| existing == name) {
+            self.order.remove(pos);
+        }
+        self.order.push_back(name.to_string());
+    }
+
+    fn evict_if_needed(&mut self) {
+        while self.entries.len() > self.max_size {
+            if let Some(name) = self.order.pop_front() {
+                self.entries.remove(&name);
+            } else {
+                break;
             }
         }
     }
+}
+
+struct CacheEntry {
+    config: Arc<HighlightConfiguration>,
+    _library: LibraryHandle,
 }
 
 fn events_to_lines<I>(iter: I, source: &str, styles: &[Style]) -> Result<Vec<Vec<TextSpan>>>
