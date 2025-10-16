@@ -7,6 +7,8 @@ use chatui::dom::{Color, Style, TextSpan};
 
 use color_eyre::eyre::Result;
 
+use super::runtime::{self, LibraryHandle};
+
 #[derive(Clone, Copy)]
 pub enum LanguageKind {
     Rust,
@@ -78,36 +80,6 @@ const HIGHLIGHT_NAMES: &[&str] = &[
 static REGISTRY: Lazy<HighlightRegistry> =
     Lazy::new(|| HighlightRegistry::new().expect("failed to initialize highlight registry"));
 
-const RUST_HIGHLIGHTS_QUERY: &str = include_str!("queries/rust_highlights.scm");
-const RUST_INJECTIONS_QUERY: &str = include_str!("queries/rust_injections.scm");
-const RUST_LOCALS_QUERY: &str = include_str!("queries/rust_locals.scm");
-const MARKDOWN_HIGHLIGHTS_QUERY: &str = include_str!("queries/markdown_highlights.scm");
-const MARKDOWN_INJECTIONS_QUERY: &str = include_str!("queries/markdown_injections.scm");
-const MARKDOWN_INLINE_HIGHLIGHTS_QUERY: &str =
-    include_str!("queries/markdown_inline_highlights.scm");
-const MARKDOWN_INLINE_INJECTIONS_QUERY: &str =
-    include_str!("queries/markdown_inline_injections.scm");
-
-// External language queries sourced from Helix runtime
-const PYTHON_HIGHLIGHTS_QUERY: &str = include_str!(
-    "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/python/highlights.scm"
-);
-const PYTHON_INJECTIONS_QUERY: &str = include_str!(
-    "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/python/injections.scm"
-);
-const PYTHON_LOCALS_QUERY: &str = include_str!(
-    "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/python/locals.scm"
-);
-
-const GO_HIGHLIGHTS_QUERY: &str = include_str!(
-    "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/go/highlights.scm"
-);
-const GO_INJECTIONS_QUERY: &str = include_str!(
-    "/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/go/injections.scm"
-);
-const GO_LOCALS_QUERY: &str =
-    include_str!("/nix/store/f12s6mabm2g8b2fw7k3b5zl9id4qcpsw-helix-runtime/queries/go/locals.scm");
-
 pub(crate) const EVERFOREST_FG: Color = Color::rgb(0xd3, 0xc6, 0xaa);
 pub(crate) const EVERFOREST_RED: Color = Color::rgb(0xe6, 0x7e, 0x80);
 pub(crate) const EVERFOREST_ORANGE: Color = Color::rgb(0xe6, 0x98, 0x75);
@@ -144,54 +116,89 @@ struct HighlightRegistry {
     python: HighlightConfiguration,
     go: HighlightConfiguration,
     styles: Vec<Style>,
+    _libraries: Vec<LibraryHandle>,
 }
 
 impl HighlightRegistry {
     fn new() -> Result<Self> {
+        let runtime = runtime::runtime()?;
+        let mut libraries: Vec<LibraryHandle> = Vec::new();
+
+        let rust_highlights = runtime.load_query("rust", "highlights.scm")?;
+        let rust_injections = runtime.load_query("rust", "injections.scm")?;
+        let rust_locals = runtime.load_query_or_empty("rust", "locals.scm")?;
+        let (rust_language, rust_library) = runtime.load_language("rust")?.into_parts();
         let mut rust = HighlightConfiguration::new(
-            tree_sitter_rust::LANGUAGE.into(),
+            rust_language,
             "rust",
-            RUST_HIGHLIGHTS_QUERY,
-            RUST_INJECTIONS_QUERY,
-            RUST_LOCALS_QUERY,
+            rust_highlights.as_str(),
+            rust_injections.as_str(),
+            rust_locals.as_str(),
         )?;
         rust.configure(HIGHLIGHT_NAMES);
 
+        libraries.push(rust_library);
+
+        let markdown_highlights = runtime.load_query_or_empty("markdown", "highlights.scm")?;
+        let markdown_injections = runtime.load_query_or_empty("markdown", "injections.scm")?;
+        let (markdown_language, markdown_library) = runtime.load_language("markdown")?.into_parts();
         let mut markdown = HighlightConfiguration::new(
-            tree_sitter_md::LANGUAGE.into(),
+            markdown_language,
             "markdown",
-            MARKDOWN_HIGHLIGHTS_QUERY,
-            MARKDOWN_INJECTIONS_QUERY,
+            markdown_highlights.as_str(),
+            markdown_injections.as_str(),
             "",
         )?;
         markdown.configure(HIGHLIGHT_NAMES);
 
+        libraries.push(markdown_library);
+
+        let markdown_inline_highlights =
+            runtime.load_query_or_empty("markdown_inline", "highlights.scm")?;
+        let markdown_inline_injections =
+            runtime.load_query_or_empty("markdown_inline", "injections.scm")?;
+        let (markdown_inline_language, markdown_inline_library) =
+            runtime.load_language("markdown_inline")?.into_parts();
         let mut markdown_inline = HighlightConfiguration::new(
-            tree_sitter_md::INLINE_LANGUAGE.into(),
+            markdown_inline_language,
             "markdown_inline",
-            MARKDOWN_INLINE_HIGHLIGHTS_QUERY,
-            MARKDOWN_INLINE_INJECTIONS_QUERY,
+            markdown_inline_highlights.as_str(),
+            markdown_inline_injections.as_str(),
             "",
         )?;
         markdown_inline.configure(HIGHLIGHT_NAMES);
 
+        libraries.push(markdown_inline_library);
+
+        let python_highlights = runtime.load_query("python", "highlights.scm")?;
+        let python_injections = runtime.load_query("python", "injections.scm")?;
+        let python_locals = runtime.load_query_or_empty("python", "locals.scm")?;
+        let (python_language, python_library) = runtime.load_language("python")?.into_parts();
         let mut python = HighlightConfiguration::new(
-            tree_sitter_python::LANGUAGE.into(),
+            python_language,
             "python",
-            PYTHON_HIGHLIGHTS_QUERY,
-            PYTHON_INJECTIONS_QUERY,
-            PYTHON_LOCALS_QUERY,
+            python_highlights.as_str(),
+            python_injections.as_str(),
+            python_locals.as_str(),
         )?;
         python.configure(HIGHLIGHT_NAMES);
 
+        libraries.push(python_library);
+
+        let go_highlights = runtime.load_query("go", "highlights.scm")?;
+        let go_injections = runtime.load_query("go", "injections.scm")?;
+        let go_locals = runtime.load_query_or_empty("go", "locals.scm")?;
+        let (go_language, go_library) = runtime.load_language("go")?.into_parts();
         let mut go = HighlightConfiguration::new(
-            tree_sitter_go::LANGUAGE.into(),
+            go_language,
             "go",
-            GO_HIGHLIGHTS_QUERY,
-            GO_INJECTIONS_QUERY,
-            GO_LOCALS_QUERY,
+            go_highlights.as_str(),
+            go_injections.as_str(),
+            go_locals.as_str(),
         )?;
         go.configure(HIGHLIGHT_NAMES);
+
+        libraries.push(go_library);
 
         let styles = HIGHLIGHT_NAMES.iter().map(|name| style_for(name)).collect();
 
@@ -202,6 +209,7 @@ impl HighlightRegistry {
             python,
             go,
             styles,
+            _libraries: libraries,
         })
     }
 
@@ -486,10 +494,22 @@ fn style_for(name: &str) -> Style {
 
 #[cfg(test)]
 mod tests {
+    use super::runtime::HELIX_RUNTIME_ENV;
     use super::*;
+    use std::env;
+
+    fn require_runtime_env() -> String {
+        env::var(HELIX_RUNTIME_ENV).unwrap_or_else(|_| {
+            panic!(
+                "{} must be set for syntax highlight tests",
+                HELIX_RUNTIME_ENV
+            )
+        })
+    }
 
     #[test]
     fn rust_highlight_preserves_content() {
+        let _ = require_runtime_env();
         let source = "fn main() { println!(\"hello\"); }";
         let lines = highlight_lines(Path::new("main.rs"), source).expect("expected highlight");
         assert_eq!(lines.len(), 1);
@@ -499,6 +519,7 @@ mod tests {
 
     #[test]
     fn markdown_highlight_preserves_content() {
+        let _ = require_runtime_env();
         let source = "# Heading\n\nSome **bold** text.";
         let lines = highlight_lines(Path::new("README.md"), source).expect("expected highlight");
         assert_eq!(lines.len(), 3);

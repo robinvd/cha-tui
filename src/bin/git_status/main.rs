@@ -1,5 +1,6 @@
 mod git;
 mod highlight;
+mod runtime;
 
 use std::collections::btree_map::Entry;
 use std::collections::hash_map::DefaultHasher;
