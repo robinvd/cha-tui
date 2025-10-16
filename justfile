@@ -17,3 +17,6 @@ session-get-screen:
     @ZELLIJ_SESSION_NAME=chatui zellij action dump-screen /tmp/chatui_screen
     @cat /tmp/chatui_screen
     @rm /tmp/chatui_screen
+
+test:
+    export $(cat .env | xargs) && cargo test

@@ -35,6 +35,10 @@ ALWAYS use the just commands, and dont use manual version of the commands for in
 
 Before running a new test in the interactive terminal, always do a `session-restart` to made sure there is nothing running.
 
+### Testing
+
+Use `just test` for running the tests, this makes sure all envs etc are set correctly
+
 ### LOGS
 
-Run the app with `RUST_LOG=debug cargo run ...` and it will put logs in todo.log or gs.log depending on the app.
+Run the app with `RUST_LOG=debug cargo run ...` (again! using the `just session-*` or tmux) and it will put logs in todo.log or gs.log depending on the app.
