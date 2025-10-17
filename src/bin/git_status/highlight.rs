@@ -1093,6 +1093,64 @@ mod tests {
     }
 
     #[test]
+    fn go_highlight_preserves_content() {
+        let _ = require_runtime_env();
+        let source = "\
+package capture
+
+func (c Capturer) executeFinancialFallback(ctx context.Context, input *einvoice_input.Input) (*einvoice_output.Output, error) {
+\t// Build a minimal financial component structure identical to the existing fallback path.
+\tfinancialComponentStructure := &financial_input.ComponentStructure{}
+\tfinancialComponentStructure.Financial = &financial_components.Financial{Enabled: true}
+\tfinancialComponentStructure.DateDetails = &financial_components.DateDetails{Enabled: true}
+\tfinancialComponentStructure.ReferenceDetails = &financial_components.ReferenceDetails{Enabled: true}
+\tfinancialComponentStructure.TaxDetails = &financial_components.TaxDetails{Enabled: true}
+\tfinancialComponentStructure.RelationDetails = &financial_components.RelationDetails{Enabled: true}
+\tfinancialComponentStructure.RelationAddress = &financial_components.RelationAddress{Enabled: true}
+\tfinancialComponentStructure.LineItems = &financial_components.LineItems{Enabled: true}
+\tfinancialComponentStructure.AmountDetails = &financial_components.AmountDetails{Enabled: true}
+\tfinancialComponentStructure.DocumentLanguage = &financial_components.DocumentLanguage{Enabled: true}
+\tfinancialComponentStructure.PaymentDetails = &financial_components.PaymentDetails{Enabled: true}
+\tfinancialComponentStructure.DocumentClassification = &financial_components.DocumentClassification{Enabled: true}
+
+\tcomponentArray, err := c.ToComponentArray(financialComponentStructure)
+\tif err != nil {
+\t\treturn nil, errors.WithStack(err)
+\t}
+
+\tfinancialOutput := &financial_output.Output{}
+\tif err = celery.ExecuteDocumentCaptureTask(ctx, c, componentArray, financialOutput); err != nil {
+\t\treturn nil, errors.WithStack(err)
+\t}
+
+\treturn FinancialOutputToUniversalInvoice(financialOutput), nil
+}";
+        let lines = highlight_lines(Path::new("main.go"), source).expect("expected highlight");
+        let reconstructed = lines
+            .iter()
+            .map(|line| {
+                line.iter()
+                    .map(|span| span.content.as_str())
+                    .collect::<String>()
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+        if reconstructed != source {
+            for (idx, (left, right)) in reconstructed.lines().zip(source.lines()).enumerate() {
+                if left != right {
+                    eprintln!("line {idx} mismatch\nleft : {left}\nright: {right}");
+                    if let Some(spans) = lines.get(idx) {
+                        for span in spans {
+                            eprintln!("  span: {:?} style: {:?}", span.content, span.style);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(reconstructed, source);
+    }
+
+    #[test]
     fn markdown_highlight_preserves_content() {
         let _ = require_runtime_env();
         let source = "# Heading\n\nSome **bold** text.";

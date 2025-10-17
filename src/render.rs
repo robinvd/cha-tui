@@ -126,6 +126,7 @@ pub struct Renderer<'a> {
 const SCROLLBAR_TRACK_CHAR: char = ' ';
 const SCROLLBAR_THUMB_CHAR: char = '█';
 const SCROLLBAR_HORZ_THUMB_CHAR: char = '▀';
+const TAB_WIDTH: usize = 8;
 
 impl<'a> Renderer<'a> {
     pub fn new(buffer: &'a mut DoubleBuffer, palette: &'a Palette) -> Self {
@@ -276,10 +277,16 @@ impl<'a> Renderer<'a> {
                 if taken == remaining {
                     break;
                 }
-                // width per char (treat at least 1 col)
-                let mut buf = [0u8; 4];
-                let s = ch.encode_utf8(&mut buf);
-                let w = unicode_column_width(s, None).max(1);
+                let current_col = cursor_x + taken;
+                let w = if ch == '\t' {
+                    let next_tab_stop = ((current_col / TAB_WIDTH) + 1) * TAB_WIDTH;
+                    (next_tab_stop - current_col).max(1)
+                } else {
+                    let mut buf = [0u8; 4];
+                    let s = ch.encode_utf8(&mut buf);
+                    unicode_column_width(s, None).max(1)
+                };
+
                 if skip_cols >= w {
                     skip_cols -= w;
                     continue;
@@ -290,7 +297,13 @@ impl<'a> Renderer<'a> {
                 if taken + w > remaining {
                     break;
                 }
-                collected.push(ch);
+                if ch == '\t' {
+                    for _ in 0..w {
+                        collected.push(' ');
+                    }
+                } else {
+                    collected.push(ch);
+                }
                 taken += w;
             }
 
@@ -907,6 +920,34 @@ mod tests {
         let screen = renderer.buffer().to_string();
         let first_line = screen.lines().next().unwrap_or("");
         assert_eq!(first_line, "cdef  ");
+    }
+
+    #[test]
+    fn text_node_expands_tabs_to_spaces() {
+        let mut node = text::<()>("a\tb").with_width(Dimension::length(16.0));
+
+        let lines = render_to_lines(&mut node, 16, 1);
+        let line = &lines[0];
+
+        assert!(line.starts_with("a       b"), "unexpected line: {line:?}");
+        assert!(
+            !line.contains('\t'),
+            "rendered output should not contain raw tab characters: {line:?}"
+        );
+    }
+
+    #[test]
+    fn tab_advances_to_next_tab_stop() {
+        let mut node = text::<()>("abc\tdef").with_width(Dimension::length(16.0));
+
+        let lines = render_to_lines(&mut node, 16, 1);
+        let line = &lines[0];
+        let def_index = line.find("def").expect("expected def in rendered line");
+
+        assert_eq!(
+            def_index, 8,
+            "tab should advance content to the next tab stop (8-column alignment)"
+        );
     }
 
     fn render_dual_scroll_block_lines(x_scroll: f32, y_scroll: f32) -> Vec<String> {

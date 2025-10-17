@@ -3,6 +3,7 @@ use chatui::render::RenderContext;
 use chatui::Style;
 use taffy::{self, AvailableSpace};
 use tracing::info;
+use termwiz::cell::unicode_column_width;
 
 use super::{highlight, DiffLine};
 
@@ -80,6 +81,7 @@ impl Renderable for DiffLeaf {
         info!("diff render, {}:{}", ctx.scroll_x(), ctx.scroll_y());
 
         let gutter_style = line_number_style();
+        const TAB_WIDTH: usize = 8;
 
         for (i, line_idx) in (0..visible_height).enumerate() {
             let idx = start_idx + line_idx;
@@ -126,36 +128,57 @@ impl Renderable for DiffLeaf {
                 if remaining == 0 {
                     break;
                 }
-                let mut chars = span.content.chars();
 
                 if span.style.bg.is_some() || span.style.dim {
                     fill_style = Some(span.style.clone());
                 }
-                if remaining_skip > 0 {
-                    let skipped = chars.by_ref().take(remaining_skip).count();
-                    remaining_skip = remaining_skip.saturating_sub(skipped);
-                    if remaining_skip > 0 {
-                        continue;
-                    }
-                }
 
                 let mut collected = String::new();
-                let mut taken = 0;
-                for ch in chars {
+                let mut taken_cols = 0;
+
+                for ch in span.content.chars() {
                     if remaining == 0 {
                         break;
                     }
-                    collected.push(ch);
-                    taken += 1;
-                    remaining = remaining.saturating_sub(1);
+
+                    let current_col = cursor_x + taken_cols;
+                    let width = if ch == '\t' {
+                        let next_tab_stop = ((current_col / TAB_WIDTH) + 1) * TAB_WIDTH;
+                        (next_tab_stop - current_col).max(1)
+                    } else {
+                        let mut buf = [0u8; 4];
+                        let s = ch.encode_utf8(&mut buf);
+                        unicode_column_width(s, None).max(1)
+                    };
+
+                    if remaining_skip >= width {
+                        remaining_skip -= width;
+                        continue;
+                    } else if remaining_skip > 0 {
+                        remaining_skip = 0;
+                    }
+
+                    if width > remaining {
+                        break;
+                    }
+
+                    if ch == '\t' {
+                        collected.extend(std::iter::repeat_n(' ', width));
+                    } else {
+                        collected.push(ch);
+                    }
+
+                    taken_cols += width;
+                    remaining = remaining.saturating_sub(width);
                 }
 
                 if collected.is_empty() {
                     continue;
                 }
+
                 let attrs = ctx.style_to_attributes(&span.style);
                 ctx.write_text(cursor_x, y, &collected, &attrs);
-                cursor_x += taken;
+                cursor_x += taken_cols;
             }
             if remaining > 0
                 && let Some(style) = &fill_style

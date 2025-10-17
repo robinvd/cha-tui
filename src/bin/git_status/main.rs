@@ -2221,6 +2221,42 @@ mod tests {
             "expected diff content to start after horizontal offset"
         );
     }
+
+    #[test]
+    fn diff_render_leaves_tab_characters_in_lines() {
+        let spans = vec![TextSpan::new(
+            "\tfinancialComponentStructure := value".to_string(),
+            Style::default(),
+        )];
+        let line = DiffLine::from_spans(with_prefix('+', spans));
+        let mut node = render_diff_lines(&[line], false)
+            .with_width(Dimension::length(40.0))
+            .with_height(Dimension::length(1.0));
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: AvailableSpace::Definite(40.0),
+                height: AvailableSpace::Definite(3.0),
+            },
+        );
+        chatui::dom::rounding::round_layout(&mut node);
+
+        let mut buffer = DoubleBuffer::new(40, 3);
+        let palette = Palette::default();
+        Renderer::new(&mut buffer, &palette)
+            .render(&node, Size::new(40, 3))
+            .expect("render diff lines with tabs");
+
+        let rendered_row: String = buffer.back_buffer()[0]
+            .iter()
+            .map(|cell| cell.ch)
+            .collect();
+        assert!(
+            !rendered_row.contains('\t'),
+            "expected diff rendering to expand tabs, row contained tab: {rendered_row:?}"
+        );
+    }
 }
 
 fn init_tracing() -> color_eyre::Result<()> {
