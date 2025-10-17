@@ -9,16 +9,12 @@ once_cell = "1.19"
 taffy = "0.9.1"
 termina = { version = "0.1.1", features = ["event-stream"] }
 termwiz = { version = "0.23.3", default-features = false, features = [] }
-tree-sitter = "0.25"
-tree-sitter-highlight = "0.25"
 tree-house = { version = "0.3" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 ropey = "1.6"
 smol = "2"
 time = { version = "0.3", features = ["formatting"] }
-libloading = "0.8"
-tree-sitter-language = "0.1"
 
 [dev-dependencies]
 tempfile = "3.10"

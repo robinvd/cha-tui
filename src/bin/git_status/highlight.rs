@@ -1,15 +1,22 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use std::time::Duration;
 
 use once_cell::sync::Lazy;
-use tree_sitter_highlight::{HighlightConfiguration, HighlightEvent, Highlighter};
+use ropey::Rope;
+use tree_house::{
+    InjectionLanguageMarker, Language as TreeHouseLanguage, LanguageConfig,
+    LanguageLoader as TreeHouseLanguageLoader, Syntax,
+    highlighter::{Highlight, HighlightEvent, Highlighter as TreeHouseHighlighter},
+};
 
 use chatui::dom::{Color, Style, TextSpan};
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, WrapErr, eyre};
 
-use super::runtime::{self, LibraryHandle};
+use super::runtime;
 
 const HIGHLIGHT_NAMES: &[&str] = &[
     "attribute",
@@ -71,7 +78,7 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "variable.parameter",
 ];
 
-const LANGUAGE_CACHE_CAPACITY: usize = 10;
+const SYNTAX_TIMEOUT_MILLIS: u64 = 100;
 
 static EXTENSION_LANGUAGE_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     let mut map = HashMap::new();
@@ -198,79 +205,179 @@ static EXTENSION_LANGUAGE_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy:
     map.insert("tpp", "cpp");
     map.insert("txx", "cpp");
     map.insert("ixx", "cpp");
-    map.insert("ino", "cpp");
-    map.insert("cu", "cpp");
-    map.insert("cuh", "cpp");
-    map.insert("cppm", "cpp");
-    map.insert("ii", "cpp");
-    map.insert("inl", "cpp");
+    map.insert("mm", "objective-cpp");
+    map.insert("m", "objective-c");
+    map.insert("hmap", "objective-c");
+    map.insert("mmmap", "objective-cpp");
+    map.insert("jsonml", "json");
     map.insert("cs", "c-sharp");
+    map.insert("razor", "c-sharp");
     map.insert("csx", "c-sharp");
-    map.insert("cake", "c-sharp");
-    map.insert("clj", "clojure");
-    map.insert("cljs", "clojure");
-    map.insert("cljc", "clojure");
-    map.insert("clje", "clojure");
-    map.insert("cljr", "clojure");
-    map.insert("cljx", "clojure");
-    map.insert("boot", "clojure");
-    map.insert("edn", "clojure");
-    map.insert("cmake", "cmake");
+    map.insert("fs", "f-sharp");
+    map.insert("fsi", "f-sharp");
+    map.insert("fsx", "f-sharp");
+    map.insert("fsscript", "f-sharp");
+    map.insert("odin", "odin");
+    map.insert("zig", "zig");
+    map.insert("zon", "zig");
+    map.insert("hs", "haskell");
+    map.insert("lhs", "haskell");
+    map.insert("cabal", "cabal");
     map.insert("lua", "lua");
     map.insert("rockspec", "lua");
-    map.insert("php", "php");
-    map.insert("php4", "php");
-    map.insert("php5", "php");
-    map.insert("phtml", "php");
-    map.insert("ctp", "php");
-    map.insert("inc", "php");
+    map.insert("pl", "perl");
+    map.insert("pm", "perl");
     map.insert("rb", "ruby");
-    map.insert("rake", "ruby");
+    map.insert("erb", "ruby");
     map.insert("gemspec", "ruby");
-    map.insert("podspec", "ruby");
-    map.insert("rabl", "ruby");
-    map.insert("rjs", "ruby");
-    map.insert("irb", "ruby");
-    map.insert("rbi", "ruby");
-    map.insert("rbs", "ruby");
-    map.insert("jb", "ruby");
-    map.insert("jbuilder", "ruby");
-    map.insert("scala", "scala");
-    map.insert("sc", "scala");
-    map.insert("sbt", "scala");
-    map.insert("hs", "haskell");
-    map.insert("hsc", "haskell");
-    map.insert("hs-boot", "haskell");
+    map.insert("thor", "ruby");
+    map.insert("rake", "ruby");
+    map.insert("ru", "ruby");
+    map.insert("rspec", "ruby");
+    map.insert("purs", "purescript");
     map.insert("ex", "elixir");
     map.insert("exs", "elixir");
+    map.insert("leex", "elixir");
+    map.insert("eex", "elixir");
+    map.insert("heex", "elixir");
+    map.insert("ml", "ocaml");
+    map.insert("mli", "ocaml-interface");
+    map.insert("zig.zon", "zig");
+    map.insert("nim", "nim");
+    map.insert("nim.cfg", "nim");
+    map.insert("nimble", "nim");
+    map.insert("clj", "clojure");
+    map.insert("cljs", "clojurescript");
+    map.insert("cljc", "clojure");
+    map.insert("edn", "clojure");
+    map.insert("scala", "scala");
+    map.insert("sc", "scala");
+    map.insert("scm", "scheme");
+    map.insert("ss", "scheme");
+    map.insert("d", "d");
+    map.insert("di", "d");
     map.insert("erl", "erlang");
     map.insert("hrl", "erlang");
-    map.insert("app", "erlang");
-    map.insert("fs", "fsharp");
-    map.insert("fsi", "fsharp");
-    map.insert("fsx", "fsharp");
-    map.insert("fsscript", "fsharp");
-    map.insert("f", "fortran");
-    map.insert("f90", "fortran");
-    map.insert("f95", "fortran");
-    map.insert("f03", "fortran");
-    map.insert("for", "fortran");
-    map.insert("groovy", "groovy");
-    map.insert("gradle", "groovy");
-    map.insert("jenkinsfile", "groovy");
+    map.insert("hrlx", "erlang");
+    map.insert("yrl", "erlang");
+    map.insert("gleam", "gleam");
+    map.insert("rsx", "rescript");
+    map.insert("res", "rescript");
+    map.insert("resi", "rescript-interface");
+    map.insert("cmake", "cmake");
+    map.insert("hpp.in", "cpp");
+    map.insert("ipp.in", "cpp");
+    map.insert("tpp.in", "cpp");
+    map.insert("cc.in", "cpp");
+    map.insert("cpp.in", "cpp");
+    map.insert("ixx.in", "cpp");
+    map.insert("txx.in", "cpp");
+    map.insert("cxx.in", "cpp");
+    map.insert("c.in", "c");
+    map.insert("h.in", "c");
+    map.insert("m.in", "objective-c");
+    map.insert("mm.in", "objective-cpp");
+    map.insert("cmod", "c");
+    map.insert("cxxmod", "cpp");
+    map.insert("cm", "scheme");
+    map.insert("fnl", "fennel");
+    map.insert("gle", "gcode");
+    map.insert("jl", "julia");
+    map.insert("csproj", "xml");
+    map.insert("xaml", "xml");
+    map.insert("xml", "xml");
+    map.insert("plist", "xml");
+    map.insert("svg", "xml");
+    map.insert("tres", "gdresource");
+    map.insert("tscn", "gdscene");
+    map.insert("gd", "gdscript");
+    map.insert("rpy", "renpy");
+    map.insert("coffee", "coffeescript");
+    map.insert("litcoffee", "coffeescript");
+    map.insert("hx", "haxe");
+    map.insert("hxml", "hxml");
     map.insert("dart", "dart");
+    map.insert("vb", "visual-basic");
+    map.insert("ino", "cpp");
+    map.insert("pio", "progress");
+    map.insert("ahk", "autohotkey");
+    map.insert("nsi", "nsis");
+    map.insert("nsh", "nsis");
+    map.insert("slang", "slang");
+    map.insert("slangh", "slang");
+    map.insert("sml", "sml");
+    map.insert("sbt", "scala");
+    map.insert("hxsl", "hxsl");
+    map.insert("s", "asm");
+    map.insert("asm", "asm");
+    map.insert("S", "asm");
+    map.insert("nas", "asm");
+    map.insert("ms", "asm");
+    map.insert("mot", "asm");
+    map.insert("v", "verilog");
+    map.insert("sv", "systemverilog");
+    map.insert("svh", "systemverilog");
+    map.insert("vhd", "vhdl");
+    map.insert("vhdl", "vhdl");
+    map.insert("bf", "brainfuck");
+    map.insert("b", "brainfuck");
+    map.insert("lol", "lolcode");
+    map.insert("zigmod", "zig");
+    map.insert("el", "emacs-lisp");
+    map.insert("lsp", "emacs-lisp");
+    map.insert("asd", "commonlisp");
+    map.insert("lisp", "commonlisp");
+    map.insert("cl", "commonlisp");
+    map.insert("l", "commonlisp");
+    map.insert("jlmod", "julia");
+    map.insert("pmod", "purescript");
+    map.insert("mtsx", "tsx");
+    map.insert("ctsx", "tsx");
+    map.insert("mjs", "javascript");
+    map.insert("cjs", "javascript");
+    map.insert("sqlx", "sql");
+    map.insert("pgsql", "sql");
+    map.insert("pgtap", "sql");
+    map.insert("prql", "prql");
+    map.insert("edi", "edi");
+    map.insert("proto", "protobuf");
+    map.insert("capnp", "capnp");
     map.insert("graphql", "graphql");
     map.insert("gql", "graphql");
-    map.insert("graphqls", "graphql");
-    map.insert("prisma", "prisma");
-    map.insert("properties", "properties");
-    map.insert("prefs", "properties");
+    map.insert("ql", "ql");
+    map.insert("rego", "rego");
+    map.insert("tfvars", "hcl");
+    map.insert("hcl", "hcl");
+    map.insert("tf", "hcl");
+    map.insert("nomad", "hcl");
+    map.insert("dockerfile", "dockerfile");
+    map.insert("containerfile", "dockerfile");
+    map.insert("cue", "cue");
+    map.insert("just", "just");
+    map.insert("j2", "jinja");
+    map.insert("jinja", "jinja");
+    map.insert("jinja2", "jinja");
+    map.insert("templ", "templ");
+    map.insert("typ", "typst");
+    map.insert("typst", "typst");
     map.insert("ini", "ini");
     map.insert("cfg", "ini");
+    map.insert("conf", "ini");
     map.insert("desktop", "ini");
-    map.insert("container", "ini");
-    map.insert("volume", "ini");
-    map.insert("kube", "ini");
+    map.insert("editorconfig", "ini");
+    map.insert("properties", "ini");
+    map.insert("prefs", "ini");
+    map.insert("service", "ini");
+    map.insert("socket", "ini");
+    map.insert("target", "ini");
+    map.insert("timer", "ini");
+    map.insert("path", "ini");
+    map.insert("mount", "ini");
+    map.insert("automount", "ini");
+    map.insert("swap", "ini");
+    map.insert("slice", "ini");
+    map.insert("link", "ini");
+    map.insert("netdev", "ini");
     map.insert("network", "ini");
     map.insert("directory", "ini");
     map.insert("nix", "nix");
@@ -360,6 +467,26 @@ static FILE_LANGUAGE_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(
     map
 });
 
+static LANGUAGE_NAME_MAP: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
+    let mut map = HashMap::new();
+    for &lang in EXTENSION_LANGUAGE_MAP.values() {
+        map.entry(lang).or_insert(lang);
+    }
+    for &lang in FILE_LANGUAGE_MAP.values() {
+        map.entry(lang).or_insert(lang);
+    }
+    map.insert("python3", "python");
+    map.insert("python2", "python");
+    map.insert("shell", "bash");
+    map.insert("sh", "bash");
+    map.insert("zsh", "bash");
+    map.insert("node", "javascript");
+    map.insert("c++", "cpp");
+    map.insert("c", "c");
+    map.insert("cpp", "cpp");
+    map
+});
+
 static REGISTRY: Lazy<HighlightRegistry> =
     Lazy::new(|| HighlightRegistry::new().expect("failed to initialize highlight registry"));
 
@@ -400,205 +527,266 @@ pub fn highlight_lines(path: &Path, source: &str) -> Option<Vec<Vec<TextSpan>>> 
 }
 
 struct HighlightRegistry {
-    styles: Vec<Style>,
-    cache: Mutex<LanguageCache>,
+    loader: TreeHouseLoader,
 }
 
 impl HighlightRegistry {
     fn new() -> Result<Self> {
         Ok(Self {
-            styles: HIGHLIGHT_NAMES.iter().map(|name| style_for(name)).collect(),
-            cache: Mutex::new(LanguageCache::new(LANGUAGE_CACHE_CAPACITY)),
+            loader: TreeHouseLoader::new()?,
         })
     }
 
-    fn highlight(&self, language: &str, source: &str) -> Result<Vec<Vec<TextSpan>>> {
-        let base_config = self.get_or_load(language)?;
-        let mut highlighter = Highlighter::new();
-        let mut injection_configs: Vec<Arc<HighlightConfiguration>> = Vec::new();
-        let mut injection_refs: Vec<*const HighlightConfiguration> = Vec::new();
-        let mut injection_lookup: HashMap<String, usize> = HashMap::new();
+    fn highlight(&self, language_name: &str, source: &str) -> Result<Vec<Vec<TextSpan>>> {
+        let language = self
+            .loader
+            .language_for_name(language_name)
+            .wrap_err_with(|| format!("failed to resolve language '{language_name}'"))?;
+        let palette = self.loader.palette();
 
-        let iterator =
-            highlighter.highlight(base_config.as_ref(), source.as_bytes(), None, |name| {
-                if let Some(&idx) = injection_lookup.get(name) {
-                    // SAFETY: Pointers originate from Arcs stored in `injection_configs`
-                    // and remain valid for the duration of the highlight call.
-                    return Some(unsafe { &*injection_refs[idx] });
-                }
-                match self.get_or_load(name) {
-                    Ok(config) => {
-                        let idx = injection_configs.len();
-                        injection_lookup.insert(name.to_owned(), idx);
-                        injection_refs.push(Arc::as_ptr(&config));
-                        injection_configs.push(config);
-                        // SAFETY: Pointer references the newly stored Arc.
-                        Some(unsafe { &*injection_refs[idx] })
+        let rope = Rope::from_str(source);
+        let slice = rope.slice(..);
+        let timeout = Duration::from_millis(SYNTAX_TIMEOUT_MILLIS);
+        let syntax = Syntax::new(slice, language, timeout, &self.loader)
+            .map_err(|err| eyre!("failed to parse syntax for '{language_name}': {err}"))?;
+
+        let byte_len = u32::try_from(source.len()).unwrap_or(u32::MAX);
+        let mut highlighter = TreeHouseHighlighter::new(&syntax, slice, &self.loader, 0..byte_len);
+
+        let mut lines: Vec<Vec<TextSpan>> = Vec::new();
+        let mut current_line: Vec<TextSpan> = Vec::new();
+        let mut style_stack: Vec<Style> = Vec::new();
+        let mut position = 0usize;
+
+        loop {
+            let next_offset = highlighter.next_event_offset();
+            if next_offset == u32::MAX {
+                break;
+            }
+
+            let next = next_offset as usize;
+            if next > position && next <= source.len() {
+                let fragment = &source[position..next];
+                let style = style_stack.last().cloned().unwrap_or_else(Style::default);
+                append_fragment(&mut lines, &mut current_line, fragment, &style);
+                position = next;
+            }
+
+            let (event, highlights) = highlighter.advance();
+            match event {
+                HighlightEvent::Refresh => {
+                    style_stack.clear();
+                    for highlight in highlights {
+                        style_stack.push(palette.style_for(highlight));
                     }
-                    Err(_) => None,
                 }
-            })?;
-        events_to_lines(iterator, source, &self.styles)
-    }
-
-    fn get_or_load(&self, language: &str) -> Result<Arc<HighlightConfiguration>> {
-        if let Some(config) = self.try_get_cached(language) {
-            return Ok(config);
+                HighlightEvent::Push => {
+                    for highlight in highlights {
+                        style_stack.push(palette.style_for(highlight));
+                    }
+                }
+            }
         }
 
-        let runtime = runtime::runtime()?;
-        let highlights = runtime
-            .load_query(language, "highlights.scm")
-            .or_else(|_| runtime.load_query_or_empty(language, "highlights.scm"))?;
-        let injections = runtime.load_query_or_empty(language, "injections.scm")?;
-        let locals = runtime.load_query_or_empty(language, "locals.scm")?;
-        let (ts_language, library) = runtime.load_language(language)?.into_parts();
+        if position < source.len() {
+            let fragment = &source[position..];
+            let style = style_stack.last().cloned().unwrap_or_else(Style::default);
+            append_fragment(&mut lines, &mut current_line, fragment, &style);
+        }
 
-        let mut configuration = HighlightConfiguration::new(
-            ts_language,
-            language,
+        if !current_line.is_empty() {
+            lines.push(current_line);
+        }
+
+        Ok(lines)
+    }
+}
+
+struct HighlightPalette {
+    styles: Vec<Style>,
+    name_to_highlight: HashMap<&'static str, Highlight>,
+}
+
+impl HighlightPalette {
+    fn new(names: &[&'static str]) -> Self {
+        let mut styles = Vec::with_capacity(names.len());
+        let mut name_to_highlight = HashMap::with_capacity(names.len());
+        for (idx, name) in names.iter().enumerate() {
+            let style = style_for(name);
+            styles.push(style);
+            let highlight = Highlight::new(idx as u32);
+            name_to_highlight.insert(*name, highlight);
+        }
+        Self {
+            styles,
+            name_to_highlight,
+        }
+    }
+
+    fn highlight_for(&self, name: &str) -> Option<Highlight> {
+        let mut candidate = name;
+        loop {
+            if let Some(highlight) = self.name_to_highlight.get(candidate) {
+                return Some(*highlight);
+            }
+            if let Some((parent, _)) = candidate.rsplit_once('.') {
+                candidate = parent;
+            } else {
+                return None;
+            }
+        }
+    }
+
+    fn style_for(&self, highlight: Highlight) -> Style {
+        self.styles
+            .get(highlight.idx())
+            .cloned()
+            .unwrap_or_else(Style::default)
+    }
+}
+
+struct TreeHouseLoader {
+    runtime: &'static runtime::TreeSitterRuntime,
+    palette: HighlightPalette,
+    state: Mutex<LoaderState>,
+}
+
+impl TreeHouseLoader {
+    fn new() -> Result<Self> {
+        let runtime = runtime::runtime()?;
+        Ok(Self {
+            runtime,
+            palette: HighlightPalette::new(HIGHLIGHT_NAMES),
+            state: Mutex::new(LoaderState::default()),
+        })
+    }
+
+    fn palette(&self) -> &HighlightPalette {
+        &self.palette
+    }
+
+    fn language_for_name(&self, name: &str) -> Result<TreeHouseLanguage> {
+        self.language_for_key(name, name)
+    }
+
+    fn language_for_marker_name(&self, marker: &str) -> Result<TreeHouseLanguage> {
+        self.language_for_key(marker, marker)
+    }
+
+    fn language_for_key(&self, lookup: &str, compile_name: &str) -> Result<TreeHouseLanguage> {
+        let key = lookup.to_ascii_lowercase();
+        {
+            let state = self.state.lock().expect("language cache poisoned");
+            if let Some(&language) = state.by_name.get(&key) {
+                return Ok(language);
+            }
+        }
+
+        let config = self.compile_language(compile_name)?;
+
+        let mut state = self.state.lock().expect("language cache poisoned");
+        if let Some(&language) = state.by_name.get(&key) {
+            return Ok(language);
+        }
+
+        let idx = u32::try_from(state.entries.len()).unwrap_or(u32::MAX - 1);
+        let language = TreeHouseLanguage::new(idx);
+        let config_ref = Box::leak(config);
+        state.by_name.insert(key, language);
+        state.entries.push(LanguageEntry { config: config_ref });
+        Ok(language)
+    }
+
+    fn compile_language(&self, name: &str) -> Result<Box<LanguageConfig>> {
+        let grammar = self
+            .runtime
+            .load_grammar(name)
+            .wrap_err_with(|| format!("failed to load grammar '{name}'"))?;
+        let highlights = self
+            .runtime
+            .load_query(name, "highlights.scm")
+            .or_else(|_| self.runtime.load_query_or_empty(name, "highlights.scm"))
+            .wrap_err_with(|| format!("failed to load highlights for '{name}'"))?;
+        let injections = self
+            .runtime
+            .load_query_or_empty(name, "injections.scm")
+            .wrap_err_with(|| format!("failed to load injections for '{name}'"))?;
+        let locals = self
+            .runtime
+            .load_query_or_empty(name, "locals.scm")
+            .wrap_err_with(|| format!("failed to load locals for '{name}'"))?;
+
+        let config = LanguageConfig::new(
+            grammar,
             highlights.as_str(),
             injections.as_str(),
             locals.as_str(),
-        )?;
-        configuration.configure(HIGHLIGHT_NAMES);
+        )
+        .wrap_err_with(|| format!("failed to compile language config for '{name}'"))?;
 
-        let configuration = Arc::new(configuration);
-
-        let mut cache = self.cache.lock().expect("highlight cache poisoned");
-        if let Some(config) = cache.get(language) {
-            return Ok(config);
-        }
-
-        Ok(cache.insert(language.to_string(), configuration, library))
+        config.configure(|capture| self.palette.highlight_for(capture));
+        Ok(Box::new(config))
     }
 
-    fn try_get_cached(&self, language: &str) -> Option<Arc<HighlightConfiguration>> {
-        let mut cache = self.cache.lock().expect("highlight cache poisoned");
-        cache.get(language)
+    fn language_from_token(&self, token: &str) -> Option<TreeHouseLanguage> {
+        canonical_language_from_token(token)
+            .and_then(|name| self.language_for_marker_name(name).ok())
     }
 }
 
-struct LanguageCache {
-    max_size: usize,
-    entries: HashMap<String, CacheEntry>,
-    order: VecDeque<String>,
-}
-
-impl LanguageCache {
-    fn new(max_size: usize) -> Self {
-        Self {
-            max_size,
-            entries: HashMap::new(),
-            order: VecDeque::new(),
-        }
-    }
-
-    fn get(&mut self, name: &str) -> Option<Arc<HighlightConfiguration>> {
-        if let Some(entry) = self.entries.get(name) {
-            let config = Arc::clone(&entry.config);
-            self.touch(name);
-            Some(config)
-        } else {
-            None
-        }
-    }
-
-    fn insert(
-        &mut self,
-        name: String,
-        config: Arc<HighlightConfiguration>,
-        library: LibraryHandle,
-    ) -> Arc<HighlightConfiguration> {
-        if let Some(existing) = self
-            .entries
-            .get(&name)
-            .map(|entry| Arc::clone(&entry.config))
-        {
-            self.touch(&name);
-            return existing;
-        }
-
-        self.entries.insert(
-            name.clone(),
-            CacheEntry {
-                config: Arc::clone(&config),
-                _library: library,
-            },
-        );
-        self.touch(&name);
-        self.evict_if_needed();
-        config
-    }
-
-    fn touch(&mut self, name: &str) {
-        if let Some(pos) = self.order.iter().position(|existing| existing == name) {
-            self.order.remove(pos);
-        }
-        self.order.push_back(name.to_string());
-    }
-
-    fn evict_if_needed(&mut self) {
-        while self.entries.len() > self.max_size {
-            if let Some(name) = self.order.pop_front() {
-                self.entries.remove(&name);
-            } else {
-                break;
+impl TreeHouseLanguageLoader for TreeHouseLoader {
+    fn language_for_marker(&self, marker: InjectionLanguageMarker) -> Option<TreeHouseLanguage> {
+        match marker {
+            InjectionLanguageMarker::Name(name) => self.language_for_marker_name(name).ok(),
+            InjectionLanguageMarker::Match(text) => {
+                let owned = text.to_string();
+                self.language_from_token(owned.as_str())
             }
+            InjectionLanguageMarker::Filename(text) => canonical_language_from_filename(&text)
+                .and_then(|name| self.language_for_name(name).ok()),
+            InjectionLanguageMarker::Shebang(text) => canonical_language_from_shebang(&text)
+                .and_then(|name| self.language_for_name(name).ok()),
         }
+    }
+
+    fn get_config(&self, lang: TreeHouseLanguage) -> Option<&LanguageConfig> {
+        let state = self.state.lock().expect("language cache poisoned");
+        state.entries.get(lang.idx()).map(|entry| entry.config)
     }
 }
 
-struct CacheEntry {
-    config: Arc<HighlightConfiguration>,
-    _library: LibraryHandle,
+#[derive(Default)]
+struct LoaderState {
+    by_name: HashMap<String, TreeHouseLanguage>,
+    entries: Vec<LanguageEntry>,
 }
 
-fn events_to_lines<I>(iter: I, source: &str, styles: &[Style]) -> Result<Vec<Vec<TextSpan>>>
-where
-    I: Iterator<Item = Result<HighlightEvent, tree_sitter_highlight::Error>>,
-{
-    let mut lines: Vec<Vec<TextSpan>> = Vec::new();
-    let mut current_line: Vec<TextSpan> = Vec::new();
-    let mut style_stack: Vec<Style> = Vec::new();
+struct LanguageEntry {
+    config: &'static LanguageConfig,
+}
 
-    for event in iter {
-        match event? {
-            HighlightEvent::HighlightStart(highlight) => {
-                let style = styles.get(highlight.0).cloned().unwrap_or_default();
-                style_stack.push(style);
-            }
-            HighlightEvent::HighlightEnd => {
-                style_stack.pop();
-            }
-            HighlightEvent::Source { start, end } => {
-                if start == end {
-                    continue;
-                }
-                let fragment = &source[start..end];
-                let style = style_stack.last().cloned().unwrap_or_else(Style::default);
+fn append_fragment(
+    lines: &mut Vec<Vec<TextSpan>>,
+    current_line: &mut Vec<TextSpan>,
+    fragment: &str,
+    style: &Style,
+) {
+    if fragment.is_empty() {
+        return;
+    }
 
-                let mut fragment_start = 0;
-                for (idx, ch) in fragment.char_indices() {
-                    if ch == '\n' {
-                        let segment = &fragment[fragment_start..idx];
-                        push_segment(&mut current_line, segment, &style);
-                        lines.push(std::mem::take(&mut current_line));
-                        fragment_start = idx + ch.len_utf8();
-                    }
-                }
-
-                let remaining = &fragment[fragment_start..];
-                push_segment(&mut current_line, remaining, &style);
-            }
+    let mut start = 0;
+    for (idx, ch) in fragment.char_indices() {
+        if ch == '\n' {
+            let segment = &fragment[start..idx];
+            push_segment(current_line, segment, style);
+            lines.push(std::mem::take(current_line));
+            start = idx + ch.len_utf8();
         }
     }
 
-    if !current_line.is_empty() {
-        lines.push(current_line);
-    }
-
-    Ok(lines)
+    let remaining = &fragment[start..];
+    push_segment(current_line, remaining, style);
 }
 
 fn push_segment(line: &mut Vec<TextSpan>, segment: &str, style: &Style) {
@@ -612,6 +800,85 @@ fn push_segment(line: &mut Vec<TextSpan>, segment: &str, style: &Style) {
         return;
     }
     line.push(TextSpan::new(segment, style.clone()));
+}
+
+fn canonical_language_from_token(token: &str) -> Option<&'static str> {
+    let trimmed =
+        token.trim_matches(|c: char| c.is_ascii_whitespace() || c == '`' || c == '"' || c == '\'');
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut candidates = Vec::new();
+    candidates.push(trimmed);
+    if let Some(idx) = trimmed.rfind('/') {
+        candidates.push(&trimmed[idx + 1..]);
+    }
+    if let Some(idx) = trimmed.rfind('.') {
+        candidates.push(&trimmed[idx + 1..]);
+    }
+
+    for candidate in candidates {
+        let candidate = candidate.trim();
+        if candidate.is_empty() {
+            continue;
+        }
+        let mut key = candidate.to_ascii_lowercase();
+        if let Some(lang) = EXTENSION_LANGUAGE_MAP.get(key.as_str()) {
+            return Some(*lang);
+        }
+        if let Some(lang) = FILE_LANGUAGE_MAP.get(key.as_str()) {
+            return Some(*lang);
+        }
+        if let Some(lang) = LANGUAGE_NAME_MAP.get(key.as_str()) {
+            return Some(*lang);
+        }
+
+        let stripped = key
+            .trim_end_matches(|c: char| c.is_ascii_digit())
+            .to_string();
+        if stripped != key {
+            key = stripped;
+            if let Some(lang) = EXTENSION_LANGUAGE_MAP.get(key.as_str()) {
+                return Some(*lang);
+            }
+            if let Some(lang) = LANGUAGE_NAME_MAP.get(key.as_str()) {
+                return Some(*lang);
+            }
+        }
+    }
+
+    None
+}
+
+fn canonical_language_from_filename(filename: &ropey::RopeSlice<'_>) -> Option<&'static str> {
+    let owned = filename.to_string();
+    language_for_path(Path::new(owned.trim()))
+}
+
+fn canonical_language_from_shebang(shebang: &ropey::RopeSlice<'_>) -> Option<&'static str> {
+    let text = shebang.to_string();
+    let line = text.lines().next().unwrap_or("").trim();
+    let line = line.trim_start_matches("#!");
+    if line.is_empty() {
+        return None;
+    }
+
+    let mut parts = line.split_whitespace();
+    let first = parts.next()?;
+    let command = first.rsplit('/').next().unwrap_or(first);
+
+    if command == "env" {
+        for arg in parts {
+            if arg.starts_with('-') {
+                continue;
+            }
+            return canonical_language_from_token(arg);
+        }
+        None
+    } else {
+        canonical_language_from_token(command)
+    }
 }
 
 fn style_for(name: &str) -> Style {
@@ -840,5 +1107,165 @@ mod tests {
             })
             .collect();
         assert_eq!(reconstructed.join("\n"), source);
+    }
+
+    #[test]
+    fn canonical_language_detection_handles_shebang() {
+        let text = ropey::Rope::from_str("#!/usr/bin/env python3");
+        let slice = text.slice(..);
+        assert_eq!(
+            canonical_language_from_shebang(&slice),
+            Some("python"),
+            "expected python from shebang"
+        );
+    }
+
+    #[test]
+    fn canonical_language_detection_handles_token_variants() {
+        assert_eq!(canonical_language_from_token("Rust"), Some("rust"));
+        assert_eq!(canonical_language_from_token("python3"), Some("python"));
+        assert_eq!(canonical_language_from_token("shell"), Some("bash"));
+        assert!(canonical_language_from_token("").is_none());
+    }
+
+    #[test]
+    fn highlight_lines_applies_keyword_and_function_styles() {
+        let _ = require_runtime_env();
+        let source = "fn main() { println!(\"hello\"); }";
+        let lines = highlight_lines(Path::new("main.rs"), source).expect("expected highlight");
+        let spans: Vec<&TextSpan> = lines.iter().flat_map(|line| line.iter()).collect();
+
+        let keyword_style = spans
+            .iter()
+            .find(|span| span.content.trim() == "fn")
+            .map(|span| span.style.clone())
+            .expect("expected keyword span");
+        assert_eq!(keyword_style.fg, Some(EVERFOREST_RED));
+
+        let function_style = spans
+            .iter()
+            .find(|span| span.content.contains("main"))
+            .map(|span| span.style.clone())
+            .expect("expected function span");
+        assert_eq!(function_style.fg, Some(EVERFOREST_GREEN));
+    }
+
+    #[test]
+    fn markdown_code_fences_trigger_language_injections() {
+        let _ = require_runtime_env();
+        let source = r#"# Demo
+
+```rust
+fn greet() {}
+```
+
+```python
+def greet():
+    print("hi")
+```
+
+```unknown
+just text
+```
+"#;
+        let lines = highlight_lines(Path::new("notes.md"), source).expect("expected highlight");
+        let spans: Vec<&TextSpan> = lines.iter().flat_map(|line| line.iter()).collect();
+
+        let rust_span = spans
+            .iter()
+            .find(|span| span.content.trim() == "fn")
+            .map(|span| span.style.clone())
+            .expect("expected rust span");
+        let python_span = spans
+            .iter()
+            .find(|span| span.content.trim() == "print")
+            .map(|span| span.style.clone())
+            .expect("expected python span");
+
+        let unknown_span = spans
+            .iter()
+            .find(|span| span.content.contains("just text"))
+            .map(|span| span.style.clone())
+            .expect("expected unknown span");
+        assert_eq!(
+            unknown_span,
+            style_for("markup.raw.block"),
+            "unknown code block should use raw markup style"
+        );
+        assert_ne!(
+            rust_span, unknown_span,
+            "rust injection should differ from raw markup style"
+        );
+        assert_ne!(
+            python_span, unknown_span,
+            "python injection should differ from raw markup style"
+        );
+    }
+
+    #[test]
+    fn loader_reuses_configs_and_supports_markers() {
+        use tree_house::LanguageLoader as _;
+
+        let _ = require_runtime_env();
+        let loader = TreeHouseLoader::new().expect("loader init");
+
+        let rust = loader.language_for_name("rust").expect("rust config");
+        let rust_config_ptr = loader
+            .get_config(rust)
+            .map(|cfg| cfg as *const _)
+            .expect("config");
+
+        let rust_again = loader.language_for_name("rust").expect("rust cache");
+        assert_eq!(rust.idx(), rust_again.idx());
+        let rust_again_ptr = loader
+            .get_config(rust_again)
+            .map(|cfg| cfg as *const _)
+            .expect("config");
+        assert_eq!(rust_config_ptr, rust_again_ptr);
+
+        let python_marker = loader
+            .language_for_marker(InjectionLanguageMarker::Name("python"))
+            .expect("python marker");
+        assert_ne!(python_marker.idx(), rust.idx());
+
+        let filename_rope = ropey::Rope::from_str("script.py");
+        let filename_lang = loader
+            .language_for_marker(InjectionLanguageMarker::Filename(filename_rope.slice(..)))
+            .expect("filename marker");
+        assert_eq!(filename_lang.idx(), python_marker.idx());
+
+        let shebang_rope = ropey::Rope::from_str("#!/usr/bin/env bash");
+        let shebang_lang = loader
+            .language_for_marker(InjectionLanguageMarker::Shebang(shebang_rope.slice(..)))
+            .expect("shebang marker");
+        assert_ne!(shebang_lang.idx(), rust.idx());
+
+        let nonexistent = loader.compile_language("definitely-not-a-real-language");
+        assert!(nonexistent.is_err(), "expected missing language to error");
+    }
+
+    #[test]
+    fn injection_name_marker_accepts_exact_language_name() {
+        use tree_house::LanguageLoader as _;
+
+        let _ = require_runtime_env();
+        let loader = TreeHouseLoader::new().expect("loader init");
+
+        let injection_lang = loader
+            .language_for_marker(InjectionLanguageMarker::Name("markdown_inline"))
+            .expect("expected markdown_inline to resolve");
+        assert!(
+            loader.get_config(injection_lang).is_some(),
+            "expected markdown_inline config to exist"
+        );
+    }
+
+    #[test]
+    fn arduino_extension_still_highlights_via_cpp_grammar() {
+        let _ = require_runtime_env();
+        let source = "void setup() {}\nvoid loop() {}";
+        let result = highlight_lines(Path::new("sketch.ino"), source)
+            .expect("expected Arduino sketches to highlight");
+        assert!(!result.is_empty(), "highlight result should not be empty");
     }
 }
