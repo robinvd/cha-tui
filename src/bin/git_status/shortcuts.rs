@@ -1,5 +1,7 @@
 
-use super::{Key, KeyCode, Model, Msg};
+use super::{
+    CommitMsg, DeleteMsg, DiffMsg, GlobalMsg, Key, KeyCode, Model, Msg, NavigationMsg,
+};
 
 #[derive(Clone)]
 struct Shortcut {
@@ -116,7 +118,7 @@ const GLOBAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::Quit),
+        msg: Some(Msg::Global(GlobalMsg::Quit)),
     },
     Shortcut {
         label: "?",
@@ -128,7 +130,7 @@ const GLOBAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::ToggleShortcutsHelp),
+        msg: Some(Msg::Global(GlobalMsg::ToggleShortcutsHelp)),
     },
 ];
 
@@ -143,7 +145,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::Quit),
+        msg: Some(Msg::Global(GlobalMsg::Quit)),
     },
     Shortcut {
         label: "q",
@@ -155,7 +157,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::Quit),
+        msg: Some(Msg::Global(GlobalMsg::Quit)),
     },
     Shortcut {
         label: "Enter",
@@ -167,7 +169,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::ToggleStage),
+        msg: Some(Msg::Navigation(NavigationMsg::ToggleStage)),
     },
     Shortcut {
         label: "Double-click",
@@ -186,7 +188,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::ToggleFocus),
+        msg: Some(Msg::Navigation(NavigationMsg::ToggleFocus)),
     },
     Shortcut {
         label: "Up",
@@ -198,7 +200,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::MoveSelectionUp),
+        msg: Some(Msg::Navigation(NavigationMsg::MoveSelectionUp)),
     },
     Shortcut {
         label: "Down",
@@ -210,7 +212,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::MoveSelectionDown),
+        msg: Some(Msg::Navigation(NavigationMsg::MoveSelectionDown)),
     },
     Shortcut {
         label: "⇠",
@@ -222,7 +224,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::CollapseNode),
+        msg: Some(Msg::Navigation(NavigationMsg::CollapseNode)),
     },
     Shortcut {
         label: "",
@@ -234,7 +236,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::ExpandNode),
+        msg: Some(Msg::Navigation(NavigationMsg::ExpandNode)),
     },
     Shortcut {
         label: "j",
@@ -246,7 +248,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::ScrollFiles(1)),
+        msg: Some(Msg::Navigation(NavigationMsg::ScrollFiles(1))),
     },
     Shortcut {
         label: "k",
@@ -258,7 +260,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::ScrollFiles(-1)),
+        msg: Some(Msg::Navigation(NavigationMsg::ScrollFiles(-1))),
     },
     Shortcut {
         label: "J",
@@ -270,7 +272,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::ScrollDiff(1)),
+        msg: Some(Msg::Diff(DiffMsg::ScrollVertical(1))),
     },
     Shortcut {
         label: "K",
@@ -282,7 +284,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::ScrollDiff(-1)),
+        msg: Some(Msg::Diff(DiffMsg::ScrollVertical(-1))),
     },
     Shortcut {
         label: "l",
@@ -294,7 +296,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::ScrollDiffHorizontal(4)),
+        msg: Some(Msg::Diff(DiffMsg::ScrollHorizontal(4))),
     },
     Shortcut {
         label: "h",
@@ -306,7 +308,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::ScrollDiffHorizontal(-4)),
+        msg: Some(Msg::Diff(DiffMsg::ScrollHorizontal(-4))),
     },
     Shortcut {
         label: "n",
@@ -318,7 +320,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::ToggleDiffLineNumbers),
+        msg: Some(Msg::Diff(DiffMsg::ToggleLineNumbers)),
     },
     Shortcut {
         label: "r",
@@ -330,7 +332,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::RefreshStatus),
+        msg: Some(Msg::Global(GlobalMsg::RefreshStatus)),
     },
     Shortcut {
         label: "c",
@@ -342,7 +344,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::OpenCommitModal),
+        msg: Some(Msg::Commit(CommitMsg::Open)),
     },
     Shortcut {
         label: "Ctrl-D",
@@ -354,7 +356,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::OpenDeleteModal),
+        msg: Some(Msg::Delete(DeleteMsg::Open)),
     },
 ];
 
@@ -369,7 +371,7 @@ const COMMIT_MODAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::SubmitCommit),
+        msg: Some(Msg::Commit(CommitMsg::Submit)),
     },
     Shortcut {
         label: "Esc",
@@ -381,7 +383,7 @@ const COMMIT_MODAL_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Disabled,
             ModifierRequirement::Any,
         )),
-        msg: Some(Msg::CancelCommit),
+        msg: Some(Msg::Commit(CommitMsg::Cancel)),
     },
     Shortcut {
         label: "Backspace",

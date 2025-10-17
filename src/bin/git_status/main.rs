@@ -46,8 +46,8 @@ fn main() -> Result<()> {
 
 fn map_event(event: Event) -> Option<Msg> {
     match event {
-        Event::Key(key) => Some(Msg::KeyPressed(key)),
-        Event::FocusGained => Some(Msg::RefreshStatus),
+        Event::Key(key) => Some(Msg::Global(GlobalMsg::KeyPressed(key))),
+        Event::FocusGained => Some(Msg::Global(GlobalMsg::RefreshStatus)),
         _ => None,
     }
 }
@@ -55,104 +55,14 @@ fn map_event(event: Event) -> Option<Msg> {
 fn update(model: &mut Model, msg: Msg) -> Transition {
     info!("update {msg:?}");
     match msg {
-        Msg::KeyPressed(key) => handle_key(model, key),
-        Msg::Quit => Transition::Quit,
-        Msg::ToggleStage => {
-            model.toggle_stage_selected();
-            Transition::Continue
-        }
-        Msg::ToggleFocus => {
-            match model.focus {
-                Focus::Unstaged => model.focus_staged(),
-                Focus::Staged => model.focus_unstaged(),
-            }
-            model.update_diff();
-            Transition::Continue
-        }
-        Msg::MoveSelectionUp => {
-            model.move_selection_up();
-            model.update_diff();
-            Transition::Continue
-        }
-        Msg::MoveSelectionDown => {
-            model.move_selection_down();
-            model.update_diff();
-            Transition::Continue
-        }
-        Msg::CollapseNode => {
-            if model.collapse_selected() {
-                model.update_diff();
-            }
-            Transition::Continue
-        }
-        Msg::ExpandNode => {
-            if model.expand_selected() {
-                model.update_diff();
-            }
-            Transition::Continue
-        }
-        Msg::ScrollFiles(delta) => {
-            model.scroll_files_in_focus(delta);
-            Transition::Continue
-        }
-        Msg::ScrollDiff(delta) => {
-            model.scroll_diff(delta);
-            Transition::Continue
-        }
-        Msg::ScrollDiffHorizontal(delta) => {
-            model.scroll_diff_horizontal(delta);
-            Transition::Continue
-        }
-        Msg::RefreshStatus => {
-            if let Err(err) = model.refresh_status_preserving_diff_scroll() {
-                model.set_error(err);
-            }
-            Transition::Continue
-        }
-        Msg::OpenCommitModal => {
-            model.open_commit_modal();
-            Transition::Continue
-        }
-        Msg::ToggleShortcutsHelp => {
-            model.toggle_shortcuts_help();
-            Transition::Continue
-        }
-        Msg::ToggleDiffLineNumbers => {
-            model.toggle_diff_line_numbers();
-            Transition::Continue
-        }
-        Msg::SubmitCommit => model.submit_commit(),
-        Msg::CancelCommit => {
-            model.close_commit_modal();
-            Transition::Continue
-        }
-        Msg::CommitInput(input_msg) => {
-            if let Some(modal) = model.commit_modal.as_mut() {
-                modal.update(input_msg);
-            }
-            Transition::Continue
-        }
-        Msg::OpenDeleteModal => {
-            model.open_delete_modal();
-            Transition::Continue
-        }
-        Msg::ConfirmDelete => model.confirm_delete(),
-        Msg::CancelDelete => {
-            model.close_delete_modal();
-            Transition::Continue
-        }
-        Msg::Staged(msg) => handle_section_msg(model, Focus::Staged, msg),
-        Msg::Unstaged(msg) => handle_section_msg(model, Focus::Unstaged, msg),
-        Msg::DiffScroll(scroll_msg) => {
-            model.diff_scroll.update(scroll_msg);
-            Transition::Continue
-        }
-        Msg::UnstagedScroll(scroll_msg) => {
-            model.update_section_scroll(Focus::Unstaged, scroll_msg);
-            Transition::Continue
-        }
-        Msg::StagedScroll(scroll_msg) => {
-            model.update_section_scroll(Focus::Staged, scroll_msg);
+        Msg::Global(global_msg) => handle_global_msg(model, global_msg),
+        Msg::Navigation(nav_msg) => handle_navigation_msg(model, nav_msg),
+        Msg::Diff(diff_msg) => handle_diff_msg(model, diff_msg),
+        Msg::Commit(commit_msg) => handle_commit_msg(model, commit_msg),
+        Msg::Delete(delete_msg) => handle_delete_msg(model, delete_msg),
+        Msg::Section { focus, msg } => handle_section_msg(model, focus, msg),
+        Msg::Scroll { focus, msg } => {
+            model.update_section_scroll(focus, msg);
             Transition::Continue
         }
     }
@@ -161,6 +71,121 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
 fn handle_section_msg(model: &mut Model, focus: Focus, msg: SectionMsg) -> Transition {
     match msg {
         SectionMsg::Tree(tree_msg) => model.handle_tree_message(focus, tree_msg),
+    }
+}
+
+fn handle_global_msg(model: &mut Model, msg: GlobalMsg) -> Transition {
+    match msg {
+        GlobalMsg::KeyPressed(key) => handle_key(model, key),
+        GlobalMsg::Quit => Transition::Quit,
+        GlobalMsg::RefreshStatus => {
+            if let Err(err) = model.refresh_status_preserving_diff_scroll() {
+                model.set_error(err);
+            }
+            Transition::Continue
+        }
+        GlobalMsg::ToggleShortcutsHelp => {
+            model.toggle_shortcuts_help();
+            Transition::Continue
+        }
+    }
+}
+
+fn handle_navigation_msg(model: &mut Model, msg: NavigationMsg) -> Transition {
+    match msg {
+        NavigationMsg::ToggleStage => {
+            model.toggle_stage_selected();
+            Transition::Continue
+        }
+        NavigationMsg::ToggleFocus => {
+            match model.focus {
+                Focus::Unstaged => model.focus_staged(),
+                Focus::Staged => model.focus_unstaged(),
+            }
+            model.update_diff();
+            Transition::Continue
+        }
+        NavigationMsg::MoveSelectionUp => {
+            model.move_selection_up();
+            model.update_diff();
+            Transition::Continue
+        }
+        NavigationMsg::MoveSelectionDown => {
+            model.move_selection_down();
+            model.update_diff();
+            Transition::Continue
+        }
+        NavigationMsg::CollapseNode => {
+            if model.collapse_selected() {
+                model.update_diff();
+            }
+            Transition::Continue
+        }
+        NavigationMsg::ExpandNode => {
+            if model.expand_selected() {
+                model.update_diff();
+            }
+            Transition::Continue
+        }
+        NavigationMsg::ScrollFiles(delta) => {
+            model.scroll_files_in_focus(delta);
+            Transition::Continue
+        }
+    }
+}
+
+fn handle_diff_msg(model: &mut Model, msg: DiffMsg) -> Transition {
+    match msg {
+        DiffMsg::ScrollVertical(delta) => {
+            model.scroll_diff(delta);
+            Transition::Continue
+        }
+        DiffMsg::ScrollHorizontal(delta) => {
+            model.scroll_diff_horizontal(delta);
+            Transition::Continue
+        }
+        DiffMsg::Scroll(scroll_msg) => {
+            model.diff_scroll.update(scroll_msg);
+            Transition::Continue
+        }
+        DiffMsg::ToggleLineNumbers => {
+            model.toggle_diff_line_numbers();
+            Transition::Continue
+        }
+    }
+}
+
+fn handle_commit_msg(model: &mut Model, msg: CommitMsg) -> Transition {
+    match msg {
+        CommitMsg::Open => {
+            model.open_commit_modal();
+            Transition::Continue
+        }
+        CommitMsg::Submit => model.submit_commit(),
+        CommitMsg::Cancel => {
+            model.close_commit_modal();
+            Transition::Continue
+        }
+        CommitMsg::Input(input_msg) => {
+            if let Some(modal) = model.commit_modal.as_mut() {
+                modal.update(input_msg);
+            }
+            Transition::Continue
+        }
+    }
+}
+
+fn handle_delete_msg(model: &mut Model, msg: DeleteMsg) -> Transition {
+    match msg {
+        DeleteMsg::Open => {
+            model.open_delete_modal();
+            Transition::Continue
+        }
+        DeleteMsg::Confirm => model.confirm_delete(),
+        DeleteMsg::Cancel => {
+            model.close_delete_modal();
+            Transition::Continue
+        }
     }
 }
 
@@ -188,7 +213,11 @@ fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition {
     if let Some(msg) = model
         .commit_modal
         .as_ref()
-        .and_then(|modal| default_input_keybindings(&modal.input, key, Msg::CommitInput))
+        .and_then(|modal| {
+            default_input_keybindings(&modal.input, key, |input_msg| {
+                Msg::Commit(CommitMsg::Input(input_msg))
+            })
+        })
     {
         return update(model, msg);
     }
@@ -198,10 +227,10 @@ fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition {
 
 fn handle_delete_modal_key(model: &mut Model, key: Key) -> Transition {
     match key.code {
-        KeyCode::Enter => update(model, Msg::ConfirmDelete),
-        KeyCode::Esc => update(model, Msg::CancelDelete),
-        KeyCode::Char('y') | KeyCode::Char('Y') => update(model, Msg::ConfirmDelete),
-        KeyCode::Char('n') | KeyCode::Char('N') => update(model, Msg::CancelDelete),
+        KeyCode::Enter => update(model, Msg::Delete(DeleteMsg::Confirm)),
+        KeyCode::Esc => update(model, Msg::Delete(DeleteMsg::Cancel)),
+        KeyCode::Char('y') | KeyCode::Char('Y') => update(model, Msg::Delete(DeleteMsg::Confirm)),
+        KeyCode::Char('n') | KeyCode::Char('N') => update(model, Msg::Delete(DeleteMsg::Cancel)),
         _ => Transition::Continue,
     }
 }
@@ -281,7 +310,10 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
         Model::UNSTAGED_ITEM_ID,
         &model.unstaged_tree,
         model.focus == Focus::Unstaged,
-        |tree_msg| Msg::Unstaged(SectionMsg::Tree(tree_msg)),
+        |tree_msg| Msg::Section {
+            focus: Focus::Unstaged,
+            msg: SectionMsg::Tree(tree_msg),
+        },
     )
     .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
@@ -294,7 +326,10 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
                 "unstaged-section-content",
                 &model.unstaged_scroll,
                 1,
-                Msg::UnstagedScroll,
+                |scroll_msg| Msg::Scroll {
+                    focus: Focus::Unstaged,
+                    msg: scroll_msg,
+                },
                 unstaged_list,
             )
             .with_min_height(Dimension::ZERO)
@@ -311,7 +346,10 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
         Model::STAGED_ITEM_ID,
         &model.staged_tree,
         model.focus == Focus::Staged,
-        |tree_msg| Msg::Staged(SectionMsg::Tree(tree_msg)),
+        |tree_msg| Msg::Section {
+            focus: Focus::Staged,
+            msg: SectionMsg::Tree(tree_msg),
+        },
     )
     .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
@@ -324,7 +362,10 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
                 "staged-section-content",
                 &model.staged_scroll,
                 1,
-                Msg::StagedScroll,
+                |scroll_msg| Msg::Scroll {
+                    focus: Focus::Staged,
+                    msg: scroll_msg,
+                },
                 staged_list,
             )
             .with_min_height(Dimension::ZERO)
@@ -405,7 +446,7 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
         "diff-pane-content",
         &model.diff_scroll,
         3,
-        Msg::DiffScroll,
+        |scroll_msg| Msg::Diff(DiffMsg::Scroll(scroll_msg)),
         block_with_title(
             diff_title,
             vec![render_diff_lines(
@@ -482,7 +523,7 @@ fn render_shortcuts_bar(model: &Model) -> Node<Msg> {
                     shortcut_description_style(),
                 ),
             ])
-            .on_click(|| Msg::ToggleShortcutsHelp)
+            .on_click(|| Msg::Global(GlobalMsg::ToggleShortcutsHelp))
             .with_id("more-less-button"),
         ])],
     )
@@ -526,7 +567,7 @@ fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
         "commit-modal-input",
         &state.input,
         &input_style,
-        Msg::CommitInput,
+        |msg| Msg::Commit(CommitMsg::Input(msg)),
     )
     .with_flex_grow(1.)
     .with_flex_basis(Dimension::ZERO)
@@ -1576,8 +1617,25 @@ impl Model {
 
 #[derive(Clone, Debug)]
 enum Msg {
+    Global(GlobalMsg),
+    Navigation(NavigationMsg),
+    Diff(DiffMsg),
+    Commit(CommitMsg),
+    Delete(DeleteMsg),
+    Section { focus: Focus, msg: SectionMsg },
+    Scroll { focus: Focus, msg: ScrollMsg },
+}
+
+#[derive(Clone, Debug)]
+enum GlobalMsg {
     KeyPressed(Key),
     Quit,
+    RefreshStatus,
+    ToggleShortcutsHelp,
+}
+
+#[derive(Clone, Debug)]
+enum NavigationMsg {
     ToggleStage,
     ToggleFocus,
     MoveSelectionUp,
@@ -1585,23 +1643,29 @@ enum Msg {
     CollapseNode,
     ExpandNode,
     ScrollFiles(i32),
-    ScrollDiff(i32),
-    ScrollDiffHorizontal(i32),
-    RefreshStatus,
-    OpenCommitModal,
-    OpenDeleteModal,
-    ToggleShortcutsHelp,
-    ToggleDiffLineNumbers,
-    SubmitCommit,
-    CancelCommit,
-    CommitInput(InputMsg),
-    ConfirmDelete,
-    CancelDelete,
-    Staged(SectionMsg),
-    Unstaged(SectionMsg),
-    DiffScroll(ScrollMsg),
-    UnstagedScroll(ScrollMsg),
-    StagedScroll(ScrollMsg),
+}
+
+#[derive(Clone, Debug)]
+enum DiffMsg {
+    ScrollVertical(i32),
+    ScrollHorizontal(i32),
+    Scroll(ScrollMsg),
+    ToggleLineNumbers,
+}
+
+#[derive(Clone, Debug)]
+enum CommitMsg {
+    Open,
+    Submit,
+    Cancel,
+    Input(InputMsg),
+}
+
+#[derive(Clone, Debug)]
+enum DeleteMsg {
+    Open,
+    Confirm,
+    Cancel,
 }
 
 #[derive(Clone, Debug)]
