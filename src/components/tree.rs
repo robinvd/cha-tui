@@ -87,13 +87,14 @@ where
     pub fn set_items(&mut self, roots: Vec<TreeNode<Id>>) {
         let previous_expanded = std::mem::take(&mut self.expanded);
         let previous_selected = self.selected.clone();
+        let previous_visible = self.visible.clone();
 
         self.roots = roots;
         self.expanded = previous_expanded;
         self.selected = previous_selected;
 
         self.rebuild_visible();
-        self.prune_state();
+        self.prune_state(&previous_visible);
     }
 
     pub fn visible(&self) -> &[VisibleNode<Id>] {
@@ -215,14 +216,44 @@ where
         self.rebuild_visible();
     }
 
-    fn prune_state(&mut self) {
+    fn prune_state(&mut self, previous_visible: &[VisibleNode<Id>]) {
         let visible_ids: HashSet<_> = self.visible.iter().map(|node| node.id.clone()).collect();
         self.expanded.retain(|id| visible_ids.contains(id));
         if let Some(selected) = &self.selected
             && !visible_ids.contains(selected)
         {
-            self.selected = self.visible.first().map(|node| node.id.clone());
+            if let Some(replacement) =
+                Self::replacement_selection(previous_visible, selected, &visible_ids)
+            {
+                self.selected = Some(replacement);
+            } else {
+                self.selected = self.visible.first().map(|node| node.id.clone());
+            }
         }
+    }
+
+    fn replacement_selection(
+        previous_visible: &[VisibleNode<Id>],
+        previous_selected: &Id,
+        current_visible_ids: &HashSet<Id>,
+    ) -> Option<Id> {
+        let previous_index = previous_visible
+            .iter()
+            .position(|node| &node.id == previous_selected)?;
+
+        for candidate in previous_visible.iter().skip(previous_index + 1) {
+            if current_visible_ids.contains(&candidate.id) {
+                return Some(candidate.id.clone());
+            }
+        }
+
+        for candidate in previous_visible.iter().take(previous_index).rev() {
+            if current_visible_ids.contains(&candidate.id) {
+                return Some(candidate.id.clone());
+            }
+        }
+
+        None
     }
 
     fn collect_branch_ids(node: &TreeNode<Id>, ids: &mut Vec<Id>)
