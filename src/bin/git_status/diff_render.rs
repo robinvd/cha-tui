@@ -1,11 +1,11 @@
+use chatui::Style;
 use chatui::dom::Renderable;
 use chatui::render::RenderContext;
-use chatui::Style;
 use taffy::{self, AvailableSpace};
-use tracing::info;
 use termwiz::cell::unicode_column_width;
+use tracing::info;
 
-use super::{highlight, DiffLine};
+use super::{DiffLine, highlight};
 
 #[derive(Clone, Debug)]
 pub(super) struct DiffLeaf {

@@ -210,15 +210,11 @@ fn handle_key(model: &mut Model, key: Key) -> Transition {
 }
 
 fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition {
-    if let Some(msg) = model
-        .commit_modal
-        .as_ref()
-        .and_then(|modal| {
-            default_input_keybindings(&modal.input, key, |input_msg| {
-                Msg::Commit(CommitMsg::Input(input_msg))
-            })
+    if let Some(msg) = model.commit_modal.as_ref().and_then(|modal| {
+        default_input_keybindings(&modal.input, key, |input_msg| {
+            Msg::Commit(CommitMsg::Input(input_msg))
         })
-    {
+    }) {
         return update(model, msg);
     }
 
@@ -547,10 +543,10 @@ fn render_diff_lines(lines: &[DiffLine], show_line_numbers: bool) -> Node<Msg> {
         lines.to_vec(),
         show_line_numbers,
     ))
-        .with_flex_shrink(0.)
-        .with_overflow_y(taffy::Overflow::Visible)
-        .with_overflow_x(taffy::Overflow::Visible)
-        .with_id("diff_lines")
+    .with_flex_shrink(0.)
+    .with_overflow_y(taffy::Overflow::Visible)
+    .with_overflow_x(taffy::Overflow::Visible)
+    .with_id("diff_lines")
 }
 
 fn normalized_number(value: usize) -> Option<usize> {
@@ -563,12 +559,9 @@ fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
     let input_style = commit_input_style();
 
     let prompt = text::<Msg>("> ").with_style(Style::fg(highlight::EVERFOREST_GREEN));
-    let input_field = input::<Msg>(
-        "commit-modal-input",
-        &state.input,
-        &input_style,
-        |msg| Msg::Commit(CommitMsg::Input(msg)),
-    )
+    let input_field = input::<Msg>("commit-modal-input", &state.input, &input_style, |msg| {
+        Msg::Commit(CommitMsg::Input(msg))
+    })
     .with_flex_grow(1.)
     .with_flex_basis(Dimension::ZERO)
     .with_min_width(Dimension::ZERO);
@@ -1536,7 +1529,13 @@ impl Model {
                     self.toggle_stage_for_id(focus, &id);
                     Transition::Continue
                 }
-            }
+            } // TreeMsg::DoubleClick(id) => {
+              //     self.focus = focus;
+              //     self.select_tree_id(focus, &id);
+              //     self.queue_scroll_for_focus(focus);
+              //     self.toggle_stage_for_id(focus, &id);
+              //     Transition::Continue
+              // }
         }
     }
 
@@ -2312,10 +2311,7 @@ mod tests {
             .render(&node, Size::new(40, 3))
             .expect("render diff lines with tabs");
 
-        let rendered_row: String = buffer.back_buffer()[0]
-            .iter()
-            .map(|cell| cell.ch)
-            .collect();
+        let rendered_row: String = buffer.back_buffer()[0].iter().map(|cell| cell.ch).collect();
         assert!(
             !rendered_row.contains('\t'),
             "expected diff rendering to expand tabs, row contained tab: {rendered_row:?}"

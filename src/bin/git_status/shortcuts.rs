@@ -1,7 +1,4 @@
-
-use super::{
-    CommitMsg, DeleteMsg, DiffMsg, GlobalMsg, Key, KeyCode, Model, Msg, NavigationMsg,
-};
+use super::{CommitMsg, DeleteMsg, DiffMsg, GlobalMsg, Key, KeyCode, Model, Msg, NavigationMsg};
 
 #[derive(Clone)]
 struct Shortcut {
