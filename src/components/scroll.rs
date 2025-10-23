@@ -421,14 +421,19 @@ pub fn scrollable_content<Msg>(
     });
 
     node = node.on_resize(move |layout| {
+        let to_u16 = |value: f32| value.max(0.0).round() as u16;
+        let viewport_box = layout.content_box_size();
+        let scrollbar = layout.scrollbar_size;
+        let viewport_width = (viewport_box.width - scrollbar.width).max(0.0);
+        let viewport_height = (viewport_box.height - scrollbar.height).max(0.0);
         Some(resize_handler(ScrollMsg::Resize {
             viewport: Size {
-                width: layout.size.width as u16,
-                height: layout.size.height as u16,
+                width: to_u16(viewport_width),
+                height: to_u16(viewport_height),
             },
             content: Size {
-                width: layout.content_size.width as u16,
-                height: layout.content_size.height as u16,
+                width: to_u16(layout.content_size.width),
+                height: to_u16(layout.content_size.height),
             },
         }))
     });

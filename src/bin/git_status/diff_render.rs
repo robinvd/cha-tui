@@ -7,6 +7,8 @@ use tracing::info;
 
 use super::{DiffLine, highlight};
 
+const TAB_WIDTH: usize = 8;
+
 #[derive(Clone, Debug)]
 pub(super) struct DiffLeaf {
     lines: Vec<DiffLine>,
@@ -22,6 +24,24 @@ impl DiffLeaf {
         };
 
         Self { lines, gutter }
+    }
+
+    fn line_display_width(line: &DiffLine) -> usize {
+        let mut column = 0usize;
+        for span in &line.spans {
+            for ch in span.content.chars() {
+                let width = if ch == '\t' {
+                    let next_tab_stop = ((column / TAB_WIDTH) + 1) * TAB_WIDTH;
+                    (next_tab_stop - column).max(1)
+                } else {
+                    let mut buf = [0u8; 4];
+                    let encoded = ch.encode_utf8(&mut buf);
+                    unicode_column_width(encoded, None).max(1)
+                };
+                column += width;
+            }
+        }
+        column
     }
 }
 
@@ -49,14 +69,7 @@ impl Renderable for DiffLeaf {
         let max_width = self
             .lines
             .iter()
-            .map(|line| {
-                gutter_width
-                    + line
-                        .spans
-                        .iter()
-                        .map(|span| span.content.len())
-                        .sum::<usize>()
-            })
+            .map(|line| gutter_width + Self::line_display_width(line))
             .max()
             .unwrap_or(0) as f32;
 
@@ -73,6 +86,7 @@ impl Renderable for DiffLeaf {
         let area = ctx.area();
         let start_idx = ctx.scroll_y().max(0.0).floor() as usize;
         let skip_cols = ctx.scroll_x().max(0.0).floor() as usize;
+        let content_skip = skip_cols;
         let end_row = area.y.saturating_add(area.height);
         let visible_height = end_row
             .saturating_sub(area.y)
@@ -81,7 +95,6 @@ impl Renderable for DiffLeaf {
         info!("diff render, {}:{}", ctx.scroll_x(), ctx.scroll_y());
 
         let gutter_style = line_number_style();
-        const TAB_WIDTH: usize = 8;
 
         for (i, line_idx) in (0..visible_height).enumerate() {
             let idx = start_idx + line_idx;
@@ -93,22 +106,15 @@ impl Renderable for DiffLeaf {
             let mut remaining = area.width;
             let mut cursor_x = area.x;
             let mut fill_style: Option<Style> = None;
-            let mut remaining_skip = skip_cols;
+            let mut remaining_skip = content_skip;
             let mut line_column = 0usize;
 
             if let Some(gutter) = &self.gutter {
                 let gutter_text = gutter.format_line(&self.lines[idx]);
-                let mut chars = gutter_text.chars();
-
-                if remaining_skip > 0 {
-                    let skipped = chars.by_ref().take(remaining_skip).count();
-                    remaining_skip = remaining_skip.saturating_sub(skipped);
-                }
-
-                if remaining_skip == 0 && remaining > 0 {
+                if remaining > 0 {
                     let mut collected = String::new();
                     let mut taken = 0;
-                    for ch in chars {
+                    for ch in gutter_text.chars() {
                         if remaining == 0 {
                             break;
                         }
@@ -298,11 +304,16 @@ mod tests {
     use super::*;
     use chatui::{
         Size,
+        block_with_title,
         buffer::DoubleBuffer,
+        column,
         dom::{renderable, rounding},
         palette::Palette,
         render::Renderer,
+        scrollable_content,
     };
+    use chatui::components::scroll::{ScrollAxis, ScrollMsg, ScrollState};
+    use taffy::prelude::TaffyZero;
     use taffy::{AvailableSpace, Dimension, Overflow, compute_root_layout};
 
     fn render_diff_leaf(leaf: DiffLeaf, scroll_x: f32, width: u16, height: u16) -> Vec<Vec<char>> {
@@ -358,18 +369,163 @@ mod tests {
         let gutter_width = GutterConfig::from_lines(&lines)
             .expect("lines with gutter should produce config")
             .total_width();
-        let rendered =
-            render_diff_leaf(DiffLeaf::new(lines, true), (gutter_width + 3) as f32, 20, 3);
+        let rendered = render_diff_leaf(DiffLeaf::new(lines, true), 3.0, 20, 3);
 
-        let row: String = rendered[0].iter().collect();
-        let first_x = row.find('X').expect("expected X in rendered row");
-        assert_eq!(
-            first_x, 5,
-            "expected scroll to remove gutter and three tab columns: {row:?}"
-        );
+        let row = &rendered[0];
         assert!(
-            row[..first_x].chars().all(|c| c == ' '),
-            "expected indentation to contain only spaces after gutter skip: {row:?}"
+            row.len() >= gutter_width,
+            "expected rendered row to contain full gutter"
+        );
+        let gutter: String = row[..gutter_width].iter().collect();
+        assert!(
+            gutter.ends_with("| "),
+            "expected gutter to remain visible when scrolling: {gutter:?}"
+        );
+
+        let content: Vec<char> = row[gutter_width..].to_vec();
+        let first_x = content
+            .iter()
+            .position(|&c| c == 'X')
+            .expect("expected X in rendered row");
+        assert_eq!(first_x, 5, "expected scroll to skip three tab columns");
+        assert!(
+            content[..first_x].iter().all(|&c| c == ' '),
+            "expected indentation to contain only spaces after gutter skip: {content:?}"
+        );
+    }
+
+    #[test]
+    fn horizontal_scroll_reaches_line_end_with_gutter() {
+        let content = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        let lines =
+            vec![DiffLine::plain(content).with_line_numbers(Some(10), Some(11))];
+        let gutter_width = GutterConfig::from_lines(&lines)
+            .expect("lines with gutter should produce config")
+            .total_width();
+        let viewport_width = (gutter_width + 6) as u16;
+        let scroll_x =
+            (gutter_width + content.len() - viewport_width as usize) as f32;
+
+        let rendered =
+            render_diff_leaf(DiffLeaf::new(lines, true), scroll_x, viewport_width, 1);
+        let row = &rendered[0];
+        assert!(
+            row.len() >= gutter_width,
+            "expected rendered row to contain full gutter"
+        );
+        let last = row
+            .last()
+            .copied()
+            .expect("expected rendered row to contain content");
+        assert_eq!(last, 'Z', "expected to reach end of content when scrolled");
+    }
+
+    #[test]
+    fn horizontal_scroll_reaches_line_end_without_gutter() {
+        let content = "0123456789";
+        let viewport_width = 6u16;
+        let scroll_x = (content.len() - viewport_width as usize) as f32;
+
+        let rendered =
+            render_diff_leaf(DiffLeaf::new(vec![DiffLine::plain(content)], false), scroll_x, viewport_width, 1);
+        let row = &rendered[0];
+        let last_visible = row
+            .iter()
+            .rev()
+            .find(|&&ch| ch != ' ')
+            .copied()
+            .expect("expected rendered row to contain content");
+        assert_eq!(
+            last_visible,
+            '9',
+            "expected to reach end of content in narrow viewport"
+        );
+    }
+
+    #[test]
+    fn diff_pane_drops_trailing_characters_when_viewport_is_narrow() {
+        let diff_text = "0123456789abcdefghijklmnopqrstuvwxyz";
+        let content_width = diff_text.len() as u16;
+        let viewport_width = 24u16;
+
+        let mut scroll = ScrollState::both();
+        let inner_viewport_width = viewport_width.saturating_sub(3); // block borders + reserved scrollbar column
+        let inner_viewport_height = 1u16;
+        scroll.update(ScrollMsg::Resize {
+            viewport: Size::new(inner_viewport_width, inner_viewport_height),
+            content: Size::new(content_width, inner_viewport_height),
+        });
+        scroll.set_offset_for(
+            ScrollAxis::Horizontal,
+            content_width.saturating_sub(inner_viewport_width) as f32,
+        );
+
+        let diff_lines = renderable::<()>(DiffLeaf::new(
+            vec![DiffLine::plain(diff_text)],
+            false,
+        ))
+        .with_flex_shrink(0.)
+        .with_overflow_y(Overflow::Visible)
+        .with_overflow_x(Overflow::Visible)
+        .with_id("diff_lines");
+
+        let block = block_with_title("Diff Preview", vec![diff_lines]);
+
+        let pane_content = scrollable_content::<()>(
+            "diff-pane-content",
+            &scroll,
+            3,
+            |_| (),
+            block,
+        )
+        .with_min_height(Dimension::ZERO)
+        .with_flex_grow(1.)
+        .with_flex_basis(Dimension::ZERO);
+
+        let mut pane = column::<()>(vec![pane_content])
+            .with_min_height(Dimension::ZERO)
+            .with_flex_grow(1.)
+            .with_flex_basis(Dimension::ZERO)
+            .with_id("diff-pane")
+            .with_width(Dimension::percent(1.0))
+            .with_height(Dimension::percent(1.0));
+        compute_root_layout(
+            &mut pane,
+            u64::MAX.into(),
+            taffy::Size {
+                width: AvailableSpace::Definite(24.0),
+                height: AvailableSpace::Definite(6.0),
+            },
+        );
+        chatui::dom::rounding::round_layout(&mut pane);
+
+        let mut buffer = DoubleBuffer::new(24, 6);
+        let palette = Palette::default();
+        Renderer::new(&mut buffer, &palette)
+            .render(&pane, Size::new(24, 6))
+            .expect("render diff pane");
+
+        let rows: Vec<String> = buffer
+            .back_buffer()
+            .iter()
+            .map(|row| row.iter().map(|cell| cell.ch).collect())
+            .collect();
+        let content_row = rows
+            .iter()
+            .find(|row| {
+                row.starts_with('│')
+                    && row.ends_with('│')
+                    && row.chars().any(|ch| ch.is_ascii_alphanumeric())
+            })
+            .expect("expected diff content row");
+        let visible = content_row
+            .trim_matches(|ch| ch == '│' || ch == ' ')
+            .to_string();
+        let expected_tail =
+            &diff_text[diff_text.len() - inner_viewport_width as usize..];
+        assert_eq!(
+            visible, expected_tail,
+            "expected diff pane to reveal the full tail when scrolled"
         );
     }
 }
