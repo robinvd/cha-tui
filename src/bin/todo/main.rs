@@ -29,7 +29,7 @@ enum Msg {
     KeyPressed(Key),
 }
 
-fn update(model: &mut Model, msg: Msg) -> Transition {
+fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
     match msg {
         Msg::KeyPressed(key) => handle_key(model, key),
     }
@@ -79,7 +79,7 @@ fn render_input(model: &Model) -> Node<Msg> {
     ])])
 }
 
-fn handle_key(model: &mut Model, key: Key) -> Transition {
+fn handle_key(model: &mut Model, key: Key) -> Transition<Msg> {
     if key.ctrl
         && matches!(
             key.code,
@@ -175,7 +175,7 @@ fn handle_key(model: &mut Model, key: Key) -> Transition {
     }
 }
 
-fn handle_char(model: &mut Model, key: Key, ch: char) -> Transition {
+fn handle_char(model: &mut Model, key: Key, ch: char) -> Transition<Msg> {
     if key.alt {
         return Transition::Continue;
     }

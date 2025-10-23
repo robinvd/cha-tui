@@ -190,7 +190,7 @@ enum Msg {
     TableEvent(DataTableMsg<usize>),
 }
 
-fn update(model: &mut Model, msg: Msg) -> Transition {
+fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
     match msg {
         Msg::MoveDown => model.table_state.select_next_row(),
         Msg::MoveUp => model.table_state.select_prev_row(),
@@ -341,7 +341,10 @@ mod tests {
             "root view should list file.txt"
         );
 
-        assert_eq!(update(&mut model, Msg::OpenSelected), Transition::Continue);
+        assert!(matches!(
+            update(&mut model, Msg::OpenSelected),
+            Transition::Continue
+        ));
         assert!(
             model.current_dir.ends_with("nested"),
             "model should navigate into nested directory"
@@ -359,7 +362,10 @@ mod tests {
             "nested view should not show root files"
         );
 
-        assert_eq!(update(&mut model, Msg::GoParent), Transition::Continue);
+        assert!(matches!(
+            update(&mut model, Msg::GoParent),
+            Transition::Continue
+        ));
         assert_eq!(model.current_dir, root_path);
 
         let mut final_view = view(&model);
@@ -378,10 +384,16 @@ mod tests {
 
         assert_eq!(model.table_state.selected_row(), Some(0));
 
-        assert_eq!(update(&mut model, Msg::MoveDown), Transition::Continue);
+        assert!(matches!(
+            update(&mut model, Msg::MoveDown),
+            Transition::Continue
+        ));
         assert_eq!(model.table_state.selected_row(), Some(1));
 
-        assert_eq!(update(&mut model, Msg::MoveUp), Transition::Continue);
+        assert!(matches!(
+            update(&mut model, Msg::MoveUp),
+            Transition::Continue
+        ));
         assert_eq!(model.table_state.selected_row(), Some(0));
     }
 }

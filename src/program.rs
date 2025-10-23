@@ -1,5 +1,7 @@
 use std::boxed::Box;
+use std::future::Future;
 use std::io::Write;
+use std::pin::Pin;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -11,20 +13,22 @@ use crate::palette::Palette;
 use crate::render::Renderer;
 use crate::scroll::ScrollAlignment;
 
+use smol::future;
 use smol::stream::StreamExt;
 use taffy::compute_root_layout;
 use termina::EventStream;
 use termina::{PlatformTerminal, Terminal};
 use tracing::info;
 
-pub type UpdateFn<Model, Msg> = Box<dyn FnMut(&mut Model, Msg) -> Transition>;
+pub type UpdateFn<Model, Msg> = Box<dyn FnMut(&mut Model, Msg) -> Transition<Msg>>;
 pub type ViewFn<Model, Msg> = Box<dyn Fn(&Model) -> Node<Msg>>;
 pub type EventFn<Msg> = Box<dyn Fn(Event) -> Option<Msg>>;
+pub type TaskFn<Msg> = Pin<Box<dyn Future<Output = Msg> + 'static>>;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Transition {
+pub enum Transition<Msg> {
     Continue,
     Quit,
+    Task(TaskFn<Msg>),
 }
 
 struct ScrollEffect<Msg> {
@@ -43,14 +47,18 @@ pub struct Program<Model, Msg> {
     last_click: Option<LastClick>,
     palette: Palette,
     queued_quit: bool,
+    executor: smol::LocalExecutor<'static>,
+    task_queue_send: smol::channel::Sender<Msg>,
+    task_queue_recv: smol::channel::Receiver<Msg>,
 }
 
-impl<Model, Msg> Program<Model, Msg> {
+impl<Model, Msg: 'static> Program<Model, Msg> {
     pub fn new(
         model: Model,
-        update: impl FnMut(&mut Model, Msg) -> Transition + 'static,
+        update: impl FnMut(&mut Model, Msg) -> Transition<Msg> + 'static,
         view: impl Fn(&Model) -> Node<Msg> + 'static,
     ) -> Self {
+        let (snd, recv) = smol::channel::unbounded();
         Self {
             model,
             update: Box::new(update),
@@ -62,6 +70,9 @@ impl<Model, Msg> Program<Model, Msg> {
             last_click: None,
             palette: Palette::default(),
             queued_quit: false,
+            executor: smol::LocalExecutor::new(),
+            task_queue_recv: recv,
+            task_queue_send: snd,
         }
     }
 
@@ -109,10 +120,6 @@ impl<Model, Msg> Program<Model, Msg> {
         result
     }
 
-    pub fn send(&mut self, event: Event) -> Result<Transition, ProgramError> {
-        self.process_event(event, None)
-    }
-
     async fn event_loop_async(
         &mut self,
         terminal: &mut PlatformTerminal,
@@ -139,38 +146,65 @@ impl<Model, Msg> Program<Model, Msg> {
         // Consume events from termina asynchronously using its reader.
         let mut events = EventStream::new(terminal.event_reader(), |_| true);
 
-        while let Some(event_res) = events.next().await {
-            let mut needs_render = false;
-            let mut should_quit = false;
+        enum Awaited<Msg> {
+            Event(Option<std::io::Result<termina::Event>>),
+            Message(Result<Msg, smol::channel::RecvError>),
+            Tick,
+        }
 
-            let event = event_res
-                .map_err(|e| ProgramError::event(format!("Failed to read event: {}", e)))?;
-
-            if let Some(converted_event) = convert_input_event(event) {
-                let (transition, render_flag) = self.handle_event(converted_event);
-                needs_render |= render_flag;
-                if matches!(transition, Transition::Quit) {
-                    should_quit = true;
-                }
-            }
+        loop {
+            let (should_quit, needs_render) = self.pump_pending_tasks();
 
             if needs_render {
-                self.render_view(&mut buffer)?;
-                // raw escape codes for `Synchronized Output` start
-                write!(terminal, "\x1b[?2026h").map_err(|e| {
-                    ProgramError::terminal(format!("Failed to write sync start: {}", e))
-                })?;
-                buffer.flush(terminal)?;
-                // raw escape codes for `Synchronized Output` end
-                write!(terminal, "\x1b[?2026l").map_err(|e| {
-                    ProgramError::terminal(format!("Failed to write sync end: {}", e))
-                })?;
-                terminal.flush().map_err(|e| {
-                    ProgramError::terminal(format!("Failed to flush terminal: {}", e))
-                })?;
+                self.flush_render(&mut buffer, terminal)?;
+            }
+            if should_quit {
+                break;
             }
 
-            if should_quit {
+            let next = future::race(
+                async { Awaited::Event(events.next().await) },
+                future::race(
+                    async { Awaited::Message(self.task_queue_recv.recv().await) },
+                    async {
+                        self.executor.tick().await;
+                        Awaited::Tick
+                    },
+                ),
+            )
+            .await;
+
+            let mut loop_needs_render = false;
+            let mut loop_should_quit = false;
+
+            match next {
+                Awaited::Event(Some(event_res)) => {
+                    let event = event_res
+                        .map_err(|e| ProgramError::event(format!("Failed to read event: {}", e)))?;
+
+                    if let Some(converted_event) = convert_input_event(event) {
+                        let (transition, render_flag) = self.handle_event(converted_event);
+                        let (task_quit, task_render) = self.resolve_transition(transition);
+                        loop_needs_render |= render_flag | task_render;
+                        loop_should_quit |= task_quit;
+                    }
+                }
+                Awaited::Event(None) => break,
+                Awaited::Message(Ok(msg)) => {
+                    let transition = (self.update)(&mut self.model, msg);
+                    let (task_quit, task_render) = self.resolve_transition(transition);
+                    loop_needs_render |= task_render;
+                    loop_should_quit |= task_quit;
+                }
+                Awaited::Message(Err(_)) => break,
+                Awaited::Tick => continue,
+            }
+
+            if loop_needs_render {
+                self.flush_render(&mut buffer, terminal)?;
+            }
+
+            if loop_should_quit {
                 break;
             }
         }
@@ -178,23 +212,62 @@ impl<Model, Msg> Program<Model, Msg> {
         Ok(())
     }
 
+    #[cfg(test)]
     fn process_event(
         &mut self,
         event: Event,
-        buffer: Option<&mut DoubleBuffer>,
-    ) -> Result<Transition, ProgramError> {
-        let (transition, needs_render) = self.handle_event(event);
+        mut buffer: Option<&mut DoubleBuffer>,
+    ) -> Result<bool, ProgramError> {
+        let (transition, mut needs_render) = self.handle_event(event);
+        let (mut quit, transition_render) = self.resolve_transition(transition);
+        needs_render |= transition_render;
+
         if needs_render {
-            if let Some(buf) = buffer {
-                self.render_view(buf)?;
+            if let Some(buf) = buffer.as_mut() {
+                self.render_view(*buf)?;
             } else {
                 self.rebuild_view();
             }
         }
-        Ok(transition)
+
+        let (task_quit, task_render) = self.drain_task_queue();
+        quit |= task_quit;
+        if task_render {
+            if let Some(buf) = buffer.as_mut() {
+                self.render_view(*buf)?;
+            } else {
+                self.rebuild_view();
+            }
+        }
+
+        Ok(quit)
     }
 
-    fn handle_event(&mut self, event: Event) -> (Transition, bool) {
+    #[cfg(test)]
+    fn drain_task_queue(&mut self) -> (bool, bool) {
+        let mut quit = false;
+        let mut needs_render = false;
+
+        for _ in 0..100 {
+            let (task_quit, task_render) = self.pump_pending_tasks();
+            quit |= task_quit;
+            needs_render |= task_render;
+
+            if quit || needs_render {
+                continue;
+            }
+
+            if self.executor.try_tick() {
+                continue;
+            }
+
+            break;
+        }
+
+        (quit, needs_render)
+    }
+
+    fn handle_event(&mut self, event: Event) -> (Transition<Msg>, bool) {
         let mut needs_render = matches!(event, Event::Resize(_));
 
         if let Event::Resize(size) = &event {
@@ -212,7 +285,7 @@ impl<Model, Msg> Program<Model, Msg> {
 
         let transition = if let Some(message) = msg {
             let transition = (self.update)(&mut self.model, message);
-            if matches!(transition, Transition::Continue) {
+            if matches!(&transition, Transition::Continue | Transition::Task(_)) {
                 needs_render = true;
             }
             transition
@@ -220,7 +293,7 @@ impl<Model, Msg> Program<Model, Msg> {
             Transition::Continue
         };
 
-        if matches!(transition, Transition::Quit) {
+        if matches!(&transition, Transition::Quit) {
             return (Transition::Quit, needs_render);
         }
 
@@ -232,6 +305,48 @@ impl<Model, Msg> Program<Model, Msg> {
         (transition, needs_render)
     }
 
+    fn resolve_transition(&mut self, transition: Transition<Msg>) -> (bool, bool) {
+        match transition {
+            Transition::Task(task) => {
+                let send = self.task_queue_send.clone();
+                self.executor
+                    .spawn(async move {
+                    let msg = task.await;
+
+                    // ignore the err if the ch is closed.
+                    //
+                    // there is nothing to do with a closed ch.
+                    let _ = send.send(msg).await;
+                })
+                .detach();
+                (false, false)
+            }
+            Transition::Continue => (false, true),
+            Transition::Quit => (true, true),
+        }
+    }
+
+    fn pump_pending_tasks(&mut self) -> (bool, bool) {
+        let mut quit = false;
+        let mut needs_render = false;
+
+        while self.executor.try_tick() {}
+
+        while let Ok(msg) = self.task_queue_recv.try_recv() {
+            let transition = (self.update)(&mut self.model, msg);
+            let (task_quit, task_render) = self.resolve_transition(transition);
+            quit |= task_quit;
+            needs_render |= task_render;
+        }
+
+        if self.queued_quit {
+            quit = true;
+            self.queued_quit = false;
+        }
+
+        (quit, needs_render)
+    }
+
     fn render_view(&mut self, buffer: &mut DoubleBuffer) -> Result<(), ProgramError> {
         self.rebuild_view();
         if let Some(current_view) = self.current_view.as_ref() {
@@ -239,6 +354,25 @@ impl<Model, Msg> Program<Model, Msg> {
         } else {
             Ok(())
         }
+    }
+
+    fn flush_render(
+        &mut self,
+        buffer: &mut DoubleBuffer,
+        terminal: &mut PlatformTerminal,
+    ) -> Result<(), ProgramError> {
+        self.render_view(buffer)?;
+        write!(terminal, "\x1b[?2026h").map_err(|e| {
+            ProgramError::terminal(format!("Failed to write sync start: {}", e))
+        })?;
+        buffer.flush(terminal)?;
+        write!(terminal, "\x1b[?2026l").map_err(|e| {
+            ProgramError::terminal(format!("Failed to write sync end: {}", e))
+        })?;
+        terminal
+            .flush()
+            .map_err(|e| ProgramError::terminal(format!("Failed to flush terminal: {}", e)))?;
+        Ok(())
     }
 
     fn rebuild_view(&mut self) {
@@ -268,17 +402,24 @@ impl<Model, Msg> Program<Model, Msg> {
             crate::dom::print::print_tree(view);
 
             // TODO early exit if Transition::Quit
-            let mut quit = false;
+            let mut pending_resize_msgs: Vec<Msg> = Vec::new();
             view.report_changed(&mut |node: &Node<Msg>| {
                 if let Some(resize_callback) = &node.on_resize
                     && let Some(msg) = resize_callback(&node.layout_state.layout)
                 {
-                    match (self.update)(&mut self.model, msg) {
-                        Transition::Quit => quit = true,
-                        Transition::Continue => {}
-                    }
+                    pending_resize_msgs.push(msg);
                 }
             });
+
+            let mut quit = false;
+            for msg in pending_resize_msgs {
+                let transition = (self.update)(&mut self.model, msg);
+                let (task_quit, _) = self.resolve_transition(transition);
+                if task_quit {
+                    quit = true;
+                    break;
+                }
+            }
             if quit {
                 self.queued_quit = true;
             }
@@ -291,7 +432,9 @@ impl<Model, Msg> Program<Model, Msg> {
 
         for effect in scroll_effects {
             let message = (effect.callback)(effect.offset);
-            if matches!((self.update)(&mut self.model, message), Transition::Quit) {
+            let transition = (self.update)(&mut self.model, message);
+            let (task_quit, _) = self.resolve_transition(transition);
+            if task_quit {
                 self.queued_quit = true;
             }
         }
@@ -569,7 +712,7 @@ mod tests {
         Quit,
     }
 
-    fn update(model: &mut CounterModel, msg: Msg) -> Transition {
+    fn update(model: &mut CounterModel, msg: Msg) -> Transition<Msg> {
         match msg {
             Msg::Increment => {
                 model.count += 1;
@@ -592,27 +735,13 @@ mod tests {
             });
         let mut buffer = DoubleBuffer::new(10, 2);
 
-        let transition = program
+        let quit = program
             .process_event(Event::key(KeyCode::Char('+')), Some(&mut buffer))
             .expect("send should succeed");
-        assert_eq!(transition, Transition::Continue);
+        assert!(!quit);
 
         let screen = buffer.to_string();
         assert!(screen.contains("count: 1"));
-    }
-
-    #[test]
-    fn send_produces_quit_transition() {
-        let mut program =
-            Program::new(CounterModel::default(), update, view).map_event(|event| match event {
-                Event::Key(key) if matches!(key.code, KeyCode::Char('q')) => Some(Msg::Quit),
-                _ => None,
-            });
-
-        let transition = program
-            .send(Event::key(KeyCode::Char('q')))
-            .expect("send should succeed");
-        assert_eq!(transition, Transition::Quit);
     }
 
     #[derive(Default)]
@@ -624,7 +753,7 @@ mod tests {
         Click,
     }
 
-    fn click_update(model: &mut ClickModel, msg: ClickMsg) -> Transition {
+    fn click_update(model: &mut ClickModel, msg: ClickMsg) -> Transition<ClickMsg> {
         match msg {
             ClickMsg::Click => {
                 model.clicks += 1;
@@ -696,7 +825,10 @@ mod tests {
         Double,
     }
 
-    fn double_click_update(model: &mut DoubleClickModel, msg: DoubleClickMsg) -> Transition {
+    fn double_click_update(
+        model: &mut DoubleClickModel,
+        msg: DoubleClickMsg,
+    ) -> Transition<DoubleClickMsg> {
         match msg {
             DoubleClickMsg::Single => {
                 model.single += 1;
@@ -803,5 +935,69 @@ mod tests {
     fn focus_in_event_is_exposed() {
         let event = super::convert_input_event(termina::Event::FocusIn);
         assert_eq!(event, Some(Event::FocusGained));
+    }
+
+    #[derive(Default)]
+    struct TaskModel {
+        started: bool,
+        completed: bool,
+    }
+
+    enum TaskMsg {
+        Start,
+        Complete,
+    }
+
+    fn task_update(model: &mut TaskModel, msg: TaskMsg) -> Transition<TaskMsg> {
+        match msg {
+            TaskMsg::Start => {
+                model.started = true;
+                Transition::Task(Box::pin(async { TaskMsg::Complete }))
+            }
+            TaskMsg::Complete => {
+                model.completed = true;
+                Transition::Continue
+            }
+        }
+    }
+
+    fn task_view(_model: &TaskModel) -> Node<TaskMsg> {
+        text("task view")
+    }
+
+    #[test]
+    fn task_transition_schedules_follow_up_message() {
+        let mut program = Program::new(TaskModel::default(), task_update, task_view).map_event(
+            |event| match event {
+                Event::Key(key) if matches!(key.code, KeyCode::Enter) => Some(TaskMsg::Start),
+                _ => None,
+            },
+        );
+
+        let mut buffer = DoubleBuffer::new(4, 2);
+        program
+            .process_event(Event::resize(4, 2), Some(&mut buffer))
+            .expect("resize should succeed");
+
+        assert!(!program.model.started);
+        assert!(!program.model.completed);
+
+        let quit = program
+            .process_event(Event::key(KeyCode::Enter), Some(&mut buffer))
+            .expect("start should succeed");
+        assert!(!quit);
+        assert!(program.model.started);
+
+        for _ in 0..100 {
+            if program.model.completed {
+                break;
+            }
+            program.drain_task_queue();
+            if program.model.completed {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(program.model.completed);
     }
 }

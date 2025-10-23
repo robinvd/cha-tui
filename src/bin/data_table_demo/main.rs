@@ -120,7 +120,7 @@ fn init_model() -> Model {
     }
 }
 
-fn update(model: &mut Model, msg: Msg) -> Transition {
+fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
     match msg {
         Msg::TableRow(table_msg) => {
             model.status_message = format!("Row Mode - Event: {:?}", table_msg);
@@ -544,8 +544,6 @@ fn init_tracing() -> color_eyre::Result<()> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let log_path = PathBuf::from("gs.log");
-
-    File::options().create(true).append(true).open(&log_path)?;
 
     let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new({
         let log_path = log_path.clone();

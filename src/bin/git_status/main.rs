@@ -52,7 +52,7 @@ fn map_event(event: Event) -> Option<Msg> {
     }
 }
 
-fn update(model: &mut Model, msg: Msg) -> Transition {
+fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
     info!("update {msg:?}");
     match msg {
         Msg::Global(global_msg) => handle_global_msg(model, global_msg),
@@ -68,13 +68,13 @@ fn update(model: &mut Model, msg: Msg) -> Transition {
     }
 }
 
-fn handle_section_msg(model: &mut Model, focus: Focus, msg: SectionMsg) -> Transition {
+fn handle_section_msg(model: &mut Model, focus: Focus, msg: SectionMsg) -> Transition<Msg> {
     match msg {
         SectionMsg::Tree(tree_msg) => model.handle_tree_message(focus, tree_msg),
     }
 }
 
-fn handle_global_msg(model: &mut Model, msg: GlobalMsg) -> Transition {
+fn handle_global_msg(model: &mut Model, msg: GlobalMsg) -> Transition<Msg> {
     match msg {
         GlobalMsg::KeyPressed(key) => handle_key(model, key),
         GlobalMsg::Quit => Transition::Quit,
@@ -91,7 +91,7 @@ fn handle_global_msg(model: &mut Model, msg: GlobalMsg) -> Transition {
     }
 }
 
-fn handle_navigation_msg(model: &mut Model, msg: NavigationMsg) -> Transition {
+fn handle_navigation_msg(model: &mut Model, msg: NavigationMsg) -> Transition<Msg> {
     match msg {
         NavigationMsg::ToggleStage => {
             model.toggle_stage_selected();
@@ -134,7 +134,7 @@ fn handle_navigation_msg(model: &mut Model, msg: NavigationMsg) -> Transition {
     }
 }
 
-fn handle_diff_msg(model: &mut Model, msg: DiffMsg) -> Transition {
+fn handle_diff_msg(model: &mut Model, msg: DiffMsg) -> Transition<Msg> {
     match msg {
         DiffMsg::ScrollVertical(delta) => {
             model.scroll_diff(delta);
@@ -155,7 +155,7 @@ fn handle_diff_msg(model: &mut Model, msg: DiffMsg) -> Transition {
     }
 }
 
-fn handle_commit_msg(model: &mut Model, msg: CommitMsg) -> Transition {
+fn handle_commit_msg(model: &mut Model, msg: CommitMsg) -> Transition<Msg> {
     match msg {
         CommitMsg::Open => {
             model.open_commit_modal();
@@ -175,7 +175,7 @@ fn handle_commit_msg(model: &mut Model, msg: CommitMsg) -> Transition {
     }
 }
 
-fn handle_delete_msg(model: &mut Model, msg: DeleteMsg) -> Transition {
+fn handle_delete_msg(model: &mut Model, msg: DeleteMsg) -> Transition<Msg> {
     match msg {
         DeleteMsg::Open => {
             model.open_delete_modal();
@@ -189,7 +189,7 @@ fn handle_delete_msg(model: &mut Model, msg: DeleteMsg) -> Transition {
     }
 }
 
-fn handle_key(model: &mut Model, key: Key) -> Transition {
+fn handle_key(model: &mut Model, key: Key) -> Transition<Msg> {
     // If the delete modal is active, it consumes keys like Enter/Esc/Y/N.
     if model.delete_modal.is_some() {
         return handle_delete_modal_key(model, key);
@@ -209,7 +209,7 @@ fn handle_key(model: &mut Model, key: Key) -> Transition {
     Transition::Continue
 }
 
-fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition {
+fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition<Msg> {
     if let Some(msg) = model.commit_modal.as_ref().and_then(|modal| {
         default_input_keybindings(&modal.input, key, |input_msg| {
             Msg::Commit(CommitMsg::Input(input_msg))
@@ -221,7 +221,7 @@ fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition {
     Transition::Continue
 }
 
-fn handle_delete_modal_key(model: &mut Model, key: Key) -> Transition {
+fn handle_delete_modal_key(model: &mut Model, key: Key) -> Transition<Msg> {
     match key.code {
         KeyCode::Enter => update(model, Msg::Delete(DeleteMsg::Confirm)),
         KeyCode::Esc => update(model, Msg::Delete(DeleteMsg::Cancel)),
@@ -1195,7 +1195,7 @@ impl Model {
         self.show_diff_line_numbers = !self.show_diff_line_numbers;
     }
 
-    fn submit_commit(&mut self) -> Transition {
+    fn submit_commit(&mut self) -> Transition<Msg> {
         let message = match self.commit_modal.as_ref() {
             Some(modal) => modal.message(),
             None => return Transition::Continue,
@@ -1221,7 +1221,7 @@ impl Model {
         Transition::Continue
     }
 
-    fn confirm_delete(&mut self) -> Transition {
+    fn confirm_delete(&mut self) -> Transition<Msg> {
         let path = match self.delete_modal.as_ref() {
             Some(modal) => modal.path.clone(),
             None => return Transition::Continue,
@@ -1507,7 +1507,11 @@ impl Model {
         }
     }
 
-    fn handle_tree_message(&mut self, focus: Focus, tree_msg: TreeMsg<FileNodeId>) -> Transition {
+    fn handle_tree_message(
+        &mut self,
+        focus: Focus,
+        tree_msg: TreeMsg<FileNodeId>,
+    ) -> Transition<Msg> {
         match tree_msg {
             TreeMsg::Activate(id) => {
                 self.focus = focus;
@@ -2325,8 +2329,6 @@ fn init_tracing() -> color_eyre::Result<()> {
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
     let log_path = PathBuf::from("gs.log");
-
-    File::options().create(true).append(true).open(&log_path)?;
 
     let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new({
         let log_path = log_path.clone();
