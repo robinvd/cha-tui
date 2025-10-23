@@ -94,6 +94,7 @@ impl Renderable for DiffLeaf {
             let mut cursor_x = area.x;
             let mut fill_style: Option<Style> = None;
             let mut remaining_skip = skip_cols;
+            let mut line_column = 0usize;
 
             if let Some(gutter) = &self.gutter {
                 let gutter_text = gutter.format_line(&self.lines[idx]);
@@ -141,35 +142,41 @@ impl Renderable for DiffLeaf {
                         break;
                     }
 
-                    let current_col = cursor_x + taken_cols;
                     let width = if ch == '\t' {
-                        let next_tab_stop = ((current_col / TAB_WIDTH) + 1) * TAB_WIDTH;
-                        (next_tab_stop - current_col).max(1)
+                        let next_tab_stop = ((line_column / TAB_WIDTH) + 1) * TAB_WIDTH;
+                        (next_tab_stop - line_column).max(1)
                     } else {
                         let mut buf = [0u8; 4];
                         let s = ch.encode_utf8(&mut buf);
                         unicode_column_width(s, None).max(1)
                     };
 
-                    if remaining_skip >= width {
-                        remaining_skip -= width;
+                    let skip_for_char = remaining_skip.min(width);
+                    remaining_skip -= skip_for_char;
+
+                    let next_column = line_column + width;
+
+                    if skip_for_char == width {
+                        line_column = next_column;
                         continue;
-                    } else if remaining_skip > 0 {
-                        remaining_skip = 0;
                     }
 
-                    if width > remaining {
+                    let visible_width = width - skip_for_char;
+
+                    if visible_width > remaining {
+                        line_column = next_column;
                         break;
                     }
 
-                    if ch == '\t' {
-                        collected.extend(std::iter::repeat_n(' ', width));
+                    if ch == '\t' || skip_for_char > 0 {
+                        collected.extend(std::iter::repeat_n(' ', visible_width));
                     } else {
                         collected.push(ch);
                     }
 
-                    taken_cols += width;
-                    remaining = remaining.saturating_sub(width);
+                    taken_cols += visible_width;
+                    remaining = remaining.saturating_sub(visible_width);
+                    line_column = next_column;
                 }
 
                 if collected.is_empty() {
@@ -284,4 +291,85 @@ fn line_number_style() -> Style {
     let mut style = Style::fg(highlight::EVERFOREST_GREY2);
     style.dim = true;
     style
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chatui::{
+        Size,
+        buffer::DoubleBuffer,
+        dom::{renderable, rounding},
+        palette::Palette,
+        render::Renderer,
+    };
+    use taffy::{AvailableSpace, Dimension, Overflow, compute_root_layout};
+
+    fn render_diff_leaf(leaf: DiffLeaf, scroll_x: f32, width: u16, height: u16) -> Vec<Vec<char>> {
+        let mut node = renderable::<()>(leaf)
+            .with_overflow_x(Overflow::Scroll)
+            .with_scroll_x(scroll_x)
+            .with_width(Dimension::length(width as f32))
+            .with_height(Dimension::length(height as f32));
+
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: AvailableSpace::Definite(width as f32),
+                height: AvailableSpace::Definite(height as f32),
+            },
+        );
+        rounding::round_layout(&mut node);
+
+        let mut buffer = DoubleBuffer::new(width as usize, height as usize);
+        let palette = Palette::default();
+        Renderer::new(&mut buffer, &palette)
+            .render(&node, Size::new(width, height))
+            .expect("render diff leaf");
+
+        buffer
+            .back_buffer()
+            .iter()
+            .map(|row| row.iter().map(|cell| cell.ch).collect())
+            .collect()
+    }
+
+    #[test]
+    fn horizontal_scroll_skips_partial_tab_columns_without_gutter() {
+        let line = DiffLine::plain("\tXYZ");
+        let rendered = render_diff_leaf(DiffLeaf::new(vec![line], false), 3.0, 16, 3);
+
+        let row: String = rendered[0].iter().collect();
+        let first_x = row.find('X').expect("expected X in rendered row");
+        assert_eq!(
+            first_x, 5,
+            "expected scroll to remove three columns of the tab: {row:?}"
+        );
+        assert!(
+            row[..first_x].chars().all(|c| c == ' '),
+            "expected indentation to be spaces only: {row:?}"
+        );
+    }
+
+    #[test]
+    fn horizontal_scroll_skips_partial_tab_columns_with_gutter() {
+        let lines = vec![DiffLine::plain("\tXYZ").with_line_numbers(Some(42), Some(43))];
+        let gutter_width = GutterConfig::from_lines(&lines)
+            .expect("lines with gutter should produce config")
+            .total_width();
+        let rendered =
+            render_diff_leaf(DiffLeaf::new(lines, true), (gutter_width + 3) as f32, 20, 3);
+
+        let row: String = rendered[0].iter().collect();
+        let first_x = row.find('X').expect("expected X in rendered row");
+        assert_eq!(
+            first_x, 5,
+            "expected scroll to remove gutter and three tab columns: {row:?}"
+        );
+        assert!(
+            row[..first_x].chars().all(|c| c == ' '),
+            "expected indentation to contain only spaces after gutter skip: {row:?}"
+        );
+    }
 }
