@@ -10,12 +10,14 @@ use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, ErrorKind, Read};
 use std::path::Path;
+use std::result::Result as StdResult;
 
 use chatui::components::scroll::{
     ScrollAxis, ScrollMsg, ScrollState, ScrollTarget, scrollable_content,
 };
 use chatui::dom::{Color, Node, TextSpan, renderable};
 use chatui::event::{Event, Key, KeyCode};
+use chatui::program::TaskFn;
 use chatui::{
     InputMsg, InputState, InputStyle, Program, Style, Transition, TreeNodeKind, block_with_title,
     column, default_input_keybindings, input, modal, rich_text, row, text,
@@ -28,7 +30,8 @@ use taffy::style::FlexWrap;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-use crate::git::{FileEntry, LoadedContent};
+use crate::git::{FileEntry, GitStatus, LoadedContent};
+use smol::unblock;
 mod shortcuts;
 
 fn main() -> Result<()> {
@@ -61,6 +64,11 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         Msg::Commit(commit_msg) => handle_commit_msg(model, commit_msg),
         Msg::Delete(delete_msg) => handle_delete_msg(model, delete_msg),
         Msg::Section { focus, msg } => handle_section_msg(model, focus, msg),
+        Msg::DiffLoaded { request_id, result } => model.handle_diff_loaded(request_id, result),
+        Msg::StatusLoaded {
+            preserve_diff_scroll,
+            result,
+        } => model.handle_status_loaded(preserve_diff_scroll, result),
         Msg::Scroll { focus, msg } => {
             model.update_section_scroll(focus, msg);
             Transition::Continue
@@ -78,12 +86,7 @@ fn handle_global_msg(model: &mut Model, msg: GlobalMsg) -> Transition<Msg> {
     match msg {
         GlobalMsg::KeyPressed(key) => handle_key(model, key),
         GlobalMsg::Quit => Transition::Quit,
-        GlobalMsg::RefreshStatus => {
-            if let Err(err) = model.refresh_status_preserving_diff_scroll() {
-                model.set_error(err);
-            }
-            Transition::Continue
-        }
+        GlobalMsg::RefreshStatus => model.start_status_refresh(true),
         GlobalMsg::ToggleShortcutsHelp => {
             model.toggle_shortcuts_help();
             Transition::Continue
@@ -102,28 +105,38 @@ fn handle_navigation_msg(model: &mut Model, msg: NavigationMsg) -> Transition<Ms
                 Focus::Unstaged => model.focus_staged(),
                 Focus::Staged => model.focus_unstaged(),
             }
-            model.update_diff();
-            Transition::Continue
+            match model.start_diff_refresh(false) {
+                Some(task) => Transition::Task(task),
+                None => Transition::Continue,
+            }
         }
         NavigationMsg::MoveSelectionUp => {
             model.move_selection_up();
-            model.update_diff();
-            Transition::Continue
+            match model.start_diff_refresh(false) {
+                Some(task) => Transition::Task(task),
+                None => Transition::Continue,
+            }
         }
         NavigationMsg::MoveSelectionDown => {
             model.move_selection_down();
-            model.update_diff();
-            Transition::Continue
+            match model.start_diff_refresh(false) {
+                Some(task) => Transition::Task(task),
+                None => Transition::Continue,
+            }
         }
         NavigationMsg::CollapseNode => {
-            if model.collapse_selected() {
-                model.update_diff();
+            if model.collapse_selected()
+                && let Some(task) = model.start_diff_refresh(false)
+            {
+                return Transition::Task(task);
             }
             Transition::Continue
         }
         NavigationMsg::ExpandNode => {
-            if model.expand_selected() {
-                model.update_diff();
+            if model.expand_selected()
+                && let Some(task) = model.start_diff_refresh(false)
+            {
+                return Transition::Task(task);
             }
             Transition::Continue
         }
@@ -271,10 +284,13 @@ fn view(model: &Model) -> Node<Msg> {
         .as_deref()
         .filter(|branch| !branch.is_empty())
         .unwrap_or("(unknown)");
-    let branch_spans = vec![
+    let mut branch_spans = vec![
         TextSpan::new("branch: ", Style::dim()),
         TextSpan::new(branch_label, branch_name_style()),
     ];
+    if model.status_loading {
+        branch_spans.push(TextSpan::new("  refreshing…", Style::dim()));
+    }
     let branch_node = rich_text::<Msg>(branch_spans).with_id("header-branch");
 
     let header = row(vec![header_left, branch_node])
@@ -419,7 +435,7 @@ fn file_tree_style() -> TreeStyle {
 }
 
 fn render_diff_pane(model: &Model) -> Node<Msg> {
-    let diff_title = match model.current_entry() {
+    let mut diff_title = match model.current_entry() {
         Some(entry) => {
             if model.diff_truncated {
                 format!(
@@ -438,6 +454,9 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
             }
         }
     };
+    if model.diff_loading {
+        diff_title.push_str(" (loading…)");
+    }
     let content = scrollable_content(
         "diff-pane-content",
         &model.diff_scroll,
@@ -1006,6 +1025,20 @@ struct Model {
     show_all_shortcuts: bool,
     show_diff_line_numbers: bool,
     current_branch: Option<String>,
+    status_loading: bool,
+    diff_loading: bool,
+    next_diff_request_id: u64,
+    active_diff_request: Option<DiffRequest>,
+}
+
+struct DiffRequest {
+    id: u64,
+    preserve_scroll: bool,
+}
+
+enum DiffMode {
+    Sync,
+    Async,
 }
 
 impl Model {
@@ -1244,15 +1277,60 @@ impl Model {
         Transition::Continue
     }
 
+    fn start_status_refresh(&mut self, preserve_diff_scroll: bool) -> Transition<Msg> {
+        if self.status_loading {
+            return Transition::Continue;
+        }
+
+        self.status_loading = true;
+        let future = async move {
+            let result = unblock(git::load_status)
+                .await
+                .map_err(|err| err.to_string());
+            Msg::StatusLoaded {
+                preserve_diff_scroll,
+                result,
+            }
+        };
+
+        Transition::Task(Box::pin(future))
+    }
+
+    fn handle_status_loaded(
+        &mut self,
+        preserve_diff_scroll: bool,
+        result: StdResult<GitStatus, String>,
+    ) -> Transition<Msg> {
+        self.status_loading = false;
+
+        match result {
+            Ok(status) => {
+                if let Some(task) = self.apply_status(status, preserve_diff_scroll, DiffMode::Async)
+                {
+                    Transition::Task(task)
+                } else {
+                    Transition::Continue
+                }
+            }
+            Err(err) => {
+                self.set_error(eyre!("{}", err));
+                Transition::Continue
+            }
+        }
+    }
+
     fn refresh_status(&mut self) -> Result<()> {
-        self.refresh_status_internal(false)
+        let status = git::load_status()?;
+        let _ = self.apply_status(status, false, DiffMode::Sync);
+        Ok(())
     }
 
-    fn refresh_status_preserving_diff_scroll(&mut self) -> Result<()> {
-        self.refresh_status_internal(true)
-    }
-
-    fn refresh_status_internal(&mut self, preserve_diff_scroll: bool) -> Result<()> {
+    fn apply_status(
+        &mut self,
+        status: GitStatus,
+        preserve_diff_scroll: bool,
+        diff_mode: DiffMode,
+    ) -> Option<TaskFn<Msg>> {
         let previous_focus = if preserve_diff_scroll {
             Some(self.focus)
         } else {
@@ -1272,10 +1350,14 @@ impl Model {
             (None, None)
         };
 
-        let status = git::load_status()?;
-        self.unstaged = status.unstaged;
-        self.staged = status.staged;
-        self.current_branch = status.branch;
+        let GitStatus {
+            unstaged,
+            staged,
+            branch,
+        } = status;
+        self.unstaged = unstaged;
+        self.staged = staged;
+        self.current_branch = branch;
         let unstaged_nodes = build_file_tree(&self.unstaged);
         let staged_nodes = build_file_tree(&self.staged);
         self.unstaged_tree.set_items(unstaged_nodes);
@@ -1290,7 +1372,13 @@ impl Model {
         }
         self.ensure_focus_valid();
         self.clear_error();
-        self.update_diff();
+        let diff_task = match diff_mode {
+            DiffMode::Sync => {
+                self.update_diff_sync(preserve_diff_scroll);
+                None
+            }
+            DiffMode::Async => self.start_diff_refresh(preserve_diff_scroll),
+        };
         if let (Some(prev_focus), Some(prev_selection)) = (previous_focus, previous_selection)
             && self.focus == prev_focus
             && self
@@ -1307,7 +1395,8 @@ impl Model {
                     .set_offset_for(ScrollAxis::Horizontal, offset);
             }
         }
-        Ok(())
+
+        diff_task
     }
 
     fn ensure_focus_valid(&mut self) {
@@ -1327,46 +1416,134 @@ impl Model {
         self.clamp_file_scrolls();
     }
 
-    fn update_diff(&mut self) {
+    fn start_diff_refresh(&mut self, preserve_scroll: bool) -> Option<TaskFn<Msg>> {
         let selected_id = self.selected_id(self.focus);
-        let diff_result = match (self.current_entry(), selected_id.as_ref()) {
-            (Some(entry), _) => diff_for(entry, self.focus),
+        match (self.current_entry(), selected_id.as_ref()) {
+            (Some(entry), _) => {
+                let entry = entry.clone();
+                let request_id = self.next_diff_request_id;
+                self.next_diff_request_id = self.next_diff_request_id.wrapping_add(1);
+                self.active_diff_request = Some(DiffRequest {
+                    id: request_id,
+                    preserve_scroll,
+                });
+                self.diff_loading = true;
+                if !preserve_scroll || self.diff_lines.is_empty() {
+                    self.diff_lines = vec![DiffLine::styled("Loading diff…", Style::dim())];
+                }
+                if !preserve_scroll {
+                    self.diff_scroll.reset();
+                }
+                self.diff_truncated = false;
+
+                let focus = self.focus;
+
+                let future = async move {
+                    let result = unblock(move || diff_for(&entry, focus))
+                        .await
+                        .map_err(|err| err.to_string());
+                    Msg::DiffLoaded { request_id, result }
+                };
+
+                Some(Box::pin(future))
+            }
+            (None, Some(FileNodeId::Dir(_))) => {
+                self.active_diff_request = None;
+                self.diff_loading = false;
+                self.diff_truncated = false;
+                self.diff_lines = vec![DiffLine::plain("Select a file to view diff")];
+                self.diff_scroll.reset();
+                None
+            }
+            (None, _) => {
+                self.active_diff_request = None;
+                self.diff_loading = false;
+                self.diff_truncated = false;
+                self.diff_lines = vec![DiffLine::plain("No file selected")];
+                self.diff_scroll.reset();
+                None
+            }
+        }
+    }
+
+    fn update_diff_sync(&mut self, preserve_scroll: bool) {
+        self.diff_loading = false;
+        self.active_diff_request = None;
+
+        let selected_id = self.selected_id(self.focus);
+        match (self.current_entry(), selected_id.as_ref()) {
+            (Some(entry), _) => match diff_for(entry, self.focus) {
+                Ok(preview) => self.apply_diff_preview(preview, preserve_scroll),
+                Err(err) => {
+                    self.diff_lines = vec![DiffLine::plain("Failed to load diff")];
+                    self.diff_truncated = false;
+                    self.set_error(err);
+                    self.diff_scroll.reset();
+                }
+            },
             (None, Some(FileNodeId::Dir(_))) => {
                 self.diff_lines = vec![DiffLine::plain("Select a file to view diff")];
                 self.diff_truncated = false;
                 self.diff_scroll.reset();
-                return;
             }
             (None, _) => {
                 self.diff_lines = vec![DiffLine::plain("No file selected")];
                 self.diff_truncated = false;
                 self.diff_scroll.reset();
-                return;
             }
+        }
+    }
+
+    fn handle_diff_loaded(
+        &mut self,
+        request_id: u64,
+        result: StdResult<DiffPreview, String>,
+    ) -> Transition<Msg> {
+        let Some(active) = self.active_diff_request.as_ref() else {
+            return Transition::Continue;
         };
 
-        match diff_result {
-            Ok(preview) => {
-                let DiffPreview { lines, truncated } = preview;
-                if lines.is_empty() {
-                    self.diff_lines = vec![DiffLine::plain("No diff available")];
-                    self.diff_truncated = false;
-                } else {
-                    self.diff_lines = lines;
-                    self.diff_truncated = truncated;
-                }
-                self.diff_scroll.reset();
+        if active.id != request_id {
+            return Transition::Continue;
+        }
 
-                if matches!(self.error.as_deref(), Some(msg) if msg.starts_with("git diff")) {
-                    self.clear_error();
-                }
+        let preserve_scroll = active.preserve_scroll;
+        self.active_diff_request = None;
+        self.diff_loading = false;
+
+        match result {
+            Ok(preview) => {
+                self.apply_diff_preview(preview, preserve_scroll);
             }
             Err(err) => {
                 self.diff_lines = vec![DiffLine::plain("Failed to load diff")];
                 self.diff_truncated = false;
-                self.set_error(err);
-                self.diff_scroll.reset();
+                if !preserve_scroll {
+                    self.diff_scroll.reset();
+                }
+                self.set_error(eyre!("{}", err));
             }
+        }
+
+        Transition::Continue
+    }
+
+    fn apply_diff_preview(&mut self, preview: DiffPreview, preserve_scroll: bool) {
+        let DiffPreview { lines, truncated } = preview;
+        if lines.is_empty() {
+            self.diff_lines = vec![DiffLine::plain("No diff available")];
+            self.diff_truncated = false;
+        } else {
+            self.diff_lines = lines;
+            self.diff_truncated = truncated;
+        }
+
+        if !preserve_scroll {
+            self.diff_scroll.reset();
+        }
+
+        if matches!(self.error.as_deref(), Some(msg) if msg.starts_with("git diff")) {
+            self.clear_error();
         }
     }
 
@@ -1517,8 +1694,10 @@ impl Model {
                 self.focus = focus;
                 self.select_tree_id(focus, &id);
                 self.queue_scroll_for_focus(focus);
-                self.update_diff();
-                Transition::Continue
+                match self.start_diff_refresh(false) {
+                    Some(task) => Transition::Task(task),
+                    None => Transition::Continue,
+                }
             }
             TreeMsg::ToggleExpand(id) => {
                 self.focus = focus;
@@ -1526,8 +1705,10 @@ impl Model {
                 if id.is_dir() {
                     self.tree_state_mut(focus).toggle_expanded(&id);
                     self.queue_scroll_for_focus(focus);
-                    self.update_diff();
-                    Transition::Continue
+                    match self.start_diff_refresh(false) {
+                        Some(task) => Transition::Task(task),
+                        None => Transition::Continue,
+                    }
                 } else {
                     self.queue_scroll_for_focus(focus);
                     self.toggle_stage_for_id(focus, &id);
@@ -1625,8 +1806,22 @@ enum Msg {
     Diff(DiffMsg),
     Commit(CommitMsg),
     Delete(DeleteMsg),
-    Section { focus: Focus, msg: SectionMsg },
-    Scroll { focus: Focus, msg: ScrollMsg },
+    Section {
+        focus: Focus,
+        msg: SectionMsg,
+    },
+    DiffLoaded {
+        request_id: u64,
+        result: StdResult<DiffPreview, String>,
+    },
+    StatusLoaded {
+        preserve_diff_scroll: bool,
+        result: StdResult<GitStatus, String>,
+    },
+    Scroll {
+        focus: Focus,
+        msg: ScrollMsg,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -1721,6 +1916,7 @@ impl DiffLine {
     }
 }
 
+#[derive(Clone, Debug)]
 struct DiffPreview {
     lines: Vec<DiffLine>,
     truncated: bool,

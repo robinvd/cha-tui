@@ -311,14 +311,14 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
                 let send = self.task_queue_send.clone();
                 self.executor
                     .spawn(async move {
-                    let msg = task.await;
+                        let msg = task.await;
 
-                    // ignore the err if the ch is closed.
-                    //
-                    // there is nothing to do with a closed ch.
-                    let _ = send.send(msg).await;
-                })
-                .detach();
+                        // ignore the err if the ch is closed.
+                        //
+                        // there is nothing to do with a closed ch.
+                        let _ = send.send(msg).await;
+                    })
+                    .detach();
                 (false, false)
             }
             Transition::Continue => (false, true),
@@ -362,13 +362,11 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
         terminal: &mut PlatformTerminal,
     ) -> Result<(), ProgramError> {
         self.render_view(buffer)?;
-        write!(terminal, "\x1b[?2026h").map_err(|e| {
-            ProgramError::terminal(format!("Failed to write sync start: {}", e))
-        })?;
+        write!(terminal, "\x1b[?2026h")
+            .map_err(|e| ProgramError::terminal(format!("Failed to write sync start: {}", e)))?;
         buffer.flush(terminal)?;
-        write!(terminal, "\x1b[?2026l").map_err(|e| {
-            ProgramError::terminal(format!("Failed to write sync end: {}", e))
-        })?;
+        write!(terminal, "\x1b[?2026l")
+            .map_err(|e| ProgramError::terminal(format!("Failed to write sync end: {}", e)))?;
         terminal
             .flush()
             .map_err(|e| ProgramError::terminal(format!("Failed to flush terminal: {}", e)))?;
