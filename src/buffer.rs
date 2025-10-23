@@ -527,7 +527,7 @@ impl DoubleBuffer {
     }
 
     /// Convert the back buffer to a string for debugging/testing
-    #[cfg(test)]
+    #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         let mut result = String::new();
         for (i, row) in self.back.iter().enumerate() {

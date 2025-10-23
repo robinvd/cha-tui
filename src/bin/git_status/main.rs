@@ -767,6 +767,7 @@ struct DirBuilder {
     path: String,
     children: BTreeMap<String, NodeBuilder>,
     codes: BTreeSet<char>,
+    directory_entry: Option<FileEntry>,
 }
 
 enum NodeBuilder {
@@ -781,6 +782,7 @@ impl DirBuilder {
             path: String::new(),
             children: BTreeMap::new(),
             codes: BTreeSet::new(),
+            directory_entry: None,
         }
     }
 
@@ -790,6 +792,7 @@ impl DirBuilder {
             path,
             children: BTreeMap::new(),
             codes: BTreeSet::new(),
+            directory_entry: None,
         }
     }
 
@@ -801,8 +804,12 @@ impl DirBuilder {
         self.codes.insert(entry.code);
 
         if components.len() == 1 {
-            self.children
-                .insert(components[0].to_string(), NodeBuilder::File(entry.clone()));
+            if components[0].is_empty() {
+                self.directory_entry = Some(entry.clone());
+            } else {
+                self.children
+                    .insert(components[0].to_string(), NodeBuilder::File(entry.clone()));
+            }
             return;
         }
 
@@ -840,7 +847,9 @@ impl DirBuilder {
             path,
             children,
             codes,
+            directory_entry,
         } = self;
+        let mut directory_entry = directory_entry;
 
         let mut labels = Vec::new();
         if !name.is_empty() {
@@ -866,6 +875,7 @@ impl DirBuilder {
                         path: child_path,
                         children: child_children,
                         codes: _,
+                        directory_entry: child_entry,
                     } = dir;
                     if !child_name.is_empty() {
                         labels.push(child_name);
@@ -874,6 +884,9 @@ impl DirBuilder {
                     }
                     path_acc = child_path;
                     children_map = child_children;
+                    if child_entry.is_some() {
+                        directory_entry = child_entry;
+                    }
                 }
                 NodeBuilder::File(file) => {
                     let mut map = BTreeMap::new();
@@ -882,6 +895,42 @@ impl DirBuilder {
                     break;
                 }
             }
+        }
+
+        if code == '?'
+            && children_map.len() == 1
+            && let Some(NodeBuilder::File(file)) = children_map.values().next()
+        {
+            let entry = file.clone();
+            let prefix = if labels.is_empty() {
+                String::new()
+            } else {
+                format!("{}/", labels.join("/"))
+            };
+            let label = if prefix.is_empty() {
+                format!("{} {}", entry.code, entry.tree_label())
+            } else {
+                format!("{} {}{}", entry.code, prefix, entry.tree_label())
+            };
+            let node = TreeNode::leaf(
+                FileNodeId::File(entry.path.clone()),
+                vec![TextSpan::new(label, Style::default())],
+            );
+            return apply_status_styles(node, entry.code);
+        }
+
+        let children: Vec<TreeNode<FileNodeId>> = children_map
+            .into_values()
+            .map(|child| child.into_tree_node())
+            .collect();
+
+        if children.is_empty() && let Some(entry) = directory_entry.as_ref() {
+            let label = entry.display.clone();
+            let node = TreeNode::leaf(
+                FileNodeId::Dir(path_acc.clone()),
+                vec![TextSpan::new(label, Style::default())],
+            );
+            return apply_status_styles(node, entry.code);
         }
 
         let label_name = if collapsed {
@@ -895,6 +944,12 @@ impl DirBuilder {
             } else {
                 format!("{joined}/")
             }
+        } else if directory_entry.is_some() {
+            if path_acc.is_empty() {
+                String::from("/")
+            } else {
+                format!("{path_acc}/")
+            }
         } else if let Some(last) = labels.last() {
             last.clone()
         } else if !path_acc.is_empty() {
@@ -902,11 +957,6 @@ impl DirBuilder {
         } else {
             String::from(".")
         };
-
-        let children = children_map
-            .into_values()
-            .map(|child| child.into_tree_node())
-            .collect();
 
         let label = format!("{} {}", code, label_name);
         let node = TreeNode::branch(
@@ -2245,6 +2295,48 @@ mod tests {
     use chatui::{Size, TreeNodeKind, buffer::DoubleBuffer, palette::Palette, render::Renderer};
     use taffy::{AvailableSpace, Dimension, compute_root_layout};
 
+    fn render_tree_lines(
+        tree: &TreeState<FileNodeId>,
+        is_active: bool,
+        width: u16,
+        height: u16,
+    ) -> Vec<String> {
+        let mut node = render_file_tree(
+            "test-tree",
+            tree,
+            is_active,
+            |tree_msg| Msg::Section {
+                focus: Focus::Unstaged,
+                msg: SectionMsg::Tree(tree_msg),
+            },
+        )
+        .with_width(Dimension::percent(1.0))
+        .with_height(Dimension::percent(1.0));
+
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: AvailableSpace::Definite(width as f32),
+                height: AvailableSpace::Definite(height as f32),
+            },
+        );
+        chatui::dom::rounding::round_layout(&mut node);
+
+        let mut buffer = DoubleBuffer::new(width as usize, height as usize);
+        let palette = Palette::default();
+        Renderer::new(&mut buffer, &palette)
+            .render(&node, Size::new(width, height))
+            .expect("render file tree");
+
+        buffer
+            .to_string()
+            .lines()
+            .map(|line| line.trim_end().to_string())
+            .filter(|line| !line.trim().is_empty())
+            .collect()
+    }
+
     #[test]
     fn tree_label_truncates_to_file_name() {
         let entry = FileEntry::new("src/lib.rs".into(), 'M', "M src/lib.rs".into());
@@ -2515,6 +2607,38 @@ mod tests {
         assert!(
             !rendered_row.contains('\t'),
             "expected diff rendering to expand tabs, row contained tab: {rendered_row:?}"
+        );
+    }
+
+    #[test]
+    fn unstaged_tree_renders_untracked_directory_case() {
+        let entries = vec![
+            FileEntry::new(
+                "src/components/scroll.rs".into(),
+                'M',
+                "M src/components/scroll.rs".into(),
+            ),
+            FileEntry::new(
+                "src/components/scroll/tests.rs".into(),
+                '?',
+                "? src/components/scroll/tests.rs".into(),
+            ),
+        ];
+
+        let nodes = build_file_tree(&entries);
+        let mut tree = TreeState::new();
+        tree.set_items(nodes);
+        tree.expand_all();
+        tree.ensure_selected();
+
+        let lines = render_tree_lines(&tree, true, 40, 6);
+        assert_eq!(
+            lines,
+            vec![
+                "v * src/components/".to_string(),
+                "    ? scroll/tests.rs".to_string(),
+                "    M scroll.rs".to_string(),
+            ]
         );
     }
 }

@@ -51,7 +51,7 @@ pub struct GitStatus {
 }
 
 pub fn load_status() -> Result<GitStatus> {
-    let output = run_git(["status", "--porcelain"])?;
+    let output = run_git(["status", "--porcelain", "--untracked-files=all"])?;
 
     let mut unstaged = Vec::new();
     let mut staged = Vec::new();
