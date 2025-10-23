@@ -1,4 +1,8 @@
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use crate::{
     dom::{Node, PendingScroll},
@@ -29,6 +33,7 @@ pub struct ScrollState {
     content: Size,
     pending_request: Cell<Option<PendingScrollRequest>>,
     behavior: ScrollBehavior,
+    axis_lock: Option<AxisLock>,
 }
 
 impl Default for ScrollState {
@@ -52,6 +57,7 @@ impl ScrollState {
             },
             pending_request: Cell::new(None),
             behavior,
+            axis_lock: None,
         }
     }
 
@@ -168,6 +174,7 @@ impl ScrollState {
                 self.viewport = viewport;
                 self.content = content;
                 self.clamp_offsets();
+                self.axis_lock = None;
             }
             ScrollMsg::JumpTo(offset) => {
                 let axis = self.primary_axis();
@@ -180,6 +187,7 @@ impl ScrollState {
     pub fn reset(&mut self) {
         self.offset_x = 0.0;
         self.offset_y = 0.0;
+        self.axis_lock = None;
         self.clamp_offsets();
     }
 
@@ -221,6 +229,15 @@ impl ScrollState {
     }
 
     fn apply_delta(&mut self, axis: ScrollAxis, delta: i32) {
+        let now = Instant::now();
+        self.apply_delta_internal(axis, delta, now);
+    }
+
+    fn apply_delta_internal(&mut self, axis: ScrollAxis, delta: i32, now: Instant) {
+        if !self.should_handle_axis(axis, now) {
+            return;
+        }
+
         let max_offset = self.max_offset_for(axis);
         let offset = match axis {
             ScrollAxis::Vertical => &mut self.offset_y,
@@ -234,6 +251,42 @@ impl ScrollState {
             next = max_offset;
         }
         *offset = next as f32;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_delta_at(&mut self, axis: ScrollAxis, delta: i32, now: Instant) {
+        self.apply_delta_internal(axis, delta, now);
+    }
+
+    fn should_handle_axis(&mut self, axis: ScrollAxis, now: Instant) -> bool {
+        if !self.axis_enabled(axis) {
+            return false;
+        }
+
+        if self.behavior != ScrollBehavior::Both {
+            return true;
+        }
+
+        if self
+            .axis_lock
+            .is_some_and(|lock| lock.expires_at >= now && lock.axis != axis)
+        {
+            return false;
+        }
+
+        self.axis_lock = Some(AxisLock {
+            axis,
+            expires_at: now + AXIS_LOCK_DURATION,
+        });
+        true
+    }
+
+    fn axis_enabled(&self, axis: ScrollAxis) -> bool {
+        match self.behavior {
+            ScrollBehavior::Vertical => axis == ScrollAxis::Vertical,
+            ScrollBehavior::Horizontal => axis == ScrollAxis::Horizontal,
+            ScrollBehavior::Both => true,
+        }
     }
 
     fn max_offset_for(&self, axis: ScrollAxis) -> i32 {
@@ -274,6 +327,14 @@ impl ScrollState {
             *offset = offset.clamp(0.0, max_offset);
         }
     }
+}
+
+const AXIS_LOCK_DURATION: Duration = Duration::from_millis(200);
+
+#[derive(Clone, Copy, Debug)]
+struct AxisLock {
+    axis: ScrollAxis,
+    expires_at: Instant,
 }
 
 pub fn scrollable_content<Msg>(
@@ -384,3 +445,6 @@ pub fn scrollable_content<Msg>(
 
     node
 }
+
+#[cfg(test)]
+mod tests;
