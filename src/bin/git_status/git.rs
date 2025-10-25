@@ -152,25 +152,6 @@ impl ParsedStatus {
     }
 }
 
-pub fn diff_unstaged(entry: &FileEntry) -> Result<String> {
-    if entry.code == '?' {
-        return run_git_allow_diff([
-            "diff",
-            "--color=never",
-            "--no-index",
-            "--",
-            "/dev/null",
-            &entry.path,
-        ]);
-    }
-
-    run_git_allow_diff(["diff", "--color=never", "--", &entry.path])
-}
-
-pub fn diff_staged(entry: &FileEntry) -> Result<String> {
-    run_git_allow_diff(["diff", "--cached", "--color=never", "--", &entry.path])
-}
-
 pub struct LoadedContent {
     pub text: String,
     pub truncated: bool,
@@ -238,18 +219,10 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    run_git_internal(args, false)
+    run_git_internal(args)
 }
 
-fn run_git_allow_diff<I, S>(args: I) -> Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    run_git_internal(args, true)
-}
-
-fn run_git_internal<I, S>(args: I, allow_diff_exit: bool) -> Result<String>
+fn run_git_internal<I, S>(args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
@@ -266,9 +239,7 @@ where
         .wrap_err_with(|| format!("failed to execute git {}", args_vec.join(" ")))?;
 
     let status = output.status;
-    let acceptable = status.success() || (allow_diff_exit && matches!(status.code(), Some(1)));
-
-    if !acceptable {
+    if !status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(eyre!(
             "git {} failed: {}",

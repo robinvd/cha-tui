@@ -213,6 +213,8 @@ impl InputState {
                 let len = self.len_chars();
                 self.move_to_index(len, extend)
             }
+            InputMsg::MoveLineStart { extend } => self.move_line_start(extend),
+            InputMsg::MoveLineEnd { extend } => self.move_line_end(extend),
             InputMsg::MoveWordLeft { extend } => {
                 let target = self.word_start_before(self.cursor);
                 self.move_to_index(target, extend)
@@ -519,6 +521,18 @@ impl InputState {
         true
     }
 
+    fn move_line_start(&mut self, extend: bool) -> bool {
+        let line_index = self.cursor_line();
+        let (line_start, _) = self.line_bounds(line_index);
+        self.move_to_index(line_start, extend)
+    }
+
+    fn move_line_end(&mut self, extend: bool) -> bool {
+        let line_index = self.cursor_line();
+        let (_, line_end) = self.line_bounds(line_index);
+        self.move_to_index(line_end, extend)
+    }
+
     fn move_to_index(&mut self, index: usize, extend: bool) -> bool {
         let clamped = index.min(self.len_chars());
         if !extend {
@@ -697,6 +711,24 @@ impl InputState {
         Some(WordKind::classify(ch))
     }
 
+    fn line_bounds(&self, line_index: usize) -> (usize, usize) {
+        let len = self.len_chars();
+        let start = self.rope.line_to_char(line_index).min(len);
+        let mut end = self
+            .rope
+            .line_to_char((line_index + 1).min(self.rope.len_lines()))
+            .min(len);
+
+        if end > start && end > 0 {
+            let last_idx = end - 1;
+            if last_idx < len && self.rope.char(last_idx) == '\n' {
+                end -= 1;
+            }
+        }
+
+        (start, end)
+    }
+
     fn char_width(ch: char) -> usize {
         if ch == '\n' {
             return 0;
@@ -763,6 +795,12 @@ pub enum InputMsg {
         extend: bool,
     },
     MoveToEnd {
+        extend: bool,
+    },
+    MoveLineStart {
+        extend: bool,
+    },
+    MoveLineEnd {
         extend: bool,
     },
     MoveWordLeft {
@@ -1420,8 +1458,20 @@ pub fn default_keybindings<UpdateMsg>(
         KeyCode::Char('w') if key.ctrl => Some(InputMsg::DeleteWordBackward),
         KeyCode::Char('u') if key.ctrl => Some(InputMsg::DeleteToStart),
         KeyCode::Char('k') if key.ctrl => Some(InputMsg::DeleteToEnd),
-        KeyCode::Char('a') if key.ctrl => Some(InputMsg::MoveToStart { extend: key.shift }),
-        KeyCode::Char('e') if key.ctrl => Some(InputMsg::MoveToEnd { extend: key.shift }),
+        KeyCode::Char('a') if key.ctrl => {
+            if state.is_multiline() {
+                Some(InputMsg::MoveLineStart { extend: key.shift })
+            } else {
+                Some(InputMsg::MoveToStart { extend: key.shift })
+            }
+        }
+        KeyCode::Char('e') if key.ctrl => {
+            if state.is_multiline() {
+                Some(InputMsg::MoveLineEnd { extend: key.shift })
+            } else {
+                Some(InputMsg::MoveToEnd { extend: key.shift })
+            }
+        }
         KeyCode::Backspace if key.ctrl || key.alt => Some(InputMsg::DeleteWordBackward),
         KeyCode::Backspace => Some(InputMsg::DeleteBackward),
         KeyCode::Left if key.ctrl || key.alt => Some(InputMsg::MoveWordLeft { extend: key.shift }),
@@ -1630,6 +1680,32 @@ mod tests {
     }
 
     #[test]
+    fn multiline_move_line_boundaries() {
+        let mut state = InputState::with_value_multiline("one\ntwo");
+        state.update(InputMsg::MoveToStart { extend: false });
+        assert_eq!(state.cursor(), 0);
+
+        state.update(InputMsg::MoveDown { extend: false });
+        assert_eq!(state.cursor(), 4);
+
+        state.update(InputMsg::MoveRight { extend: false });
+        state.update(InputMsg::MoveRight { extend: false });
+        assert_eq!(state.cursor(), 6);
+
+        state.update(InputMsg::MoveLineStart { extend: false });
+        assert_eq!(state.cursor(), 4);
+        assert_eq!(state.selection(), None);
+
+        state.update(InputMsg::MoveLineEnd { extend: false });
+        assert_eq!(state.cursor(), 7);
+
+        state.update(InputMsg::MoveLineStart { extend: false });
+        state.update(InputMsg::MoveLineEnd { extend: true });
+        assert_eq!(state.cursor(), 7);
+        assert_eq!(state.selection(), Some((4, 7)));
+    }
+
+    #[test]
     fn default_keybindings_enter_inserts_newline_in_multiline() {
         let state = InputState::new_multiline();
         let key = Key::new(KeyCode::Enter);
@@ -1656,6 +1732,38 @@ mod tests {
         assert!(matches!(
             default_keybindings(&state, down_key, |m| m),
             Some(InputMsg::MoveDown { .. })
+        ));
+    }
+
+    #[test]
+    fn default_keybindings_ctrl_a_e_multiline_move_line_bounds() {
+        let state = InputState::new_multiline();
+        let ctrl_a = Key::with_modifiers(KeyCode::Char('a'), true, false, false);
+        let ctrl_shift_e = Key::with_modifiers(KeyCode::Char('e'), true, false, true);
+
+        assert!(matches!(
+            default_keybindings(&state, ctrl_a, |m| m),
+            Some(InputMsg::MoveLineStart { extend: false })
+        ));
+        assert!(matches!(
+            default_keybindings(&state, ctrl_shift_e, |m| m),
+            Some(InputMsg::MoveLineEnd { extend: true })
+        ));
+    }
+
+    #[test]
+    fn default_keybindings_ctrl_a_e_single_line_move_buffer_bounds() {
+        let state = InputState::default();
+        let ctrl_a = Key::with_modifiers(KeyCode::Char('a'), true, false, false);
+        let ctrl_e = Key::with_modifiers(KeyCode::Char('e'), true, false, false);
+
+        assert!(matches!(
+            default_keybindings(&state, ctrl_a, |m| m),
+            Some(InputMsg::MoveToStart { extend: false })
+        ));
+        assert!(matches!(
+            default_keybindings(&state, ctrl_e, |m| m),
+            Some(InputMsg::MoveToEnd { extend: false })
         ));
     }
 

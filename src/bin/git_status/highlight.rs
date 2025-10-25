@@ -502,6 +502,8 @@ pub(crate) const EVERFOREST_GREY1: Color = Color::rgb(0x85, 0x92, 0x89);
 pub(crate) const EVERFOREST_GREY2: Color = Color::rgb(0x9d, 0xa9, 0xa0);
 pub(crate) const EVERFOREST_BG_GREEN: Color = Color::rgb(0x42, 0x50, 0x47);
 pub(crate) const EVERFOREST_BG_RED: Color = Color::rgb(0x51, 0x40, 0x45);
+pub(crate) const EVERFOREST_BG_GREEN_ACCENT: Color = Color::rgb(0x5c, 0x73, 0x64);
+pub(crate) const EVERFOREST_BG_RED_ACCENT: Color = Color::rgb(0x79, 0x55, 0x5d);
 
 pub fn language_for_path(path: &Path) -> Option<&'static str> {
     if let Some(ext) = path.extension().and_then(|ext| ext.to_str()) {

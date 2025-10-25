@@ -24,6 +24,7 @@ use chatui::{
 };
 use chatui::{TreeMsg, TreeNode, TreeState, TreeStyle, tree_view};
 use color_eyre::eyre::{Context, Result, eyre};
+use similar::{Algorithm, ChangeTag, DiffOp, DiffTag, InlineChange, TextDiff};
 use taffy::Dimension;
 use taffy::prelude::{FromLength, TaffyZero};
 use taffy::style::FlexWrap;
@@ -568,10 +569,6 @@ fn render_diff_lines(lines: &[DiffLine], show_line_numbers: bool) -> Node<Msg> {
     .with_id("diff_lines")
 }
 
-fn normalized_number(value: usize) -> Option<usize> {
-    (value != 0).then_some(value)
-}
-
 fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
     let title = text::<Msg>("Commit staged changes").with_style(Style::bold());
     let instructions = text::<Msg>("Ctrl-D commits, Esc cancels").with_style(Style::dim());
@@ -924,7 +921,9 @@ impl DirBuilder {
             .map(|child| child.into_tree_node())
             .collect();
 
-        if children.is_empty() && let Some(entry) = directory_entry.as_ref() {
+        if children.is_empty()
+            && let Some(entry) = directory_entry.as_ref()
+        {
             let label = entry.display.clone();
             let node = TreeNode::leaf(
                 FileNodeId::Dir(path_acc.clone()),
@@ -1973,24 +1972,20 @@ struct DiffPreview {
 }
 
 fn diff_for(entry: &FileEntry, focus: Focus) -> Result<DiffPreview> {
-    let mut diff_output = match focus {
-        Focus::Unstaged => git::diff_unstaged(entry),
-        Focus::Staged => git::diff_staged(entry),
-    }?;
-
-    if diff_output.trim().is_empty() {
+    let versions = load_file_versions(entry, focus)?;
+    if versions.old.is_none() && versions.new.is_none() {
         return Ok(DiffPreview {
             lines: Vec::new(),
-            truncated: false,
+            truncated: versions.truncated,
         });
     }
 
-    let diff_truncated = truncate_string(&mut diff_output, git::PREVIEW_BYTE_LIMIT);
-    let versions = load_file_versions(entry, focus)?;
-    let truncated = diff_truncated || versions.truncated;
-    let lines = build_diff_lines(&diff_output, &versions);
+    let lines = build_diff_lines(&versions);
 
-    Ok(DiffPreview { lines, truncated })
+    Ok(DiffPreview {
+        lines,
+        truncated: versions.truncated,
+    })
 }
 
 struct FileVersions {
@@ -2002,6 +1997,7 @@ struct FileVersions {
 #[derive(Clone)]
 struct FileContent {
     lines: Vec<LineContent>,
+    ends_with_newline: bool,
 }
 
 #[derive(Clone)]
@@ -2013,6 +2009,7 @@ struct LineContent {
 impl FileContent {
     fn from_source(path: &str, source: LoadedContent) -> Self {
         let LoadedContent { text, truncated } = source;
+        let ends_with_newline = text.ends_with('\n');
         let text_lines: Vec<String> = text.lines().map(str::to_string).collect();
         let line_count = text_lines.len();
         let highlight_lines = if truncated {
@@ -2044,11 +2041,27 @@ impl FileContent {
             });
         }
 
-        Self { lines }
+        Self {
+            lines,
+            ends_with_newline,
+        }
     }
 
     fn line(&self, index: usize) -> Option<&LineContent> {
         self.lines.get(index)
+    }
+
+    fn as_text(&self) -> String {
+        let mut text = self
+            .lines
+            .iter()
+            .map(|line| line.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if self.ends_with_newline {
+            text.push('\n');
+        }
+        text
     }
 }
 
@@ -2116,125 +2129,289 @@ fn load_limited_from_file(file: File) -> Result<LoadedContent> {
     Ok(LoadedContent { text, truncated })
 }
 
-fn truncate_string(content: &mut String, limit: usize) -> bool {
-    if content.len() <= limit {
-        return false;
+fn build_diff_lines(versions: &FileVersions) -> Vec<DiffLine> {
+    const CONTEXT_RADIUS: usize = 3;
+
+    let old_text = versions
+        .old
+        .as_ref()
+        .map(|content| content.as_text())
+        .unwrap_or_default();
+    let new_text = versions
+        .new
+        .as_ref()
+        .map(|content| content.as_text())
+        .unwrap_or_default();
+
+    if old_text.is_empty() && new_text.is_empty() {
+        return Vec::new();
     }
 
-    let mut idx = limit;
-    while idx > 0 && !content.is_char_boundary(idx) {
-        idx -= 1;
+    let diff = TextDiff::configure()
+        .algorithm(Algorithm::Patience)
+        .diff_lines(&old_text, &new_text);
+
+    if diff
+        .ops()
+        .iter()
+        .all(|op| matches!(op.tag(), DiffTag::Equal))
+    {
+        return Vec::new();
     }
 
-    content.truncate(idx);
-    true
-}
-
-fn build_diff_lines(diff: &str, versions: &FileVersions) -> Vec<DiffLine> {
     let mut result = Vec::new();
-    let mut old_line = 0usize;
-    let mut new_line = 0usize;
 
-    for line in diff.lines() {
-        if line.starts_with("diff --git") {
-            // let mut style = Style::fg(highlight::EVERFOREST_BLUE);
-            // style.bold = true;
-            // result.push(DiffLine::styled(line.to_string(), style));
-            continue;
-        }
-
-        if line.starts_with("index ") {
-            result.push(DiffLine::plain(line.to_string()));
-            continue;
-        }
-
-        if line.starts_with("---") || line.starts_with("+++") {
-            // result.push(DiffLine::styled(
-            //     line.to_string(),
-            //     Style::fg(highlight::EVERFOREST_YELLOW),
-            // ));
-            continue;
-        }
-
-        if line.starts_with("@@") {
-            if let Some((old_start, new_start)) = parse_hunk_header(line) {
-                old_line = old_start;
-                new_line = new_start;
-            }
+    for group in diff.grouped_ops(CONTEXT_RADIUS) {
+        if let Some(header) = build_hunk_header(&group) {
             let mut style = Style::fg(highlight::EVERFOREST_GREY1);
             style.dim = true;
-            result.push(DiffLine::styled(line.to_string(), style));
-            continue;
+            result.push(DiffLine::styled(header, style));
         }
 
-        if line.starts_with('\\') {
-            result.push(DiffLine::plain(line.to_string()));
-            continue;
-        }
+        for op in &group {
+            for change in diff.iter_inline_changes(op) {
+                let (line_text, segments) = collect_inline_segments(&change);
+                let change_tag = change.tag();
 
-        if let Some(content) = line.strip_prefix('+') {
-            let spans = highlight_with_fallback(versions.new.as_ref(), new_line, content);
-            let mut diff_line = DiffLine::from_spans(with_prefix('+', spans));
-            let old_number = None;
-            let new_number = normalized_number(new_line);
-            if old_number.is_some() || new_number.is_some() {
-                diff_line = diff_line.with_line_numbers(old_number, new_number);
+                let prefix = match change_tag {
+                    ChangeTag::Delete => '-',
+                    ChangeTag::Insert => '+',
+                    ChangeTag::Equal => ' ',
+                };
+
+                let old_number = change.old_index().map(|idx| idx + 1);
+                let new_number = change.new_index().map(|idx| idx + 1);
+
+                let base_spans = match change_tag {
+                    ChangeTag::Delete => highlight_with_fallback(
+                        versions.old.as_ref(),
+                        old_number.unwrap_or(0),
+                        &line_text,
+                    ),
+                    ChangeTag::Insert | ChangeTag::Equal => highlight_with_fallback(
+                        versions.new.as_ref(),
+                        new_number.unwrap_or(0),
+                        &line_text,
+                    ),
+                };
+
+                let merged_spans = merge_inline_segments(base_spans, &segments, change_tag);
+
+                let mut diff_line = DiffLine::from_spans(with_prefix(prefix, merged_spans));
+                if old_number.is_some() || new_number.is_some() {
+                    diff_line = diff_line.with_line_numbers(old_number, new_number);
+                }
+                result.push(diff_line);
+
+                if change.missing_newline() {
+                    result.push(DiffLine::plain("\\ No newline at end of file"));
+                }
             }
-            result.push(diff_line);
-            new_line = new_line.saturating_add(1);
-            continue;
         }
-
-        if let Some(content) = line.strip_prefix('-') {
-            let spans = highlight_with_fallback(versions.old.as_ref(), old_line, content);
-            let mut diff_line = DiffLine::from_spans(with_prefix('-', spans));
-            let old_number = normalized_number(old_line);
-            let new_number = None;
-            if old_number.is_some() || new_number.is_some() {
-                diff_line = diff_line.with_line_numbers(old_number, new_number);
-            }
-            result.push(diff_line);
-            old_line = old_line.saturating_add(1);
-            continue;
-        }
-
-        if let Some(content) = line.strip_prefix(' ') {
-            let spans = highlight_with_fallback(versions.new.as_ref(), new_line, content);
-            let mut diff_line = DiffLine::from_spans(with_prefix(' ', spans));
-            let old_number = normalized_number(old_line);
-            let new_number = normalized_number(new_line);
-            if old_number.is_some() || new_number.is_some() {
-                diff_line = diff_line.with_line_numbers(old_number, new_number);
-            }
-            result.push(diff_line);
-            new_line = new_line.saturating_add(1);
-            old_line = old_line.saturating_add(1);
-            continue;
-        }
-
-        result.push(DiffLine::plain(line.to_string()));
     }
 
     result
 }
 
-fn parse_hunk_header(line: &str) -> Option<(usize, usize)> {
-    let mut parts = line.split_whitespace();
-    let _ = parts.next(); // @@
-    let old_part = parts.next()?; // -start,count
-    let new_part = parts.next()?; // +start,count
+fn collect_inline_segments(change: &InlineChange<'_, str>) -> (String, Vec<(bool, String)>) {
+    let mut segments = Vec::new();
+    let mut line = String::new();
 
-    let old_start = parse_hunk_range(old_part.strip_prefix('-')?)?;
-    let new_start = parse_hunk_range(new_part.strip_prefix('+')?)?;
+    for (emphasized, value) in change.iter_strings_lossy() {
+        let mut owned = value.into_owned();
+        if owned.ends_with('\n') {
+            owned.pop();
+        }
 
-    Some((old_start, new_start))
+        if owned.is_empty() && !segments.is_empty() {
+            continue;
+        }
+
+        line.push_str(&owned);
+        segments.push((emphasized, owned));
+    }
+
+    if segments.is_empty() {
+        segments.push((false, String::new()));
+    }
+
+    (line, segments)
 }
 
-fn parse_hunk_range(segment: &str) -> Option<usize> {
-    segment
-        .split(',')
-        .next()
-        .and_then(|value| value.parse::<usize>().ok())
+fn merge_inline_segments(
+    base_spans: Vec<TextSpan>,
+    segments: &[(bool, String)],
+    change_tag: ChangeTag,
+) -> Vec<TextSpan> {
+    if segments.is_empty() {
+        return base_spans;
+    }
+
+    if base_spans.is_empty() {
+        return build_spans_from_segments(segments, change_tag);
+    }
+
+    let mut result = Vec::new();
+    let mut seg_index = 0usize;
+    let mut seg_offset = 0usize;
+
+    for base in base_spans {
+        let mut remaining = base.content.as_str();
+        if remaining.is_empty() {
+            result.push(base);
+            continue;
+        }
+
+        while !remaining.is_empty() {
+            if seg_index >= segments.len() {
+                let style = base.style.clone();
+                result.push(TextSpan::new(remaining.to_string(), style));
+                break;
+            }
+
+            let (emphasized, segment_text) = &segments[seg_index];
+            let segment_remaining = &segment_text[seg_offset..];
+
+            if segment_remaining.is_empty() {
+                seg_index += 1;
+                seg_offset = 0;
+                continue;
+            }
+
+            let take_len = prefix_match_len(remaining, segment_remaining);
+            if take_len == 0 {
+                return build_spans_from_segments(segments, change_tag);
+            }
+
+            let (take, rest) = remaining.split_at(take_len);
+            remaining = rest;
+
+            let mut style = base.style.clone();
+            if *emphasized {
+                apply_inline_emphasis(&mut style, change_tag);
+            }
+
+            result.push(TextSpan::new(take.to_string(), style));
+
+            seg_offset += take_len;
+            if seg_offset >= segment_text.len() {
+                seg_index += 1;
+                seg_offset = 0;
+            }
+        }
+    }
+
+    while seg_index < segments.len() {
+        let (emphasized, segment_text) = &segments[seg_index];
+        let mut style = Style::default();
+        if *emphasized {
+            apply_inline_emphasis(&mut style, change_tag);
+        }
+        if !segment_text.is_empty() {
+            result.push(TextSpan::new(segment_text.clone(), style));
+        }
+        seg_index += 1;
+    }
+
+    if result.is_empty() {
+        vec![TextSpan::new(String::new(), Style::default())]
+    } else {
+        result
+    }
+}
+
+fn build_spans_from_segments(segments: &[(bool, String)], change_tag: ChangeTag) -> Vec<TextSpan> {
+    if segments.is_empty() {
+        return vec![TextSpan::new(String::new(), Style::default())];
+    }
+
+    segments
+        .iter()
+        .map(|(emphasized, text)| {
+            let mut style = Style::default();
+            if *emphasized {
+                apply_inline_emphasis(&mut style, change_tag);
+            }
+            TextSpan::new(text.clone(), style)
+        })
+        .collect()
+}
+
+fn inline_accent_color(change_tag: ChangeTag) -> Option<Color> {
+    match change_tag {
+        ChangeTag::Insert => Some(highlight::EVERFOREST_BG_GREEN_ACCENT),
+        ChangeTag::Delete => Some(highlight::EVERFOREST_BG_RED_ACCENT),
+        ChangeTag::Equal => None,
+    }
+}
+
+fn apply_inline_emphasis(style: &mut Style, change_tag: ChangeTag) {
+    style.bold = true;
+    if let Some(bg) = inline_accent_color(change_tag) {
+        style.bg = Some(bg);
+    }
+}
+
+fn prefix_match_len(a: &str, b: &str) -> usize {
+    let mut len = 0;
+    let mut a_iter = a.chars();
+    let mut b_iter = b.chars();
+
+    loop {
+        match (a_iter.next(), b_iter.next()) {
+            (Some(ac), Some(bc)) if ac == bc => {
+                len += ac.len_utf8();
+            }
+            _ => break,
+        }
+    }
+
+    len
+}
+
+fn build_hunk_header(group: &[DiffOp]) -> Option<String> {
+    if group.is_empty() {
+        return None;
+    }
+
+    let old_start = group
+        .iter()
+        .map(|op| op.old_range().start)
+        .min()
+        .unwrap_or(0);
+    let old_end = group
+        .iter()
+        .map(|op| op.old_range().end)
+        .max()
+        .unwrap_or(old_start);
+    let new_start = group
+        .iter()
+        .map(|op| op.new_range().start)
+        .min()
+        .unwrap_or(0);
+    let new_end = group
+        .iter()
+        .map(|op| op.new_range().end)
+        .max()
+        .unwrap_or(new_start);
+
+    let old_count = old_end.saturating_sub(old_start);
+    let new_count = new_end.saturating_sub(new_start);
+
+    let old_range = format_hunk_range(old_start, old_count);
+    let new_range = format_hunk_range(new_start, new_count);
+
+    Some(format!("@@ -{} +{} @@", old_range, new_range))
+}
+
+fn format_hunk_range(start: usize, count: usize) -> String {
+    if count == 0 {
+        format!("{},0", start)
+    } else if count == 1 {
+        (start + 1).to_string()
+    } else {
+        format!("{},{}", start + 1, count)
+    }
 }
 
 fn highlight_with_fallback(
@@ -2301,15 +2478,10 @@ mod tests {
         width: u16,
         height: u16,
     ) -> Vec<String> {
-        let mut node = render_file_tree(
-            "test-tree",
-            tree,
-            is_active,
-            |tree_msg| Msg::Section {
-                focus: Focus::Unstaged,
-                msg: SectionMsg::Tree(tree_msg),
-            },
-        )
+        let mut node = render_file_tree("test-tree", tree, is_active, |tree_msg| Msg::Section {
+            focus: Focus::Unstaged,
+            msg: SectionMsg::Tree(tree_msg),
+        })
         .with_width(Dimension::percent(1.0))
         .with_height(Dimension::percent(1.0));
 
@@ -2457,14 +2629,27 @@ mod tests {
 
     #[test]
     fn build_diff_lines_produces_line_numbers() {
+        let old_content = FileContent::from_source(
+            "file.txt",
+            LoadedContent {
+                text: "foo\n".to_string(),
+                truncated: false,
+            },
+        );
+        let new_content = FileContent::from_source(
+            "file.txt",
+            LoadedContent {
+                text: "bar\n".to_string(),
+                truncated: false,
+            },
+        );
         let versions = FileVersions {
-            old: None,
-            new: None,
+            old: Some(old_content),
+            new: Some(new_content),
             truncated: false,
         };
-        let diff = "@@ -1 +1 @@\n-foo\n+bar\n";
 
-        let lines = build_diff_lines(diff, &versions);
+        let lines = build_diff_lines(&versions);
 
         assert!(matches!(lines.get(0), Some(line) if line.line_numbers.is_none()));
 
@@ -2508,6 +2693,41 @@ mod tests {
         assert!(
             added_row.starts_with("  1 | +bar"),
             "expected added row to show gutter, got {added_row:?}"
+        );
+    }
+
+    #[test]
+    fn inline_insert_segments_use_accent_background() {
+        let base_spans = vec![TextSpan::new("abc", Style::default())];
+        let segments = vec![(true, "ab".to_string()), (false, "c".to_string())];
+
+        let merged = merge_inline_segments(base_spans, &segments, ChangeTag::Insert);
+        let accent_span = merged
+            .iter()
+            .find(|span| span.content == "ab")
+            .expect("accented span");
+
+        assert!(accent_span.style.bold, "accent should remain bold");
+        assert_eq!(
+            accent_span.style.bg,
+            Some(highlight::EVERFOREST_BG_GREEN_ACCENT)
+        );
+    }
+
+    #[test]
+    fn inline_delete_segments_without_base_use_accent_background() {
+        let base_spans = Vec::new();
+        let segments = vec![(true, "xyz".to_string())];
+
+        let merged = merge_inline_segments(base_spans, &segments, ChangeTag::Delete);
+        let accent_span = merged
+            .first()
+            .expect("at least one generated span for emphasized diff segment");
+
+        assert!(accent_span.style.bold, "accent should remain bold");
+        assert_eq!(
+            accent_span.style.bg,
+            Some(highlight::EVERFOREST_BG_RED_ACCENT)
         );
     }
 
