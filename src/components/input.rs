@@ -1,4 +1,7 @@
 use ropey::Rope;
+use smallvec::{SmallVec, smallvec};
+use std::collections::BTreeMap;
+use std::ops::Range;
 use termwiz::cell::unicode_column_width;
 
 use crate::Style;
@@ -14,34 +17,344 @@ pub enum InputMode {
     Multiline,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ViewId(u64);
+
+impl ViewId {
+    const fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+impl Default for ViewId {
+    fn default() -> Self {
+        ViewId::new(0)
+    }
+}
+
+const PRIMARY_VIEW_ID: ViewId = ViewId::new(0);
+
+/// State container for the text input component.
+///
+/// # Feature Slots
+/// - **Highlighting** – Stored in [`HighlightStore`] for future layered
+///   syntax/search highlights. *Status: data only; renderer still uses a single base layer.*
+/// - **Inline hints (ghost text)** – [`InlineHintStore`] captures uneditable
+///   annotations from tooling such as LSP servers. *Status: stored but not rendered yet.*
+/// - **Autocomplete** – [`AutocompleteState`] tracks suggestion panels.
+///   *Status: not wired into UI yet.*
+/// - **Gutter** – [`ViewState::gutter`] reserves metadata for line numbers or markers.
+///   *Status: layout/rendering unchanged for now.*
+/// - **Undo/redo** – [`EditHistory`] keeps the future command stack.
+///   *Status: editing operations do not push commands yet.*
+/// - **Multicursor** – [`CursorSet`] holds multiple carets.
+///   *Status: only the primary caret is exposed through the public API.*
+/// - **Multiple views** – [`views`] carries per-pane data (viewport, cursors).
+///   *Status: only the first view (`PRIMARY_VIEW_ID`) is used; callers still interact with a single pane.*
 #[derive(Clone, Debug)]
 pub struct InputState {
-    rope: Rope,
-    cursor: usize,
-    anchor: usize,
-    viewport_cols: usize,
-    viewport_rows: usize,
-    scroll_x: usize,
-    scroll_y: usize,
     mode: InputMode,
-    preferred_column: Option<usize>,
+    document: DocumentState,
+    #[allow(dead_code)]
+    history: EditHistory,
+    #[allow(dead_code)]
+    highlights: HighlightStore,
+    #[allow(dead_code)]
+    inline_hints: InlineHintStore,
+    #[allow(dead_code)]
+    autocomplete: AutocompleteState,
+    views: Vec<ViewState>,
 }
 
 impl Default for InputState {
     fn default() -> Self {
         Self {
-            rope: Rope::new(),
-            cursor: 0,
-            anchor: 0,
-            viewport_cols: 0,
-            scroll_x: 0,
-            viewport_rows: 0,
-            scroll_y: 0,
             mode: InputMode::SingleLine,
-            preferred_column: None,
+            document: DocumentState::default(),
+            history: EditHistory::default(),
+            highlights: HighlightStore::default(),
+            inline_hints: InlineHintStore::default(),
+            autocomplete: AutocompleteState::default(),
+            views: vec![ViewState::new(PRIMARY_VIEW_ID)],
         }
     }
 }
+
+/// Rope-backed document metadata (revision tracking hooks for undo/redo).
+#[derive(Clone, Debug)]
+struct DocumentState {
+    rope: Rope,
+    #[allow(dead_code)]
+    revision: u64,
+    #[allow(dead_code)]
+    is_dirty: bool,
+}
+
+impl Default for DocumentState {
+    fn default() -> Self {
+        Self {
+            rope: Rope::new(),
+            revision: 0,
+            is_dirty: false,
+        }
+    }
+}
+
+/// Per-view state so each pane can track its cursors, viewport, and gutter.
+#[derive(Clone, Debug)]
+struct ViewState {
+    #[allow(dead_code)]
+    id: ViewId,
+    cursor_set: CursorSet,
+    #[allow(dead_code)]
+    selection_mode: SelectionMode,
+    viewport: Viewport,
+    #[allow(dead_code)]
+    gutter: GutterState,
+}
+
+impl ViewState {
+    fn new(id: ViewId) -> Self {
+        Self {
+            id,
+            cursor_set: CursorSet::default(),
+            selection_mode: SelectionMode::Character,
+            viewport: Viewport::default(),
+            gutter: GutterState::default(),
+        }
+    }
+
+    fn primary_caret(&self) -> &Caret {
+        self.cursor_set.primary()
+    }
+
+    fn primary_caret_mut(&mut self) -> &mut Caret {
+        self.cursor_set.primary_mut()
+    }
+}
+
+/// Multicursor collection (primary caret first, extras to follow).
+#[derive(Clone, Debug)]
+struct CursorSet {
+    carets: SmallVec<[Caret; 4]>,
+    primary: usize,
+}
+
+impl CursorSet {
+    fn primary(&self) -> &Caret {
+        self.carets
+            .get(self.primary)
+            .unwrap_or_else(|| self.carets.first().expect("at least one caret"))
+    }
+
+    fn primary_mut(&mut self) -> &mut Caret {
+        let idx = self.primary.min(self.carets.len().saturating_sub(1));
+        &mut self.carets[idx]
+    }
+
+    fn reset_primary_preferred_column(&mut self) {
+        if let Some(caret) = self.carets.get_mut(self.primary) {
+            caret.preferred_column = None;
+        }
+    }
+}
+
+impl Default for CursorSet {
+    fn default() -> Self {
+        Self {
+            carets: smallvec![Caret::default()],
+            primary: 0,
+        }
+    }
+}
+
+/// Cursor head/anchor pair with an optional preferred column for vertical motion.
+#[derive(Clone, Debug, Default)]
+struct Caret {
+    head: usize,
+    anchor: usize,
+    preferred_column: Option<usize>,
+}
+/// Selection granularity placeholder (line/block modes can be added later).
+#[derive(Clone, Copy, Debug, Default)]
+enum SelectionMode {
+    #[default]
+    Character,
+}
+
+/// Terminal viewport bookkeeping (dimensions + scroll offsets).
+#[derive(Clone, Debug, Default)]
+struct Viewport {
+    cols: usize,
+    rows: usize,
+    scroll_x: usize,
+    scroll_y: usize,
+}
+
+/// Gutter configuration per view (line numbers, breakpoints, etc.).
+#[derive(Clone, Debug, Default)]
+struct GutterState {
+    #[allow(dead_code)]
+    width: usize,
+    #[allow(dead_code)]
+    kind: GutterKind,
+    #[allow(dead_code)]
+    markers: Vec<GutterMarker>,
+}
+
+/// Currently a placeholder for future gutter variants.
+#[derive(Clone, Copy, Debug, Default)]
+enum GutterKind {
+    #[default]
+    None,
+}
+
+/// Gutter marker metadata (line-level markers such as diagnostics).
+#[derive(Clone, Debug, Default)]
+struct GutterMarker {
+    #[allow(dead_code)]
+    line: usize,
+}
+
+/// Highlight layers keyed by [`HighlightLayerId`].
+#[derive(Clone, Debug, Default)]
+struct HighlightStore {
+    #[allow(dead_code)]
+    layers: BTreeMap<HighlightLayerId, HighlightLayer>,
+}
+
+/// One highlight layer (e.g., syntax, search results).
+#[derive(Clone, Debug, Default)]
+struct HighlightLayer {
+    #[allow(dead_code)]
+    spans: Vec<HighlightSpan>,
+    #[allow(dead_code)]
+    priority: u8,
+}
+
+/// Highlight span with style info.
+#[derive(Clone, Debug, Default)]
+struct HighlightSpan {
+    #[allow(dead_code)]
+    range: Range<usize>,
+    #[allow(dead_code)]
+    style: Style,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct HighlightLayerId(u64);
+
+/// Storage for inline hints (LSP-style inlay text).
+#[derive(Clone, Debug, Default)]
+struct InlineHintStore {
+    #[allow(dead_code)]
+    hints: Vec<InlineHint>,
+}
+
+/// Immutable inline hint injected by tooling.
+#[derive(Clone, Debug)]
+struct InlineHint {
+    #[allow(dead_code)]
+    id: InlineHintId,
+    #[allow(dead_code)]
+    range: Range<usize>,
+    #[allow(dead_code)]
+    text: Rope,
+    #[allow(dead_code)]
+    style: Style,
+    #[allow(dead_code)]
+    kind: InlineHintKind,
+}
+
+impl Default for InlineHint {
+    fn default() -> Self {
+        Self {
+            id: InlineHintId(0),
+            range: 0..0,
+            text: Rope::new(),
+            style: Style::default(),
+            kind: InlineHintKind::TypeAnnotation,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct InlineHintId(u64);
+
+/// Kind of inline hint (type annotations, parameter names, etc.).
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default)]
+enum InlineHintKind {
+    #[default]
+    TypeAnnotation,
+    ParameterName,
+    Other,
+}
+
+/// Autocomplete popup state (suggestions + selection).
+#[allow(dead_code)]
+#[derive(Clone, Debug)]
+struct AutocompleteState {
+    suggestions: Vec<CompletionItem>,
+    trigger_range: Range<usize>,
+    active: Option<usize>,
+    panel_visible: bool,
+    view: ViewId,
+}
+
+impl Default for AutocompleteState {
+    fn default() -> Self {
+        Self {
+            suggestions: Vec::new(),
+            trigger_range: 0..0,
+            active: None,
+            panel_visible: false,
+            view: PRIMARY_VIEW_ID,
+        }
+    }
+}
+
+/// Renderable completion entry label.
+#[derive(Clone, Debug, Default)]
+struct CompletionItem {
+    #[allow(dead_code)]
+    label: String,
+}
+
+/// Undo/redo stacks (pending wire-up to editing commands).
+#[derive(Clone, Debug, Default)]
+struct EditHistory {
+    #[allow(dead_code)]
+    past: Vec<EditCommand>,
+    #[allow(dead_code)]
+    future: Vec<EditCommand>,
+}
+
+/// Individual edit that can participate in undo/redo.
+#[derive(Clone, Debug, Default)]
+struct EditCommand {
+    #[allow(dead_code)]
+    kind: EditKind,
+    #[allow(dead_code)]
+    range: Range<usize>,
+    #[allow(dead_code)]
+    text: Rope,
+    #[allow(dead_code)]
+    metadata: EditMetadata,
+}
+
+/// Type of edit captured for history.
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, Default)]
+enum EditKind {
+    #[default]
+    Insert,
+    Delete,
+    Replace,
+}
+
+#[derive(Clone, Debug, Default)]
+struct EditMetadata;
 
 impl InputState {
     pub fn new() -> Self {
@@ -73,12 +386,60 @@ impl InputState {
         Self::with_value_and_mode(value, InputMode::Multiline)
     }
 
+    fn primary_view(&self) -> &ViewState {
+        self.views
+            .first()
+            .expect("InputState always maintains at least one view")
+    }
+
+    fn primary_view_mut(&mut self) -> &mut ViewState {
+        self.views
+            .first_mut()
+            .expect("InputState always maintains at least one view")
+    }
+
+    fn primary_caret(&self) -> &Caret {
+        self.primary_view().primary_caret()
+    }
+
+    fn primary_caret_mut(&mut self) -> &mut Caret {
+        self.primary_view_mut().primary_caret_mut()
+    }
+
+    fn viewport(&self) -> &Viewport {
+        &self.primary_view().viewport
+    }
+
+    fn viewport_mut(&mut self) -> &mut Viewport {
+        &mut self.primary_view_mut().viewport
+    }
+
+    fn anchor_position(&self) -> usize {
+        self.primary_caret().anchor
+    }
+
+    fn cursor_position_mut(&mut self) -> &mut usize {
+        &mut self.primary_caret_mut().head
+    }
+
+    fn anchor_position_mut(&mut self) -> &mut usize {
+        &mut self.primary_caret_mut().anchor
+    }
+
+    fn preferred_column(&self) -> Option<usize> {
+        self.primary_caret().preferred_column
+    }
+
+    fn set_preferred_column(&mut self, value: Option<usize>) {
+        self.primary_caret_mut().preferred_column = value;
+    }
+
     pub fn value(&self) -> String {
-        self.rope.to_string()
+        self.document.rope.to_string()
     }
 
     pub fn len_chars(&self) -> usize {
-        self.rope.len_chars()
+        self.document.rope.len_chars()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -86,15 +447,15 @@ impl InputState {
     }
 
     pub fn cursor(&self) -> usize {
-        self.cursor
+        self.primary_caret().head
     }
 
     pub fn scroll_x(&self) -> usize {
-        self.scroll_x
+        self.viewport().scroll_x
     }
 
     pub fn scroll_y(&self) -> usize {
-        self.scroll_y
+        self.viewport().scroll_y
     }
 
     pub fn mode(&self) -> InputMode {
@@ -114,74 +475,100 @@ impl InputState {
     }
 
     pub fn selection(&self) -> Option<(usize, usize)> {
-        if self.cursor == self.anchor {
+        let cursor = self.primary_caret().head;
+        let anchor = self.primary_caret().anchor;
+        if cursor == anchor {
             None
-        } else if self.cursor < self.anchor {
-            Some((self.cursor, self.anchor))
+        } else if cursor < anchor {
+            Some((cursor, anchor))
         } else {
-            Some((self.anchor, self.cursor))
+            Some((anchor, cursor))
         }
     }
 
     pub fn clear(&mut self) {
-        self.rope = Rope::new();
-        self.cursor = 0;
-        self.anchor = 0;
-        self.scroll_x = 0;
-        self.scroll_y = 0;
-        self.reset_preferred_column();
+        self.document.rope = Rope::new();
+        {
+            let caret = self.primary_view_mut().primary_caret_mut();
+            caret.head = 0;
+            caret.anchor = 0;
+            caret.preferred_column = None;
+        }
+        {
+            let viewport = &mut self.primary_view_mut().viewport;
+            viewport.scroll_x = 0;
+            viewport.scroll_y = 0;
+        }
     }
 
     pub fn set_value(&mut self, value: impl Into<String>) {
         let value = value.into();
-        self.rope = Rope::from_str(&value);
+        self.document.rope = Rope::from_str(&value);
         let len = self.len_chars();
-        self.cursor = len;
-        self.anchor = len;
-        self.scroll_x = 0;
-        self.scroll_y = 0;
+        {
+            let caret = self.primary_view_mut().primary_caret_mut();
+            caret.head = len;
+            caret.anchor = len;
+            caret.preferred_column = None;
+        }
+        {
+            let viewport = &mut self.primary_view_mut().viewport;
+            viewport.scroll_x = 0;
+            viewport.scroll_y = 0;
+        }
         self.reset_preferred_column();
     }
 
     fn reset_preferred_column(&mut self) {
-        self.preferred_column = None;
+        self.primary_view_mut()
+            .cursor_set
+            .reset_primary_preferred_column();
     }
 
     fn cursor_line(&self) -> usize {
-        let idx = self.cursor.min(self.len_chars());
-        self.rope.char_to_line(idx)
+        let idx = self.cursor().min(self.len_chars());
+        self.document.rope.char_to_line(idx)
     }
 
     fn line_count(&self) -> usize {
-        self.rope.len_lines().max(1)
+        self.document.rope.len_lines().max(1)
     }
 
     fn column_in_line(&self, line_index: usize, char_index: usize) -> usize {
-        let start = self.rope.line_to_char(line_index).min(char_index);
+        let start = self.document.rope.line_to_char(line_index).min(char_index);
         self.display_width_between(start, char_index)
     }
 
     fn display_width_between(&self, start: usize, end: usize) -> usize {
-        self.rope.slice(start..end).chars().fold(0usize, |acc, ch| {
-            if ch == '\n' {
-                0
-            } else {
-                acc + Self::char_width(ch)
-            }
-        })
+        self.document
+            .rope
+            .slice(start..end)
+            .chars()
+            .fold(0usize, |acc, ch| {
+                if ch == '\n' {
+                    0
+                } else {
+                    acc + Self::char_width(ch)
+                }
+            })
     }
 
     fn index_at_line_column(&self, line_index: usize, column: usize) -> usize {
-        let line_start = self.rope.line_to_char(line_index).min(self.len_chars());
-        let line_end = self
+        let line_start = self
+            .document
             .rope
-            .line_to_char((line_index + 1).min(self.rope.len_lines()))
+            .line_to_char(line_index)
+            .min(self.len_chars());
+        let line_end = self
+            .document
+            .rope
+            .line_to_char((line_index + 1).min(self.document.rope.len_lines()))
             .min(self.len_chars());
 
         let mut idx = line_start;
         let mut col = 0usize;
         while idx < line_end {
-            let ch = self.rope.char(idx);
+            let ch = self.document.rope.char(idx);
             if ch == '\n' {
                 break;
             }
@@ -216,11 +603,11 @@ impl InputState {
             InputMsg::MoveLineStart { extend } => self.move_line_start(extend),
             InputMsg::MoveLineEnd { extend } => self.move_line_end(extend),
             InputMsg::MoveWordLeft { extend } => {
-                let target = self.word_start_before(self.cursor);
+                let target = self.word_start_before(self.cursor());
                 self.move_to_index(target, extend)
             }
             InputMsg::MoveWordRight { extend } => {
-                let target = self.next_word_boundary(self.cursor);
+                let target = self.next_word_boundary(self.cursor());
                 self.move_to_index(target, extend)
             }
             InputMsg::Pointer {
@@ -239,8 +626,9 @@ impl InputState {
                 true
             }
             InputMsg::ClearSelection => {
-                if self.cursor != self.anchor {
-                    self.anchor = self.cursor;
+                let cursor = self.cursor();
+                if cursor != self.anchor_position() {
+                    *self.anchor_position_mut() = cursor;
                     self.reset_preferred_column();
                     self.ensure_cursor_visible();
                     true
@@ -251,9 +639,10 @@ impl InputState {
             InputMsg::SetViewportSize { cols, rows } => {
                 let cols = cols.max(1);
                 let rows = rows.max(1);
-                let changed = self.viewport_cols != cols || self.viewport_rows != rows;
-                self.viewport_cols = cols;
-                self.viewport_rows = rows;
+                let viewport = self.viewport_mut();
+                let changed = viewport.cols != cols || viewport.rows != rows;
+                viewport.cols = cols;
+                viewport.rows = rows;
                 self.ensure_cursor_visible();
                 changed
             }
@@ -279,10 +668,12 @@ impl InputState {
         }
 
         let mut changed = self.delete_selection();
-        self.rope.insert(self.cursor, &text);
+        let cursor = self.cursor();
+        self.document.rope.insert(cursor, &text);
         let added = text.chars().count();
-        self.cursor += added;
-        self.anchor = self.cursor;
+        let new_pos = cursor + added;
+        *self.cursor_position_mut() = new_pos;
+        *self.anchor_position_mut() = new_pos;
         self.reset_preferred_column();
         changed |= added > 0;
         self.ensure_cursor_visible();
@@ -294,14 +685,14 @@ impl InputState {
             return true;
         }
 
-        if self.cursor == 0 {
+        if self.cursor() == 0 {
             return false;
         }
 
-        let prev = self.cursor - 1;
-        self.rope.remove(prev..self.cursor);
-        self.cursor = prev;
-        self.anchor = prev;
+        let prev = self.cursor() - 1;
+        self.document.rope.remove(prev..self.cursor());
+        *self.cursor_position_mut() = prev;
+        *self.anchor_position_mut() = prev;
         self.reset_preferred_column();
         self.ensure_cursor_visible();
         true
@@ -312,17 +703,17 @@ impl InputState {
             return true;
         }
 
-        if self.cursor == 0 {
+        if self.cursor() == 0 {
             return false;
         }
 
-        let boundary = self.word_start_before(self.cursor);
-        if boundary == self.cursor {
+        let boundary = self.word_start_before(self.cursor());
+        if boundary == self.cursor() {
             return false;
         }
-        self.rope.remove(boundary..self.cursor);
-        self.cursor = boundary;
-        self.anchor = boundary;
+        self.document.rope.remove(boundary..self.cursor());
+        *self.cursor_position_mut() = boundary;
+        *self.anchor_position_mut() = boundary;
         self.reset_preferred_column();
         self.ensure_cursor_visible();
         true
@@ -334,14 +725,14 @@ impl InputState {
             return true;
         }
 
-        if self.cursor == 0 {
+        if self.cursor() == 0 {
             self.ensure_cursor_visible();
             return false;
         }
 
-        self.rope.remove(0..self.cursor);
-        self.cursor = 0;
-        self.anchor = 0;
+        self.document.rope.remove(0..self.cursor());
+        *self.cursor_position_mut() = 0;
+        *self.anchor_position_mut() = 0;
         self.reset_preferred_column();
         self.ensure_cursor_visible();
         true
@@ -353,11 +744,12 @@ impl InputState {
         }
 
         let len = self.len_chars();
-        if self.cursor == len {
+        if self.cursor() == len {
             return false;
         }
-        self.rope.remove(self.cursor..len);
-        self.anchor = self.cursor;
+        let cursor = self.cursor();
+        self.document.rope.remove(cursor..len);
+        *self.anchor_position_mut() = cursor;
         self.reset_preferred_column();
         self.ensure_cursor_visible();
         true
@@ -365,23 +757,24 @@ impl InputState {
 
     fn move_left(&mut self, extend: bool) -> bool {
         if !extend && let Some((start, _)) = self.selection() {
-            self.cursor = start;
-            self.anchor = start;
+            *self.cursor_position_mut() = start;
+            *self.anchor_position_mut() = start;
             self.reset_preferred_column();
             self.ensure_cursor_visible();
             return true;
         }
 
-        if self.cursor == 0 {
+        if self.cursor() == 0 {
             if !extend {
-                self.anchor = self.cursor;
+                *self.anchor_position_mut() = self.cursor();
             }
             return false;
         }
 
-        self.cursor -= 1;
+        let new_pos = self.cursor() - 1;
+        *self.cursor_position_mut() = new_pos;
         if !extend {
-            self.anchor = self.cursor;
+            *self.anchor_position_mut() = new_pos;
         }
         self.reset_preferred_column();
         self.ensure_cursor_visible();
@@ -389,57 +782,68 @@ impl InputState {
     }
 
     fn ensure_cursor_visible(&mut self) {
-        let viewport = self.viewport_cols.max(1);
-        let col = self.display_width_between(0, self.cursor);
-        let min_scroll = col.saturating_sub(viewport.saturating_sub(1));
-        if self.scroll_x > min_scroll {
-            self.scroll_x = min_scroll;
-        }
-        if col < self.scroll_x {
-            self.scroll_x = col;
-        } else if col >= self.scroll_x + viewport {
-            self.scroll_x = col + 1 - viewport;
+        let viewport_cols = {
+            let viewport = self.viewport();
+            viewport.cols.max(1)
+        };
+        let col = self.display_width_between(0, self.cursor());
+        {
+            let viewport = self.viewport_mut();
+            let min_scroll = col.saturating_sub(viewport_cols.saturating_sub(1));
+            if viewport.scroll_x > min_scroll {
+                viewport.scroll_x = min_scroll;
+            }
+            if col < viewport.scroll_x {
+                viewport.scroll_x = col;
+            } else if col >= viewport.scroll_x + viewport_cols {
+                viewport.scroll_x = col + 1 - viewport_cols;
+            }
         }
 
         if self.is_multiline() {
-            let viewport_rows = self.viewport_rows.max(1);
+            let viewport_rows = {
+                let viewport = self.viewport();
+                viewport.rows.max(1)
+            };
             let cursor_line = self.cursor_line();
             let max_scroll_y = self.line_count().saturating_sub(viewport_rows);
 
-            if cursor_line < self.scroll_y {
-                self.scroll_y = cursor_line;
-            } else if cursor_line >= self.scroll_y + viewport_rows {
-                self.scroll_y = cursor_line + 1 - viewport_rows;
+            let viewport = self.viewport_mut();
+            if cursor_line < viewport.scroll_y {
+                viewport.scroll_y = cursor_line;
+            } else if cursor_line >= viewport.scroll_y + viewport_rows {
+                viewport.scroll_y = cursor_line + 1 - viewport_rows;
             }
 
-            if self.scroll_y > max_scroll_y {
-                self.scroll_y = max_scroll_y;
+            if viewport.scroll_y > max_scroll_y {
+                viewport.scroll_y = max_scroll_y;
             }
         } else {
-            self.scroll_y = 0;
+            self.viewport_mut().scroll_y = 0;
         }
     }
 
     fn move_right(&mut self, extend: bool) -> bool {
         if !extend && let Some((_, end)) = self.selection() {
-            self.cursor = end;
-            self.anchor = end;
+            *self.cursor_position_mut() = end;
+            *self.anchor_position_mut() = end;
             self.reset_preferred_column();
             self.ensure_cursor_visible();
             return true;
         }
 
         let len = self.len_chars();
-        if self.cursor >= len {
+        if self.cursor() >= len {
             if !extend {
-                self.anchor = self.cursor;
+                *self.anchor_position_mut() = self.cursor();
             }
             return false;
         }
 
-        self.cursor += 1;
+        let new_pos = self.cursor() + 1;
+        *self.cursor_position_mut() = new_pos;
         if !extend {
-            self.anchor = self.cursor;
+            *self.anchor_position_mut() = new_pos;
         }
         self.reset_preferred_column();
         self.ensure_cursor_visible();
@@ -457,7 +861,7 @@ impl InputState {
     fn move_vertical(&mut self, line_delta: isize, extend: bool) -> bool {
         if !self.is_multiline() {
             if !extend {
-                self.anchor = self.cursor;
+                *self.anchor_position_mut() = self.cursor();
             }
             return false;
         }
@@ -465,7 +869,7 @@ impl InputState {
         let line_count = self.line_count();
         if line_count <= 1 {
             if !extend {
-                self.anchor = self.cursor;
+                *self.anchor_position_mut() = self.cursor();
             }
             return false;
         }
@@ -475,7 +879,7 @@ impl InputState {
             d if d < 0 => {
                 if current_line == 0 {
                     if !extend {
-                        self.anchor = self.cursor;
+                        *self.anchor_position_mut() = self.cursor();
                     }
                     return false;
                 }
@@ -484,7 +888,7 @@ impl InputState {
             d if d > 0 => {
                 if current_line + 1 >= line_count {
                     if !extend {
-                        self.anchor = self.cursor;
+                        *self.anchor_position_mut() = self.cursor();
                     }
                     return false;
                 }
@@ -493,30 +897,30 @@ impl InputState {
             _ => current_line,
         };
 
-        let desired_col = match self.preferred_column {
+        let desired_col = match self.preferred_column() {
             Some(col) => col,
             None => {
-                let col = self.column_in_line(current_line, self.cursor);
-                self.preferred_column = Some(col);
+                let col = self.column_in_line(current_line, self.cursor());
+                self.set_preferred_column(Some(col));
                 col
             }
         };
 
         let target_index = self.index_at_line_column(target_line, desired_col);
 
-        if target_index == self.cursor {
+        if target_index == self.cursor() {
             if !extend {
-                self.anchor = target_index;
+                *self.anchor_position_mut() = target_index;
             }
             self.ensure_cursor_visible();
             return false;
         }
 
-        self.cursor = target_index;
+        *self.cursor_position_mut() = target_index;
         if !extend {
-            self.anchor = target_index;
+            *self.anchor_position_mut() = target_index;
         }
-        self.preferred_column = Some(desired_col);
+        self.set_preferred_column(Some(desired_col));
         self.ensure_cursor_visible();
         true
     }
@@ -536,14 +940,14 @@ impl InputState {
     fn move_to_index(&mut self, index: usize, extend: bool) -> bool {
         let clamped = index.min(self.len_chars());
         if !extend {
-            self.anchor = clamped;
+            *self.anchor_position_mut() = clamped;
         }
-        if self.cursor == clamped && self.anchor == clamped {
+        if self.cursor() == clamped && self.anchor_position() == clamped {
             return false;
         }
-        self.cursor = clamped;
+        *self.cursor_position_mut() = clamped;
         if !extend {
-            self.anchor = clamped;
+            *self.anchor_position_mut() = clamped;
         }
         self.reset_preferred_column();
         self.ensure_cursor_visible();
@@ -554,17 +958,17 @@ impl InputState {
         let len = self.len_chars();
         let start = start.min(len);
         let end = end.min(len);
-        self.anchor = start;
-        self.cursor = end;
+        *self.anchor_position_mut() = start;
+        *self.cursor_position_mut() = end;
         self.reset_preferred_column();
         self.ensure_cursor_visible();
     }
 
     fn delete_selection(&mut self) -> bool {
         if let Some((start, end)) = self.selection() {
-            self.rope.remove(start..end);
-            self.cursor = start;
-            self.anchor = start;
+            self.document.rope.remove(start..end);
+            *self.cursor_position_mut() = start;
+            *self.anchor_position_mut() = start;
             self.reset_preferred_column();
             self.ensure_cursor_visible();
             true
@@ -596,12 +1000,13 @@ impl InputState {
         if self.is_multiline() {
             let line_count = self.line_count();
             let max_index = line_count - 1;
-            let absolute_row = self.scroll_y.saturating_add(row).min(max_index);
+            let scroll_y = self.viewport().scroll_y;
+            let absolute_row = scroll_y.saturating_add(row).min(max_index);
             self.index_at_line_column(absolute_row, column)
         } else {
             let mut consumed = 0usize;
             let mut index = 0usize;
-            for ch in self.rope.chars() {
+            for ch in self.document.rope.chars() {
                 let width = Self::char_width(ch);
                 if column < consumed + width {
                     return index;
@@ -707,21 +1112,22 @@ impl InputState {
             return None;
         }
 
-        let ch = self.rope.char(index);
+        let ch = self.document.rope.char(index);
         Some(WordKind::classify(ch))
     }
 
     fn line_bounds(&self, line_index: usize) -> (usize, usize) {
         let len = self.len_chars();
-        let start = self.rope.line_to_char(line_index).min(len);
+        let start = self.document.rope.line_to_char(line_index).min(len);
         let mut end = self
+            .document
             .rope
-            .line_to_char((line_index + 1).min(self.rope.len_lines()))
+            .line_to_char((line_index + 1).min(self.document.rope.len_lines()))
             .min(len);
 
         if end > start && end > 0 {
             let last_idx = end - 1;
-            if last_idx < len && self.rope.char(last_idx) == '\n' {
+            if last_idx < len && self.document.rope.char(last_idx) == '\n' {
                 end -= 1;
             }
         }
@@ -859,8 +1265,8 @@ where
     let input_renderable = InputRenderable::new(state, style);
     let mut node = renderable::<Msg>(input_renderable)
         .with_id(id)
-        .with_scroll_x(state.scroll_x as f32)
-        .with_scroll(state.scroll_y as f32);
+        .with_scroll_x(state.scroll_x() as f32)
+        .with_scroll(state.scroll_y() as f32);
 
     let handler = Rc::new(map_msg);
     let mouse_handler = handler.clone();
@@ -914,9 +1320,9 @@ enum RunStyle {
 
 impl InputRenderable {
     fn new(state: &InputState, style: &InputStyle) -> Self {
-        let rope = state.rope.clone();
+        let rope = state.document.rope.clone();
         let len_chars = rope.len_chars();
-        let cursor = state.cursor.min(len_chars);
+        let cursor = state.cursor().min(len_chars);
         let selection = state.selection();
 
         let base_style = style.text.clone();
