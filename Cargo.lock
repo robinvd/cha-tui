@@ -302,6 +302,7 @@ dependencies = [
  "once_cell",
  "ropey",
  "similar",
+ "smallvec",
  "smol",
  "taffy",
  "tempfile",

@@ -45,8 +45,9 @@ const PRIMARY_VIEW_ID: ViewId = ViewId::new(0);
 ///   *Status: not wired into UI yet.*
 /// - **Gutter** – [`ViewState::gutter`] reserves metadata for line numbers or markers.
 ///   *Status: layout/rendering unchanged for now.*
-/// - **Undo/redo** – [`EditHistory`] keeps the future command stack.
-///   *Status: editing operations do not push commands yet.*
+/// - **Undo/redo** – [`EditHistory`] now records past/future stacks and replays
+///   [`InputMsg::Undo`] / [`InputMsg::Redo`].
+///   *Status: fully wired with default Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y bindings.*
 /// - **Multicursor** – [`CursorSet`] holds multiple carets.
 ///   *Status: only the primary caret is exposed through the public API.*
 /// - **Multiple views** – [`views`] carries per-pane data (viewport, cursors).
@@ -55,7 +56,6 @@ const PRIMARY_VIEW_ID: ViewId = ViewId::new(0);
 pub struct InputState {
     mode: InputMode,
     document: DocumentState,
-    #[allow(dead_code)]
     history: EditHistory,
     #[allow(dead_code)]
     highlights: HighlightStore,
@@ -84,9 +84,7 @@ impl Default for InputState {
 #[derive(Clone, Debug)]
 struct DocumentState {
     rope: Rope,
-    #[allow(dead_code)]
     revision: u64,
-    #[allow(dead_code)]
     is_dirty: bool,
 }
 
@@ -321,40 +319,167 @@ struct CompletionItem {
     label: String,
 }
 
-/// Undo/redo stacks (pending wire-up to editing commands).
+/// Undo/redo stacks plus helpers to walk history.
 #[derive(Clone, Debug, Default)]
 struct EditHistory {
-    #[allow(dead_code)]
     past: Vec<EditCommand>,
-    #[allow(dead_code)]
     future: Vec<EditCommand>,
 }
 
-/// Individual edit that can participate in undo/redo.
-#[derive(Clone, Debug, Default)]
-struct EditCommand {
-    #[allow(dead_code)]
-    kind: EditKind,
-    #[allow(dead_code)]
-    range: Range<usize>,
-    #[allow(dead_code)]
-    text: Rope,
-    #[allow(dead_code)]
-    metadata: EditMetadata,
+impl EditHistory {
+    fn record(&mut self, edit: EditCommand) {
+        self.past.push(edit);
+        self.future.clear();
+    }
+
+    fn undo(&mut self) -> Option<EditCommand> {
+        let edit = self.past.pop()?;
+        let inverse = edit.inverse();
+        self.future.push(edit);
+        Some(inverse)
+    }
+
+    fn redo(&mut self) -> Option<EditCommand> {
+        let edit = self.future.pop()?;
+        let replay = edit.clone();
+        self.past.push(edit);
+        Some(replay)
+    }
+
+    fn clear(&mut self) {
+        self.past.clear();
+        self.future.clear();
+    }
+
+    fn can_undo(&self) -> bool {
+        !self.past.is_empty()
+    }
+
+    fn can_redo(&self) -> bool {
+        !self.future.is_empty()
+    }
 }
 
-/// Type of edit captured for history.
-#[allow(dead_code)]
+/// Immutable caret state used to restore selection after replaying an edit.
 #[derive(Clone, Copy, Debug, Default)]
-enum EditKind {
-    #[default]
-    Insert,
-    Delete,
-    Replace,
+struct CaretSnapshot {
+    head: usize,
+    anchor: usize,
 }
 
-#[derive(Clone, Debug, Default)]
-struct EditMetadata;
+impl CaretSnapshot {
+    fn new(head: usize, anchor: usize) -> Self {
+        Self { head, anchor }
+    }
+}
+
+impl From<&Caret> for CaretSnapshot {
+    fn from(value: &Caret) -> Self {
+        Self {
+            head: value.head,
+            anchor: value.anchor,
+        }
+    }
+}
+
+/// Individual edit that can participate in undo/redo.
+#[derive(Clone, Debug)]
+struct EditCommand {
+    before: CaretSnapshot,
+    after: CaretSnapshot,
+    transaction: EditTransaction,
+}
+
+impl EditCommand {
+    fn new(before: CaretSnapshot, after: CaretSnapshot, transaction: EditTransaction) -> Self {
+        Self {
+            before,
+            after,
+            transaction,
+        }
+    }
+
+    fn inverse(&self) -> Self {
+        Self {
+            before: self.after,
+            after: self.before,
+            transaction: self.transaction.inverse(),
+        }
+    }
+}
+
+/// Ordered collection of non-overlapping text edits.
+#[derive(Clone, Debug)]
+struct EditTransaction {
+    edits: Vec<TextEdit>,
+}
+
+impl EditTransaction {
+    fn new(edits: Vec<TextEdit>) -> Self {
+        debug_assert!(Self::non_overlapping(&edits));
+        Self { edits }
+    }
+
+    fn single(edit: TextEdit) -> Self {
+        Self::new(vec![edit])
+    }
+
+    fn is_empty(&self) -> bool {
+        self.edits.is_empty()
+    }
+
+    fn apply(&self, rope: &mut Rope) {
+        for edit in self.edits.iter().rev() {
+            edit.apply(rope);
+        }
+    }
+
+    fn inverse(&self) -> Self {
+        let edits = self.edits.iter().map(|edit| edit.inverse()).collect();
+        EditTransaction { edits }
+    }
+
+    fn non_overlapping(edits: &[TextEdit]) -> bool {
+        edits.is_empty()
+            || edits
+                .windows(2)
+                .all(|pair| pair[0].range.end <= pair[1].range.start)
+    }
+}
+
+/// Replace-operation describing removed and inserted text for a range.
+#[derive(Clone, Debug)]
+struct TextEdit {
+    range: Range<usize>,
+    deleted: String,
+    inserted: String,
+}
+
+impl TextEdit {
+    fn new(range: Range<usize>, deleted: String, inserted: String) -> Self {
+        Self {
+            range,
+            deleted,
+            inserted,
+        }
+    }
+
+    fn apply(&self, rope: &mut Rope) {
+        rope.remove(self.range.clone());
+        if !self.inserted.is_empty() {
+            rope.insert(self.range.start, &self.inserted);
+        }
+    }
+
+    fn inverse(&self) -> Self {
+        let inserted_len = self.inserted.chars().count();
+        TextEdit {
+            range: self.range.start..(self.range.start + inserted_len),
+            deleted: self.inserted.clone(),
+            inserted: self.deleted.clone(),
+        }
+    }
+}
 
 impl InputState {
     pub fn new() -> Self {
@@ -424,6 +549,42 @@ impl InputState {
 
     fn anchor_position_mut(&mut self) -> &mut usize {
         &mut self.primary_caret_mut().anchor
+    }
+
+    fn caret_snapshot(&self) -> CaretSnapshot {
+        self.primary_caret().into()
+    }
+
+    fn set_caret_snapshot(&mut self, snapshot: CaretSnapshot) {
+        let caret = self.primary_caret_mut();
+        caret.head = snapshot.head;
+        caret.anchor = snapshot.anchor;
+    }
+
+    fn commit_edit(&mut self, command: EditCommand) -> bool {
+        if command.transaction.is_empty() {
+            return false;
+        }
+        self.apply_edit(&command);
+        self.history.record(command);
+        self.mark_document_dirty();
+        true
+    }
+
+    fn apply_edit(&mut self, command: &EditCommand) {
+        command.transaction.apply(&mut self.document.rope);
+        self.set_caret_snapshot(command.after);
+        self.reset_preferred_column();
+        self.ensure_cursor_visible();
+    }
+
+    fn mark_document_dirty(&mut self) {
+        self.document.revision = self.document.revision.wrapping_add(1);
+        self.document.is_dirty = true;
+    }
+
+    fn rope_slice_to_string(&self, range: Range<usize>) -> String {
+        self.document.rope.slice(range).to_string()
     }
 
     fn preferred_column(&self) -> Option<usize> {
@@ -499,6 +660,10 @@ impl InputState {
             viewport.scroll_x = 0;
             viewport.scroll_y = 0;
         }
+        self.reset_preferred_column();
+        self.history.clear();
+        self.document.revision = self.document.revision.wrapping_add(1);
+        self.document.is_dirty = false;
     }
 
     pub fn set_value(&mut self, value: impl Into<String>) {
@@ -517,6 +682,37 @@ impl InputState {
             viewport.scroll_y = 0;
         }
         self.reset_preferred_column();
+        self.history.clear();
+        self.document.revision = self.document.revision.wrapping_add(1);
+        self.document.is_dirty = false;
+    }
+
+    pub fn undo(&mut self) -> bool {
+        if let Some(edit) = self.history.undo() {
+            self.apply_edit(&edit);
+            self.mark_document_dirty();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn redo(&mut self) -> bool {
+        if let Some(edit) = self.history.redo() {
+            self.apply_edit(&edit);
+            self.mark_document_dirty();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
     }
 
     fn reset_preferred_column(&mut self) {
@@ -591,6 +787,8 @@ impl InputState {
             InputMsg::DeleteWordBackward => self.delete_word_backward(),
             InputMsg::DeleteToStart => self.delete_to_start(),
             InputMsg::DeleteToEnd => self.delete_to_end(),
+            InputMsg::Undo => self.undo(),
+            InputMsg::Redo => self.redo(),
             InputMsg::MoveLeft { extend } => self.move_left(extend),
             InputMsg::MoveRight { extend } => self.move_right(extend),
             InputMsg::MoveUp { extend } => self.move_up(extend),
@@ -654,7 +852,7 @@ impl InputState {
             return false;
         }
 
-        let text = if self.is_multiline() {
+        let sanitized = if self.is_multiline() {
             let sanitized = text.replace('\r', "");
             if sanitized.is_empty() {
                 return false;
@@ -663,21 +861,30 @@ impl InputState {
         } else {
             text.replace(['\n', '\r'], " ")
         };
-        if text.is_empty() {
+        if sanitized.is_empty() {
             return false;
         }
 
-        let mut changed = self.delete_selection();
-        let cursor = self.cursor();
-        self.document.rope.insert(cursor, &text);
-        let added = text.chars().count();
-        let new_pos = cursor + added;
-        *self.cursor_position_mut() = new_pos;
-        *self.anchor_position_mut() = new_pos;
-        self.reset_preferred_column();
-        changed |= added > 0;
-        self.ensure_cursor_visible();
-        changed
+        let before = self.caret_snapshot();
+        let inserted_len = sanitized.chars().count();
+        let (text_edit, new_pos) = if let Some((start, end)) = self.selection() {
+            let deleted = self.rope_slice_to_string(start..end);
+            (
+                TextEdit::new(start..end, deleted, sanitized.clone()),
+                start + inserted_len,
+            )
+        } else {
+            let cursor = self.cursor();
+            (
+                TextEdit::new(cursor..cursor, String::new(), sanitized.clone()),
+                cursor + inserted_len,
+            )
+        };
+
+        let after = CaretSnapshot::new(new_pos, new_pos);
+        let transaction = EditTransaction::single(text_edit);
+        let command = EditCommand::new(before, after, transaction);
+        self.commit_edit(command)
     }
 
     fn delete_backward(&mut self) -> bool {
@@ -690,12 +897,14 @@ impl InputState {
         }
 
         let prev = self.cursor() - 1;
-        self.document.rope.remove(prev..self.cursor());
-        *self.cursor_position_mut() = prev;
-        *self.anchor_position_mut() = prev;
-        self.reset_preferred_column();
-        self.ensure_cursor_visible();
-        true
+        let range = prev..self.cursor();
+        let deleted = self.rope_slice_to_string(range.clone());
+        let before = self.caret_snapshot();
+        let after = CaretSnapshot::new(prev, prev);
+        let text_edit = TextEdit::new(range, deleted, String::new());
+        let transaction = EditTransaction::single(text_edit);
+        let command = EditCommand::new(before, after, transaction);
+        self.commit_edit(command)
     }
 
     fn delete_word_backward(&mut self) -> bool {
@@ -711,17 +920,19 @@ impl InputState {
         if boundary == self.cursor() {
             return false;
         }
-        self.document.rope.remove(boundary..self.cursor());
-        *self.cursor_position_mut() = boundary;
-        *self.anchor_position_mut() = boundary;
-        self.reset_preferred_column();
-        self.ensure_cursor_visible();
-        true
+
+        let range = boundary..self.cursor();
+        let deleted = self.rope_slice_to_string(range.clone());
+        let before = self.caret_snapshot();
+        let after = CaretSnapshot::new(boundary, boundary);
+        let text_edit = TextEdit::new(range, deleted, String::new());
+        let transaction = EditTransaction::single(text_edit);
+        let command = EditCommand::new(before, after, transaction);
+        self.commit_edit(command)
     }
 
     fn delete_to_start(&mut self) -> bool {
         if self.delete_selection() {
-            self.ensure_cursor_visible();
             return true;
         }
 
@@ -730,12 +941,14 @@ impl InputState {
             return false;
         }
 
-        self.document.rope.remove(0..self.cursor());
-        *self.cursor_position_mut() = 0;
-        *self.anchor_position_mut() = 0;
-        self.reset_preferred_column();
-        self.ensure_cursor_visible();
-        true
+        let range = 0..self.cursor();
+        let deleted = self.rope_slice_to_string(range.clone());
+        let before = self.caret_snapshot();
+        let after = CaretSnapshot::new(0, 0);
+        let text_edit = TextEdit::new(range, deleted, String::new());
+        let transaction = EditTransaction::single(text_edit);
+        let command = EditCommand::new(before, after, transaction);
+        self.commit_edit(command)
     }
 
     fn delete_to_end(&mut self) -> bool {
@@ -747,12 +960,15 @@ impl InputState {
         if self.cursor() == len {
             return false;
         }
-        let cursor = self.cursor();
-        self.document.rope.remove(cursor..len);
-        *self.anchor_position_mut() = cursor;
-        self.reset_preferred_column();
-        self.ensure_cursor_visible();
-        true
+        let start = self.cursor();
+        let range = start..len;
+        let deleted = self.rope_slice_to_string(range.clone());
+        let before = self.caret_snapshot();
+        let after = CaretSnapshot::new(start, start);
+        let text_edit = TextEdit::new(range, deleted, String::new());
+        let transaction = EditTransaction::single(text_edit);
+        let command = EditCommand::new(before, after, transaction);
+        self.commit_edit(command)
     }
 
     fn move_left(&mut self, extend: bool) -> bool {
@@ -966,12 +1182,14 @@ impl InputState {
 
     fn delete_selection(&mut self) -> bool {
         if let Some((start, end)) = self.selection() {
-            self.document.rope.remove(start..end);
-            *self.cursor_position_mut() = start;
-            *self.anchor_position_mut() = start;
-            self.reset_preferred_column();
-            self.ensure_cursor_visible();
-            true
+            let range = start..end;
+            let before = self.caret_snapshot();
+            let deleted = self.rope_slice_to_string(range.clone());
+            let after = CaretSnapshot::new(range.start, range.start);
+            let text_edit = TextEdit::new(range, deleted, String::new());
+            let transaction = EditTransaction::single(text_edit);
+            let command = EditCommand::new(before, after, transaction);
+            self.commit_edit(command)
         } else {
             false
         }
@@ -1145,6 +1363,7 @@ impl InputState {
     }
 }
 
+/// Visual customization knobs for the input widget (text, selection, cursor).
 #[derive(Clone, Debug)]
 pub struct InputStyle {
     pub text: Style,
@@ -1185,6 +1404,8 @@ pub enum InputMsg {
     DeleteWordBackward,
     DeleteToStart,
     DeleteToEnd,
+    Undo,
+    Redo,
     MoveLeft {
         extend: bool,
     },
@@ -1295,6 +1516,7 @@ where
     node
 }
 
+/// Snapshot of the input plus styling information passed to the renderer.
 #[derive(Clone, Debug)]
 struct InputRenderable {
     rope: Rope,
@@ -1864,6 +2086,9 @@ pub fn default_keybindings<UpdateMsg>(
         KeyCode::Char('w') if key.ctrl => Some(InputMsg::DeleteWordBackward),
         KeyCode::Char('u') if key.ctrl => Some(InputMsg::DeleteToStart),
         KeyCode::Char('k') if key.ctrl => Some(InputMsg::DeleteToEnd),
+        KeyCode::Char('z') if key.ctrl && key.shift => Some(InputMsg::Redo),
+        KeyCode::Char('z') if key.ctrl => Some(InputMsg::Undo),
+        KeyCode::Char('y') if key.ctrl => Some(InputMsg::Redo),
         KeyCode::Char('a') if key.ctrl => {
             if state.is_multiline() {
                 Some(InputMsg::MoveLineStart { extend: key.shift })
@@ -1916,6 +2141,60 @@ mod tests {
         state.update(InputMsg::DeleteBackward);
         assert_eq!(state.value(), "ac");
         assert_eq!(state.cursor(), 1);
+    }
+
+    #[test]
+    fn undo_and_redo_restore_content() {
+        let mut state = InputState::default();
+        state.update(InputMsg::InsertText("abc".into()));
+        assert_eq!(state.value(), "abc");
+
+        assert!(state.update(InputMsg::Undo));
+        assert_eq!(state.value(), "");
+
+        assert!(state.update(InputMsg::Redo));
+        assert_eq!(state.value(), "abc");
+    }
+
+    #[test]
+    fn replacing_selection_is_single_history_entry() {
+        let mut state = InputState::default();
+        state.update(InputMsg::InsertText("hello".into()));
+        state.set_selection(0, 5);
+
+        state.update(InputMsg::InsertChar('x'));
+        assert_eq!(state.value(), "x");
+
+        assert!(state.update(InputMsg::Undo));
+        assert_eq!(state.value(), "hello");
+    }
+
+    #[test]
+    fn transactions_apply_multiple_edits_atomically() {
+        let mut state = InputState::with_value("abcdef");
+        let before = state.caret_snapshot();
+
+        let first_range = 0..2;
+        let second_range = 4..6;
+        let first_edit = TextEdit::new(
+            first_range.clone(),
+            state.rope_slice_to_string(first_range),
+            "12".into(),
+        );
+        let second_edit = TextEdit::new(
+            second_range.clone(),
+            state.rope_slice_to_string(second_range),
+            "YZ".into(),
+        );
+        let transaction = EditTransaction::new(vec![first_edit, second_edit]);
+        let after = CaretSnapshot::new(0, 0);
+        let command = EditCommand::new(before, after, transaction);
+
+        assert!(state.commit_edit(command));
+        assert_eq!(state.value(), "12cdYZ");
+
+        assert!(state.undo());
+        assert_eq!(state.value(), "abcdef");
     }
 
     #[test]
