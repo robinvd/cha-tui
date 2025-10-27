@@ -57,8 +57,8 @@ pub struct InputState {
     mode: InputMode,
     document: DocumentState,
     history: EditHistory,
-    #[allow(dead_code)]
     highlights: HighlightStore,
+    last_change: Option<TextChangeSet>,
     #[allow(dead_code)]
     inline_hints: InlineHintStore,
     #[allow(dead_code)]
@@ -73,6 +73,8 @@ impl Default for InputState {
             document: DocumentState::default(),
             history: EditHistory::default(),
             highlights: HighlightStore::default(),
+
+            last_change: None,
             inline_hints: InlineHintStore::default(),
             autocomplete: AutocompleteState::default(),
             views: vec![ViewState::new(PRIMARY_VIEW_ID)],
@@ -217,30 +219,348 @@ struct GutterMarker {
 /// Highlight layers keyed by [`HighlightLayerId`].
 #[derive(Clone, Debug, Default)]
 struct HighlightStore {
-    #[allow(dead_code)]
     layers: BTreeMap<HighlightLayerId, HighlightLayer>,
+    layer_order: Vec<HighlightLayerId>,
 }
 
 /// One highlight layer (e.g., syntax, search results).
 #[derive(Clone, Debug, Default)]
 struct HighlightLayer {
-    #[allow(dead_code)]
+    /// Invariant: this should always be sorted and non overlapping
     spans: Vec<HighlightSpan>,
-    #[allow(dead_code)]
     priority: u8,
 }
 
 /// Highlight span with style info.
-#[derive(Clone, Debug, Default)]
-struct HighlightSpan {
-    #[allow(dead_code)]
-    range: Range<usize>,
-    #[allow(dead_code)]
-    style: Style,
+#[derive(Clone, Debug, PartialEq)]
+pub struct HighlightSpan {
+    /// Invariant: range.start<range.end
+    pub range: Range<usize>,
+    pub style: Style,
+}
+
+impl HighlightSpan {
+    pub fn new(range: Range<usize>, style: Style) -> Self {
+        Self { range, style }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-struct HighlightLayerId(u64);
+pub struct HighlightLayerId(u64);
+
+impl HighlightLayerId {
+    pub const fn new(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+impl HighlightLayer {
+    fn new(priority: u8, spans: Vec<HighlightSpan>) -> Self {
+        let mut layer = Self { priority, spans };
+        layer.normalize();
+        layer
+    }
+
+    fn normalize(&mut self) {
+        self.spans.retain(|span| span.range.start < span.range.end);
+        self.spans
+            .sort_by_key(|span| (span.range.start, span.range.end));
+    }
+}
+
+impl HighlightStore {
+    fn set_layer(
+        &mut self,
+        id: HighlightLayerId,
+        priority: u8,
+        spans: impl IntoIterator<Item = HighlightSpan>,
+    ) {
+        let layer = HighlightLayer::new(priority, spans.into_iter().collect());
+        if layer.spans.is_empty() {
+            self.layers.remove(&id);
+        } else {
+            self.layers.insert(id, layer);
+        }
+        self.sync_layer_order();
+    }
+
+    fn clear_layer(&mut self, id: HighlightLayerId) {
+        self.layers.remove(&id);
+        self.sync_layer_order();
+    }
+
+    fn clear(&mut self) {
+        self.layers.clear();
+        self.layer_order.clear();
+    }
+
+    fn resolved_runs<'a>(
+        &'a self,
+        base_style: &'a Style,
+        range: Range<usize>,
+    ) -> HighlightRuns<'a> {
+        HighlightRuns::new(self, base_style, range)
+    }
+
+    fn sync_layer_order(&mut self) {
+        self.layer_order
+            .retain(|layer_id| self.layers.contains_key(layer_id));
+
+        for id in self.layers.keys().copied() {
+            if !self.layer_order.contains(&id) {
+                self.layer_order.push(id);
+            }
+        }
+
+        self.layer_order.sort_by_key(|id| {
+            self.layers
+                .get(id)
+                .map(|layer| (layer.priority, id.0))
+                .unwrap_or((u8::MAX, id.0))
+        });
+    }
+
+    fn apply_edit(&mut self, transaction: &EditTransaction) {
+        if self.layers.is_empty() || transaction.is_empty() {
+            return;
+        }
+
+        for edit in transaction.edits.iter().rev() {
+            self.apply_text_edit(edit);
+        }
+
+        self.layers.retain(|_, layer| {
+            layer.normalize();
+            !layer.spans.is_empty()
+        });
+        self.sync_layer_order();
+    }
+
+    fn apply_text_edit(&mut self, edit: &TextEdit) {
+        let edit_start = edit.range.start;
+        let edit_end = edit.range.end;
+        let removed_len = edit_end.saturating_sub(edit_start);
+        let inserted_len = edit.inserted.chars().count();
+        let delta = inserted_len as isize - removed_len as isize;
+
+        if removed_len == 0 && inserted_len == 0 {
+            return;
+        }
+
+        for layer in self.layers.values_mut() {
+            let mut idx = 0;
+            while idx < layer.spans.len() {
+                let span = &mut layer.spans[idx];
+
+                if span.range.end <= edit_start {
+                    idx += 1;
+                    continue;
+                }
+
+                if span.range.start >= edit_end {
+                    if delta != 0 {
+                        Self::shift_range(&mut span.range, delta);
+                    }
+                    idx += 1;
+                    continue;
+                }
+
+                let new_start =
+                    Self::map_index(span.range.start, edit_start, edit_end, inserted_len, delta);
+                let new_end =
+                    Self::map_index(span.range.end, edit_start, edit_end, inserted_len, delta);
+
+                if new_start >= new_end {
+                    layer.spans.remove(idx);
+                    continue;
+                }
+
+                span.range.start = new_start;
+                span.range.end = new_end;
+                idx += 1;
+            }
+        }
+    }
+
+    fn shift_range(range: &mut Range<usize>, delta: isize) {
+        if delta == 0 {
+            return;
+        }
+
+        let start = (range.start as isize + delta).max(0) as usize;
+        let end = (range.end as isize + delta).max(0) as usize;
+        range.start = start;
+        range.end = end;
+    }
+
+    fn map_index(
+        pos: usize,
+        edit_start: usize,
+        edit_end: usize,
+        inserted_len: usize,
+        delta: isize,
+    ) -> usize {
+        if pos <= edit_start {
+            pos
+        } else if pos >= edit_end {
+            let new_pos = pos as isize + delta;
+            if new_pos < 0 { 0 } else { new_pos as usize }
+        } else {
+            edit_start + inserted_len
+        }
+    }
+}
+
+struct HighlightRuns<'a> {
+    base_style: &'a Style,
+    pos: usize,
+    end: usize,
+    cursors: SmallVec<[LayerCursor<'a>; 4]>,
+}
+
+impl<'a> HighlightRuns<'a> {
+    fn new(store: &'a HighlightStore, base_style: &'a Style, range: Range<usize>) -> Self {
+        let Range { mut start, end } = range;
+        if start >= end {
+            return Self {
+                base_style,
+                pos: end,
+                end,
+                cursors: SmallVec::new(),
+            };
+        }
+
+        if store.layer_order.is_empty() {
+            return Self {
+                base_style,
+                pos: end,
+                end,
+                cursors: SmallVec::new(),
+            };
+        }
+
+        let mut cursors: SmallVec<[LayerCursor<'a>; 4]> = SmallVec::new();
+        for id in &store.layer_order {
+            if let Some(layer) = store.layers.get(id)
+                && let Some(cursor) = LayerCursor::new(layer, start, end)
+            {
+                cursors.push(cursor);
+            }
+        }
+
+        if cursors.is_empty() {
+            start = end;
+        }
+
+        Self {
+            base_style,
+            pos: start,
+            end,
+            cursors,
+        }
+    }
+}
+
+impl<'a> Iterator for HighlightRuns<'a> {
+    type Item = HighlightRun;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while self.pos < self.end {
+            let mut next_boundary = self.end;
+            let mut style: Option<Style> = None;
+
+            for cursor in self.cursors.iter_mut() {
+                cursor.seek(self.pos);
+
+                if let Some(span) = cursor.span_at(self.pos) {
+                    let span_end = span.range.end.min(self.end);
+                    if span_end < next_boundary {
+                        next_boundary = span_end;
+                    }
+                    let merged = style.get_or_insert_with(|| self.base_style.clone());
+                    merged.apply_overlay(&span.style);
+                } else if let Some(start) = cursor.upcoming_start()
+                    && start > self.pos
+                    && start < next_boundary
+                    && start < self.end
+                {
+                    next_boundary = start;
+                }
+            }
+
+            if let Some(style) = style {
+                if next_boundary <= self.pos {
+                    self.pos = self.end;
+                    return None;
+                }
+                let start = self.pos;
+                let end = next_boundary;
+                self.pos = end;
+                return Some(HighlightRun {
+                    range: start..end,
+                    style,
+                });
+            }
+
+            if next_boundary <= self.pos {
+                self.pos = self.end;
+                return None;
+            }
+
+            self.pos = next_boundary;
+        }
+
+        None
+    }
+}
+
+struct LayerCursor<'a> {
+    spans: &'a [HighlightSpan],
+    index: usize,
+}
+
+impl<'a> LayerCursor<'a> {
+    fn new(layer: &'a HighlightLayer, start: usize, end: usize) -> Option<Self> {
+        if layer.spans.is_empty() {
+            return None;
+        }
+
+        let spans = layer.spans.as_slice();
+        let mut index = 0;
+        while index < spans.len() && spans[index].range.end <= start {
+            index += 1;
+        }
+
+        if index >= spans.len() {
+            return None;
+        }
+
+        if spans[index].range.start >= end {
+            return None;
+        }
+
+        Some(Self { spans, index })
+    }
+
+    fn seek(&mut self, pos: usize) {
+        while self.index < self.spans.len() && self.spans[self.index].range.end <= pos {
+            self.index += 1;
+        }
+    }
+
+    fn span_at(&self, pos: usize) -> Option<&'a HighlightSpan> {
+        let span = self.spans.get(self.index)?;
+        if span.range.start <= pos && pos < span.range.end {
+            Some(span)
+        } else {
+            None
+        }
+    }
+
+    fn upcoming_start(&self) -> Option<usize> {
+        self.spans.get(self.index).map(|span| span.range.start)
+    }
+}
 
 /// Storage for inline hints (LSP-style inlay text).
 #[derive(Clone, Debug, Default)]
@@ -414,6 +734,39 @@ struct EditTransaction {
     edits: Vec<TextEdit>,
 }
 
+/// One applied text change (range, deleted text, inserted text).
+#[derive(Clone, Debug)]
+pub struct TextChange {
+    pub range: Range<usize>,
+    pub deleted: String,
+    pub inserted: String,
+}
+
+/// Collection of applied text changes from a single input transaction.
+#[derive(Clone, Debug)]
+pub struct TextChangeSet {
+    pub changes: Vec<TextChange>,
+}
+
+impl TextChangeSet {
+    fn from_transaction(transaction: &EditTransaction) -> Self {
+        let changes = transaction
+            .edits
+            .iter()
+            .map(|edit| TextChange {
+                range: edit.range.clone(),
+                deleted: edit.deleted.clone(),
+                inserted: edit.inserted.clone(),
+            })
+            .collect();
+        Self { changes }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.changes.is_empty()
+    }
+}
+
 impl EditTransaction {
     fn new(edits: Vec<TextEdit>) -> Self {
         debug_assert!(Self::non_overlapping(&edits));
@@ -573,6 +926,8 @@ impl InputState {
 
     fn apply_edit(&mut self, command: &EditCommand) {
         command.transaction.apply(&mut self.document.rope);
+        self.highlights.apply_edit(&command.transaction);
+        self.last_change = Some(TextChangeSet::from_transaction(&command.transaction));
         self.set_caret_snapshot(command.after);
         self.reset_preferred_column();
         self.ensure_cursor_visible();
@@ -599,12 +954,37 @@ impl InputState {
         self.document.rope.to_string()
     }
 
+    pub fn rope(&self) -> &Rope {
+        &self.document.rope
+    }
+
+    pub fn take_text_changes(&mut self) -> Option<TextChangeSet> {
+        self.last_change.take()
+    }
+
     pub fn len_chars(&self) -> usize {
         self.document.rope.len_chars()
     }
 
     pub fn is_empty(&self) -> bool {
         self.len_chars() == 0
+    }
+
+    pub fn set_highlight_layer(
+        &mut self,
+        id: HighlightLayerId,
+        priority: u8,
+        spans: impl IntoIterator<Item = HighlightSpan>,
+    ) {
+        self.highlights.set_layer(id, priority, spans);
+    }
+
+    pub fn clear_highlight_layer(&mut self, id: HighlightLayerId) {
+        self.highlights.clear_layer(id);
+    }
+
+    pub fn clear_highlights(&mut self) {
+        self.highlights.clear();
     }
 
     pub fn cursor(&self) -> usize {
@@ -664,6 +1044,7 @@ impl InputState {
         self.history.clear();
         self.document.revision = self.document.revision.wrapping_add(1);
         self.document.is_dirty = false;
+        self.last_change = None;
     }
 
     pub fn set_value(&mut self, value: impl Into<String>) {
@@ -685,6 +1066,7 @@ impl InputState {
         self.history.clear();
         self.document.revision = self.document.revision.wrapping_add(1);
         self.document.is_dirty = false;
+        self.last_change = None;
     }
 
     pub fn undo(&mut self) -> bool {
@@ -780,6 +1162,7 @@ impl InputState {
     }
 
     pub fn update(&mut self, msg: InputMsg) -> bool {
+        self.last_change = None;
         match msg {
             InputMsg::InsertChar(ch) => self.insert_text(&ch.to_string()),
             InputMsg::InsertText(text) => self.insert_text(&text),
@@ -1516,6 +1899,12 @@ where
     node
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct HighlightRun {
+    range: Range<usize>,
+    style: Style,
+}
+
 /// Snapshot of the input plus styling information passed to the renderer.
 #[derive(Clone, Debug)]
 struct InputRenderable {
@@ -1531,13 +1920,15 @@ struct InputRenderable {
     line_count: usize,
     cursor_line: usize,
     len_chars: usize,
+    highlight_store: HighlightStore,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 enum RunStyle {
     Base,
     Selection,
     Cursor,
+    Highlight(Style),
 }
 
 impl InputRenderable {
@@ -1587,6 +1978,7 @@ impl InputRenderable {
             line_count,
             cursor_line,
             len_chars,
+            highlight_store: state.highlights.clone(),
         }
     }
 
@@ -1627,13 +2019,56 @@ impl InputRenderable {
             .sum()
     }
 
-    fn run_style_for_index(&self, idx: usize) -> RunStyle {
+    fn highlight_runs(&self) -> Vec<HighlightRun> {
+        let mut runs: Vec<HighlightRun> = Vec::new();
+        for run in self
+            .highlight_store
+            .resolved_runs(&self.base_style, 0..self.len_chars)
+        {
+            if let Some(last) = runs.last_mut()
+                && last.range.end == run.range.start
+                && last.style == run.style
+            {
+                last.range.end = run.range.end;
+                continue;
+            }
+            runs.push(run);
+        }
+        runs
+    }
+
+    fn highlight_style_at(runs: &[HighlightRun], idx: usize) -> Option<&Style> {
+        if runs.is_empty() {
+            return None;
+        }
+
+        let mut left = 0;
+        let mut right = runs.len();
+        while left < right {
+            let mid = (left + right) / 2;
+            let run = &runs[mid];
+            if idx < run.range.start {
+                right = mid;
+            } else if idx >= run.range.end {
+                left = mid + 1;
+            } else {
+                return Some(&run.style);
+            }
+        }
+
+        None
+    }
+
+    fn run_style_for_index(&self, idx: usize, highlight_runs: &[HighlightRun]) -> RunStyle {
         if let Some((start, end)) = self.selection {
             if idx >= start && idx < end {
                 return RunStyle::Selection;
             }
         } else if idx == self.cursor && self.cursor < self.len_chars {
             return RunStyle::Cursor;
+        }
+        if let Some(style) = Self::highlight_style_at(highlight_runs, idx) {
+            return RunStyle::Highlight(style.clone());
         }
         RunStyle::Base
     }
@@ -1661,7 +2096,7 @@ impl InputRenderable {
             return;
         }
 
-        let style = match *run_style {
+        let style_ref = match run_style.as_ref() {
             Some(style) => style,
             None => {
                 run_text.clear();
@@ -1671,15 +2106,17 @@ impl InputRenderable {
             }
         };
 
-        let attrs = match style {
-            RunStyle::Base => base_attrs,
-            RunStyle::Selection => selection_attrs,
-            RunStyle::Cursor => cursor_attrs,
-        };
+        match style_ref {
+            RunStyle::Base => ctx.write_text(*run_start_x, y, run_text, base_attrs),
+            RunStyle::Selection => ctx.write_text(*run_start_x, y, run_text, selection_attrs),
+            RunStyle::Cursor => ctx.write_text(*run_start_x, y, run_text, cursor_attrs),
+            RunStyle::Highlight(highlight_style) => {
+                let attrs = ctx.style_to_attributes(highlight_style);
+                ctx.write_text(*run_start_x, y, run_text, &attrs);
+            }
+        }
 
-        ctx.write_text(*run_start_x, y, run_text, attrs);
-
-        if style == RunStyle::Cursor && cursor_position.is_none() {
+        if matches!(style_ref, RunStyle::Cursor) && cursor_position.is_none() {
             cursor_position.replace((*run_start_x, y));
         }
 
@@ -1738,7 +2175,7 @@ impl InputRenderable {
                 break;
             }
 
-            if *run_style != Some(RunStyle::Cursor) {
+            if !matches!(run_style.as_ref(), Some(RunStyle::Cursor)) {
                 Self::flush_run(
                     ctx,
                     run_style,
@@ -1778,7 +2215,7 @@ impl InputRenderable {
                 if *remaining == 0 {
                     break;
                 }
-                if *run_style != Some(RunStyle::Cursor) {
+                if !matches!(run_style.as_ref(), Some(RunStyle::Cursor)) {
                     *run_style = Some(RunStyle::Cursor);
                     *run_start_x = *cursor_x;
                 }
@@ -1812,24 +2249,29 @@ impl InputRenderable {
 
 impl Renderable for InputRenderable {
     fn eq(&self, other: &dyn Renderable) -> bool {
-        other
-            .as_any()
-            .downcast_ref::<Self>()
-            .map(|o| {
-                o.rope == self.rope
-                    && o.cursor == self.cursor
-                    && o.selection == self.selection
-                    && o.base_style == self.base_style
-                    && o.selection_style == self.selection_style
-                    && o.cursor_style == self.cursor_style
-                    && o.cursor_symbol == self.cursor_symbol
-                    && o.cursor_symbol_width == self.cursor_symbol_width
-                    && o.max_width == self.max_width
-                    && o.line_count == self.line_count
-                    && o.cursor_line == self.cursor_line
-                    && o.len_chars == self.len_chars
-            })
-            .unwrap_or(false)
+        let Some(o) = other.as_any().downcast_ref::<Self>() else {
+            return false;
+        };
+
+        if o.rope != self.rope
+            || o.cursor != self.cursor
+            || o.selection != self.selection
+            || o.base_style != self.base_style
+            || o.selection_style != self.selection_style
+            || o.cursor_style != self.cursor_style
+            || o.cursor_symbol != self.cursor_symbol
+            || o.cursor_symbol_width != self.cursor_symbol_width
+            || o.max_width != self.max_width
+            || o.line_count != self.line_count
+            || o.cursor_line != self.cursor_line
+            || o.len_chars != self.len_chars
+        {
+            return false;
+        }
+
+        let self_runs = self.highlight_runs();
+        let other_runs = o.highlight_runs();
+        self_runs.iter().eq(other_runs.iter())
     }
 
     fn measure(
@@ -1863,6 +2305,8 @@ impl Renderable for InputRenderable {
         let base_attrs = ctx.style_to_attributes(&self.base_style);
         let selection_attrs = ctx.style_to_attributes(&self.selection_style);
         let cursor_attrs = ctx.style_to_attributes(&self.cursor_style);
+        let highlight_runs_ref = self.highlight_runs();
+        let highlight_runs: &[HighlightRun] = &highlight_runs_ref;
 
         let blank_line = " ".repeat(area.width);
         let mut cursor_position: Option<(usize, usize)> = None;
@@ -1897,10 +2341,10 @@ impl Renderable for InputRenderable {
             let mut idx = line_start;
             while idx < line_end {
                 let ch = self.rope.char(idx);
-                let style = self.run_style_for_index(idx);
+                let style = self.run_style_for_index(idx, highlight_runs);
 
                 if ch == '\n' {
-                    if style == RunStyle::Cursor && self.selection.is_none() {
+                    if matches!(style, RunStyle::Cursor) && self.selection.is_none() {
                         Self::flush_run(
                             ctx,
                             &mut run_style,
@@ -1950,7 +2394,7 @@ impl Renderable for InputRenderable {
                     line_skip = 0;
                 }
 
-                if run_style != Some(style) {
+                if !run_style.as_ref().is_some_and(|current| current == &style) {
                     Self::flush_run(
                         ctx,
                         &mut run_style,
@@ -1968,7 +2412,7 @@ impl Renderable for InputRenderable {
                     if remaining == 0 {
                         break;
                     }
-                    run_style = Some(style);
+                    run_style = Some(style.clone());
                     run_start_x = cursor_x;
                 }
 
@@ -2009,13 +2453,13 @@ impl Renderable for InputRenderable {
                         break;
                     }
                     if run_style.is_none() {
-                        run_style = Some(style);
+                        run_style = Some(style.clone());
                         run_start_x = cursor_x;
                     }
                 }
 
                 if run_style.is_none() {
-                    run_style = Some(style);
+                    run_style = Some(style.clone());
                     run_start_x = cursor_x;
                 }
 
@@ -2507,6 +2951,188 @@ mod tests {
                 shape: CursorShape::BlinkingBar
             }
         );
+    }
+
+    #[test]
+    fn highlight_layer_produces_runs() {
+        let mut state = InputState::with_value("hello");
+        state.set_highlight_layer(
+            HighlightLayerId::new(1),
+            0,
+            [HighlightSpan::new(1..4, Style::fg(Color::BrightRed))],
+        );
+
+        let style = InputStyle::default();
+        let renderable = InputRenderable::new(&state, &style);
+        let expected_style = style.text.clone().merged(&Style::fg(Color::BrightRed));
+
+        let runs = renderable.highlight_runs();
+        assert_eq!(
+            &runs[..],
+            &[HighlightRun {
+                range: 1..4,
+                style: expected_style,
+            }]
+        );
+    }
+
+    #[test]
+    fn highlight_layers_respect_priority() {
+        let mut state = InputState::with_value("hello");
+        let mut base_layer_style = Style::default();
+        base_layer_style.bg = Some(Color::Blue);
+        let mut overlay_style = Style::default();
+        overlay_style.fg = Some(Color::Yellow);
+        overlay_style.bold = true;
+
+        state.set_highlight_layer(
+            HighlightLayerId::new(1),
+            0,
+            [HighlightSpan::new(0..5, base_layer_style.clone())],
+        );
+        state.set_highlight_layer(
+            HighlightLayerId::new(2),
+            10,
+            [HighlightSpan::new(0..5, overlay_style.clone())],
+        );
+
+        let style = InputStyle::default();
+        let renderable = InputRenderable::new(&state, &style);
+        let expected_style = style
+            .text
+            .clone()
+            .merged(&base_layer_style)
+            .merged(&overlay_style);
+
+        let runs = renderable.highlight_runs();
+        assert_eq!(
+            &runs[..],
+            &[HighlightRun {
+                range: 0..5,
+                style: expected_style,
+            }]
+        );
+    }
+
+    #[test]
+    fn highlight_shifts_with_insertion_before_span() {
+        let mut state = InputState::with_value("hello");
+        state.set_highlight_layer(
+            HighlightLayerId::new(1),
+            0,
+            [HighlightSpan::new(0..5, Style::fg(Color::BrightRed))],
+        );
+
+        state.update(InputMsg::MoveToStart { extend: false });
+        state.update(InputMsg::InsertChar('!'));
+
+        let style = InputStyle::default();
+        let mut expected_style = style.text.clone();
+        expected_style.apply_overlay(&Style::fg(Color::BrightRed));
+
+        let renderable = InputRenderable::new(&state, &style);
+
+        let runs = renderable.highlight_runs();
+        assert_eq!(
+            &runs[..],
+            &[HighlightRun {
+                range: 1..6,
+                style: expected_style,
+            }]
+        );
+    }
+
+    #[test]
+    fn highlight_expands_with_insertion_inside_span() {
+        let mut state = InputState::with_value("hello");
+        state.set_highlight_layer(
+            HighlightLayerId::new(1),
+            0,
+            [HighlightSpan::new(0..5, Style::fg(Color::BrightBlue))],
+        );
+
+        state.update(InputMsg::MoveToStart { extend: false });
+        state.update(InputMsg::MoveRight { extend: false });
+        state.update(InputMsg::MoveRight { extend: false });
+        state.update(InputMsg::InsertChar('!'));
+
+        let style = InputStyle::default();
+        let mut expected_style = style.text.clone();
+        expected_style.apply_overlay(&Style::fg(Color::BrightBlue));
+
+        let renderable = InputRenderable::new(&state, &style);
+
+        let runs = renderable.highlight_runs();
+        assert_eq!(
+            &runs[..],
+            &[HighlightRun {
+                range: 0..6,
+                style: expected_style,
+            }]
+        );
+    }
+
+    #[test]
+    fn highlight_contracts_with_deletion_inside_span() {
+        let mut state = InputState::with_value("hello");
+        state.set_highlight_layer(
+            HighlightLayerId::new(1),
+            0,
+            [HighlightSpan::new(0..5, Style::fg(Color::Cyan))],
+        );
+
+        state.update(InputMsg::MoveToStart { extend: false });
+        state.update(InputMsg::MoveRight { extend: false });
+        state.update(InputMsg::MoveRight { extend: false });
+        state.update(InputMsg::DeleteBackward);
+
+        let style = InputStyle::default();
+        let mut expected_style = style.text.clone();
+        expected_style.apply_overlay(&Style::fg(Color::Cyan));
+
+        let renderable = InputRenderable::new(&state, &style);
+
+        let runs = renderable.highlight_runs();
+        assert_eq!(
+            &runs[..],
+            &[HighlightRun {
+                range: 0..4,
+                style: expected_style,
+            }]
+        );
+    }
+
+    #[test]
+    fn highlight_removed_when_span_deleted() {
+        let mut state = InputState::with_value("hello");
+        state.set_highlight_layer(
+            HighlightLayerId::new(1),
+            0,
+            [HighlightSpan::new(1..4, Style::fg(Color::BrightGreen))],
+        );
+
+        state.set_selection(1, 4);
+        state.update(InputMsg::DeleteBackward);
+
+        let style = InputStyle::default();
+        let renderable = InputRenderable::new(&state, &style);
+
+        assert!(renderable.highlight_runs().is_empty());
+    }
+
+    #[test]
+    fn clearing_highlights_removes_runs() {
+        let mut state = InputState::with_value("hello");
+        state.set_highlight_layer(
+            HighlightLayerId::new(1),
+            0,
+            [HighlightSpan::new(0..5, Style::fg(Color::BrightGreen))],
+        );
+        state.clear_highlights();
+
+        let style = InputStyle::default();
+        let renderable = InputRenderable::new(&state, &style);
+        assert!(renderable.highlight_runs().is_empty());
     }
 
     #[test]

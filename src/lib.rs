@@ -25,8 +25,8 @@ pub use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};
 pub use crate::geometry::{Point, Rect};
 pub use crate::program::{EventFn, Program, Transition, UpdateFn, ViewFn};
 pub use components::input::{
-    InputMode, InputMsg, InputState, InputStyle, default_keybindings as default_input_keybindings,
-    input,
+    HighlightLayerId, HighlightSpan, InputMode, InputMsg, InputState, InputStyle,
+    default_keybindings as default_input_keybindings, input,
 };
 pub use components::scroll::{ScrollMsg, ScrollState, scrollable_content};
 pub use components::tree::{TreeMsg, TreeNode, TreeNodeKind, TreeState, TreeStyle, tree_view};
