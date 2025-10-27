@@ -50,7 +50,7 @@ pub trait Renderable: fmt::Debug + 'static {
     fn as_any(&self) -> &dyn Any;
 }
 
-pub type RenderableNode = Rc<dyn Renderable>;
+pub type RenderableNode = Box<dyn Renderable>;
 
 pub struct Node<Msg> {
     classname: &'static str,
@@ -86,19 +86,6 @@ impl<Msg> fmt::Debug for Node<Msg> {
     }
 }
 
-impl<Msg> PartialEq for Node<Msg> {
-    fn eq(&self, other: &Self) -> bool {
-        self.content == other.content
-            && self.classname == other.classname
-            && self.id == other.id
-            && self.layout_state == other.layout_state
-            && self.on_mouse.is_some() == other.on_mouse.is_some()
-            && self.pending_scroll.is_some() == other.pending_scroll.is_some()
-            && (self.scroll_x - other.scroll_x).abs() < f32::EPSILON
-            && (self.scroll_y - other.scroll_y).abs() < f32::EPSILON
-    }
-}
-
 pub enum NodeContent<Msg> {
     Element(ElementNode<Msg>),
     Text(TextNode),
@@ -111,17 +98,6 @@ impl<Msg> fmt::Debug for NodeContent<Msg> {
             Self::Element(e) => f.debug_tuple("Element").field(e).finish(),
             Self::Text(t) => f.debug_tuple("Text").field(t).finish(),
             Self::Renderable(l) => f.debug_tuple("Renderable").field(l).finish(),
-        }
-    }
-}
-
-impl<Msg> PartialEq for NodeContent<Msg> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Element(a), Self::Element(b)) => a == b,
-            (Self::Text(a), Self::Text(b)) => a == b,
-            (Self::Renderable(a), Self::Renderable(b)) => Rc::ptr_eq(a, b) || a.eq(&**b),
-            _ => false,
         }
     }
 }
@@ -164,15 +140,6 @@ impl<Msg> fmt::Debug for ElementNode<Msg> {
             .field("children_len", &self.children.len())
             .field("title", &self.title)
             .finish()
-    }
-}
-
-impl<Msg> PartialEq for ElementNode<Msg> {
-    fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
-            && self.attrs == other.attrs
-            && self.children == other.children
-            && self.title == other.title
     }
 }
 
@@ -288,7 +255,7 @@ pub fn rich_text<Msg>(spans: impl Into<Vec<TextSpan>>) -> Node<Msg> {
 }
 
 pub fn renderable<Msg>(widget: impl Renderable + 'static) -> Node<Msg> {
-    Node::new(NodeContent::Renderable(Rc::new(widget)))
+    Node::new(NodeContent::Renderable(Box::new(widget)))
 }
 
 pub fn column<Msg>(children: Vec<Node<Msg>>) -> Node<Msg> {
@@ -1120,13 +1087,17 @@ mod tests {
 
     #[test]
     fn column_node_wraps_children() {
-        let child = || text::<()>("child");
-        let node = column(vec![child()]);
+        let node = column(vec![text::<()>("child")]);
 
-        match node.into_element() {
+        match node.as_element() {
             Some(element) => {
                 assert_eq!(element.kind, ElementKind::Column);
-                assert_eq!(element.children, vec![child()]);
+                assert_eq!(element.children.len(), 1);
+                let text_child = element.children[0].as_text().expect("expected text child");
+                assert_eq!(
+                    text_child.spans(),
+                    &[TextSpan::new("child", Style::default())]
+                );
                 assert_eq!(element.attrs, Attributes::default());
             }
             None => panic!("expected element node"),
@@ -1135,13 +1106,17 @@ mod tests {
 
     #[test]
     fn row_node_wraps_children() {
-        let child = || text::<()>("row child");
-        let node = row(vec![child()]);
+        let node = row(vec![text::<()>("row child")]);
 
-        match node.into_element() {
+        match node.as_element() {
             Some(element) => {
                 assert_eq!(element.kind, ElementKind::Row);
-                assert_eq!(element.children, vec![child()]);
+                assert_eq!(element.children.len(), 1);
+                let text_child = element.children[0].as_text().expect("expected text child");
+                assert_eq!(
+                    text_child.spans(),
+                    &[TextSpan::new("row child", Style::default())]
+                );
             }
             None => panic!("expected element node"),
         }
@@ -1149,12 +1124,16 @@ mod tests {
 
     #[test]
     fn modal_node_configures_overlay() {
-        let child = || text::<()>("modal child");
-        let node = modal(vec![child()]);
+        let node = modal(vec![text::<()>("modal child")]);
 
         let element = node.as_element().expect("expected element node");
         assert_eq!(element.kind, ElementKind::Modal);
-        assert_eq!(element.children, vec![child()]);
+        assert_eq!(element.children.len(), 1);
+        let text_child = element.children[0].as_text().expect("expected text child");
+        assert_eq!(
+            text_child.spans(),
+            &[TextSpan::new("modal child", Style::default())]
+        );
         // Check that modal has a semi-transparent background instead of dim
         assert_eq!(element.attrs.style.bg, Some(Color::rgba(0, 0, 0, 8)));
 
@@ -1206,8 +1185,13 @@ mod tests {
         let b: Node<()> = renderable(DummyRenderable::new("widget", 3.0, 1.0));
         let c: Node<()> = renderable(DummyRenderable::new("widget", 4.0, 1.0));
 
-        assert_eq!(a, b);
-        assert_ne!(a, c);
+        let renderable_a = a.as_renderable().expect("expected renderable node");
+        let renderable_b = b.as_renderable().expect("expected renderable node");
+        let renderable_c = c.as_renderable().expect("expected renderable node");
+
+        assert!(renderable_a.eq(renderable_b));
+        assert!(renderable_b.eq(renderable_a));
+        assert!(!renderable_a.eq(renderable_c));
     }
 
     #[test]
