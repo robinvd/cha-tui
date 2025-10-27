@@ -353,6 +353,8 @@ pub enum TreeMsg<Id> {
     ToggleExpand(Id),
     /// Activate a node (select, focus, etc.).
     Activate(Id),
+    /// Triggered on row double-clicks.
+    DoubleClick(Id),
 }
 
 pub fn tree_view<Msg, Id>(
@@ -435,11 +437,7 @@ where
         let item_id = visible.id.clone();
         node = node.on_mouse(move |event: MouseEvent| {
             if event.is_double_click() {
-                // if is_branch {
-                Some(mouse_map(TreeMsg::Activate(item_id.clone())))
-                // } else {
-                //     Some(mouse_map(TreeMsg::ToggleExpand(item_id.clone())))
-                // }
+                Some(mouse_map(TreeMsg::DoubleClick(item_id.clone())))
             } else if event.is_single_click() {
                 if is_branch {
                     Some(mouse_map(TreeMsg::ToggleExpand(item_id.clone())))
@@ -677,7 +675,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_double_click_emits_activate_for_branch() {
+    fn mouse_double_click_on_branch_emits_double_click() {
         let state = tree();
         let style = TreeStyle::default();
         let root_node = tree_view("tree", &state, &style, |msg| msg, true);
@@ -688,7 +686,7 @@ mod tests {
         event.click_count = 2;
 
         let message = row.mouse_message(event);
-        assert_eq!(message, Some(TreeMsg::Activate("root")));
+        assert_eq!(message, Some(TreeMsg::DoubleClick("root")));
     }
 
     #[test]
@@ -724,7 +722,7 @@ mod tests {
     }
 
     #[test]
-    fn mouse_double_click_on_leaf_emits_activate() {
+    fn mouse_double_click_on_leaf_emits_double_click() {
         let mut state = tree();
         state.expand_all();
         let style = TreeStyle::default();
@@ -736,7 +734,7 @@ mod tests {
         event.click_count = 2;
 
         let message = leaf_row.mouse_message(event);
-        assert_eq!(message, Some(TreeMsg::Activate("file")));
+        assert_eq!(message, Some(TreeMsg::DoubleClick("file")));
     }
 
     #[test]

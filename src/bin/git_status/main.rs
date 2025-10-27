@@ -1763,13 +1763,14 @@ impl Model {
                     self.toggle_stage_for_id(focus, &id);
                     Transition::Continue
                 }
-            } // TreeMsg::DoubleClick(id) => {
-              //     self.focus = focus;
-              //     self.select_tree_id(focus, &id);
-              //     self.queue_scroll_for_focus(focus);
-              //     self.toggle_stage_for_id(focus, &id);
-              //     Transition::Continue
-              // }
+            }
+            TreeMsg::DoubleClick(id) => {
+                self.focus = focus;
+                self.select_tree_id(focus, &id);
+                self.queue_scroll_for_focus(focus);
+                self.toggle_stage_for_id(focus, &id);
+                Transition::Continue
+            }
         }
     }
 
