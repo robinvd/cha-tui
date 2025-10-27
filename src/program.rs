@@ -376,12 +376,12 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
     fn rebuild_view(&mut self) {
         let new_view = (self.view)(&self.model);
 
-        if let Some(current_view) = self.current_view.as_mut() {
-            if let crate::dom::patch::PatchResult::Replaced(replacement) =
-                crate::dom::patch::patch(current_view, new_view)
-            {
-                *current_view = *replacement;
-            }
+        if let Some(existing_view) = self.current_view.take() {
+            let patched = crate::dom::patch::patch(existing_view, new_view);
+            self.current_view = Some(match patched {
+                crate::dom::patch::PatchResult::Patched { node, .. } => node,
+                crate::dom::patch::PatchResult::Replaced(replacement) => replacement,
+            });
         } else {
             self.current_view = Some(new_view);
         }

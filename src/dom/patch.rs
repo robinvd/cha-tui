@@ -1,8 +1,11 @@
 use crate::dom::{ElementNode, Node, NodeContent};
 
 pub enum PatchResult<Msg> {
-    Patched { layout_changed: bool },
-    Replaced(Box<Node<Msg>>),
+    Patched {
+        node: Node<Msg>,
+        layout_changed: bool,
+    },
+    Replaced(Node<Msg>),
 }
 
 /// Attempts to patch `existing` in place using the structure from `new_node`.
@@ -11,9 +14,9 @@ pub enum PatchResult<Msg> {
 /// layout needs recomputing when the node could be updated in place. If the
 /// incoming node cannot be merged with the existing one, [`PatchResult::Replaced`]
 /// is returned containing the new node to install instead.
-pub fn patch<Msg>(existing: &mut Node<Msg>, new_node: Node<Msg>) -> PatchResult<Msg> {
-    if !can_patch(existing, &new_node) {
-        return PatchResult::Replaced(Box::new(new_node));
+pub fn patch<Msg>(mut existing: Node<Msg>, new_node: Node<Msg>) -> PatchResult<Msg> {
+    if !can_patch(&existing, &new_node) {
+        return PatchResult::Replaced(new_node);
     }
 
     let Node {
@@ -68,7 +71,10 @@ pub fn patch<Msg>(existing: &mut Node<Msg>, new_node: Node<Msg>) -> PatchResult<
         existing.layout_state.cache.clear();
     }
 
-    PatchResult::Patched { layout_changed }
+    PatchResult::Patched {
+        node: existing,
+        layout_changed,
+    }
 }
 
 fn can_patch<Msg>(existing: &Node<Msg>, new_node: &Node<Msg>) -> bool {
@@ -138,19 +144,19 @@ fn patch_children<Msg>(
 
     for (index, new_child) in new_children.into_iter().enumerate() {
         if let Some(existing_child) = take_matching_child(&mut remaining, &new_child, index) {
-            let mut existing_child = existing_child;
-            match patch(&mut existing_child, new_child) {
+            match patch(existing_child, new_child) {
                 PatchResult::Patched {
+                    node,
                     layout_changed: child_layout_changed,
                 } => {
                     if child_layout_changed {
                         layout_changed = true;
                     }
-                    next_children.push(existing_child);
+                    next_children.push(node);
                 }
                 PatchResult::Replaced(replacement) => {
                     layout_changed = true;
-                    next_children.push(*replacement);
+                    next_children.push(replacement);
                 }
             }
         } else {
@@ -224,41 +230,49 @@ mod tests {
 
     #[test]
     fn identical_nodes_do_not_trigger_layout_change() {
-        let mut existing: Node<()> = column(vec![text("a").with_id("child")]).with_id("root");
+        let existing: Node<()> = column(vec![text("a").with_id("child")]).with_id("root");
         let fresh: Node<()> = column(vec![text("a").with_id("child")]).with_id("root");
 
-        match patch(&mut existing, fresh) {
-            PatchResult::Patched { layout_changed } => {
+        let patched = match patch(existing, fresh) {
+            PatchResult::Patched {
+                node,
+                layout_changed,
+            } => {
                 assert!(!layout_changed);
+                node
             }
             PatchResult::Replaced(_) => panic!("expected patch"),
-        }
-        assert_eq!(existing.as_element().unwrap().children.len(), 1);
+        };
+        assert_eq!(patched.as_element().unwrap().children.len(), 1);
     }
 
     #[test]
     fn text_change_marks_layout_dirty() {
-        let mut existing: Node<()> = text("short").with_id("text");
+        let existing: Node<()> = text("short").with_id("text");
         let fresh: Node<()> = text("longer text").with_id("text");
 
-        match patch(&mut existing, fresh) {
-            PatchResult::Patched { layout_changed } => {
+        let patched = match patch(existing, fresh) {
+            PatchResult::Patched {
+                node,
+                layout_changed,
+            } => {
                 assert!(layout_changed);
+                node
             }
             PatchResult::Replaced(_) => panic!("expected patch"),
-        }
+        };
         assert_eq!(
-            existing.as_text().expect("text node").spans()[0].content,
+            patched.as_text().expect("text node").spans()[0].content,
             "longer text"
         );
     }
 
     #[test]
     fn replaces_mismatched_nodes() {
-        let mut existing: Node<()> = column(vec![]).with_id("root");
+        let existing: Node<()> = column(vec![]).with_id("root");
         let fresh: Node<()> = text("hi").with_id("root");
 
-        match patch(&mut existing, fresh) {
+        match patch(existing, fresh) {
             PatchResult::Patched { .. } => panic!("expected replacement"),
             PatchResult::Replaced(_) => {}
         }
