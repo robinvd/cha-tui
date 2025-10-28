@@ -49,6 +49,8 @@ pub enum KeyCode {
     Down,
     PageUp,
     PageDown,
+    Home,
+    End,
     Tab,
 }
 

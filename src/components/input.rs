@@ -2457,26 +2457,22 @@ impl Renderable for InputRenderable {
 
             let line_idx = scroll_y + row;
             if line_idx >= self.line_count {
-                if gutter_width > 0 {
-                    if let Some(mut text) = self.gutter_text(line_idx) {
-                        if text.len() > gutter_width {
-                            let start = text.len() - gutter_width;
-                            text.replace_range(..start, "");
-                        }
-                        ctx.write_text(area.x, y, &text, &gutter_attrs);
-                    }
-                }
-                continue;
-            }
-
-            if gutter_width > 0 {
-                if let Some(mut text) = self.gutter_text(line_idx) {
+                if gutter_width > 0 && let Some(mut text) = self.gutter_text(line_idx) {
                     if text.len() > gutter_width {
                         let start = text.len() - gutter_width;
                         text.replace_range(..start, "");
                     }
                     ctx.write_text(area.x, y, &text, &gutter_attrs);
                 }
+                continue;
+            }
+
+            if gutter_width > 0 && let Some(mut text) = self.gutter_text(line_idx) {
+                if text.len() > gutter_width {
+                    let start = text.len() - gutter_width;
+                    text.replace_range(..start, "");
+                }
+                ctx.write_text(area.x, y, &text, &gutter_attrs);
             }
 
             let mut remaining = area.width.saturating_sub(gutter_width);
@@ -2716,6 +2712,24 @@ pub fn default_keybindings<UpdateMsg>(
         }
         KeyCode::Left => Some(InputMsg::MoveLeft { extend: key.shift }),
         KeyCode::Right => Some(InputMsg::MoveRight { extend: key.shift }),
+        KeyCode::Home => {
+            if key.ctrl {
+                Some(InputMsg::MoveToStart { extend: key.shift })
+            } else if state.is_multiline() {
+                Some(InputMsg::MoveLineStart { extend: key.shift })
+            } else {
+                Some(InputMsg::MoveToStart { extend: key.shift })
+            }
+        }
+        KeyCode::End => {
+            if key.ctrl {
+                Some(InputMsg::MoveToEnd { extend: key.shift })
+            } else if state.is_multiline() {
+                Some(InputMsg::MoveLineEnd { extend: key.shift })
+            } else {
+                Some(InputMsg::MoveToEnd { extend: key.shift })
+            }
+        }
         KeyCode::Up if !key.ctrl && !key.alt && state.is_multiline() => {
             Some(InputMsg::MoveUp { extend: key.shift })
         }
@@ -3055,6 +3069,48 @@ mod tests {
         assert!(matches!(
             default_keybindings(&state, ctrl_e, |m| m),
             Some(InputMsg::MoveToEnd { extend: false })
+        ));
+    }
+
+    #[test]
+    fn default_keybindings_home_end_single_line_move_buffer_bounds() {
+        let state = InputState::default();
+        let home = Key::new(KeyCode::Home);
+        let shift_end = Key::with_modifiers(KeyCode::End, false, false, true);
+
+        assert!(matches!(
+            default_keybindings(&state, home, |m| m),
+            Some(InputMsg::MoveToStart { extend: false })
+        ));
+        assert!(matches!(
+            default_keybindings(&state, shift_end, |m| m),
+            Some(InputMsg::MoveToEnd { extend: true })
+        ));
+    }
+
+    #[test]
+    fn default_keybindings_home_end_multiline_respect_ctrl() {
+        let state = InputState::new_multiline();
+        let home = Key::new(KeyCode::Home);
+        let ctrl_home = Key::with_modifiers(KeyCode::Home, true, false, false);
+        let end = Key::new(KeyCode::End);
+        let ctrl_shift_end = Key::with_modifiers(KeyCode::End, true, false, true);
+
+        assert!(matches!(
+            default_keybindings(&state, home, |m| m),
+            Some(InputMsg::MoveLineStart { extend: false })
+        ));
+        assert!(matches!(
+            default_keybindings(&state, ctrl_home, |m| m),
+            Some(InputMsg::MoveToStart { extend: false })
+        ));
+        assert!(matches!(
+            default_keybindings(&state, end, |m| m),
+            Some(InputMsg::MoveLineEnd { extend: false })
+        ));
+        assert!(matches!(
+            default_keybindings(&state, ctrl_shift_end, |m| m),
+            Some(InputMsg::MoveToEnd { extend: true })
         ));
     }
 

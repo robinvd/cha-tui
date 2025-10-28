@@ -692,6 +692,8 @@ fn map_key_code(code: termina::event::KeyCode) -> Option<KeyCode> {
         TnKeyCode::Down => Some(KeyCode::Down),
         TnKeyCode::PageUp => Some(KeyCode::PageUp),
         TnKeyCode::PageDown => Some(KeyCode::PageDown),
+        TnKeyCode::Home => Some(KeyCode::Home),
+        TnKeyCode::End => Some(KeyCode::End),
         TnKeyCode::Tab => Some(KeyCode::Tab),
         _ => None,
     }
