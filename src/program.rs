@@ -690,6 +690,8 @@ fn map_key_code(code: termina::event::KeyCode) -> Option<KeyCode> {
         TnKeyCode::Right => Some(KeyCode::Right),
         TnKeyCode::Up => Some(KeyCode::Up),
         TnKeyCode::Down => Some(KeyCode::Down),
+        TnKeyCode::PageUp => Some(KeyCode::PageUp),
+        TnKeyCode::PageDown => Some(KeyCode::PageDown),
         TnKeyCode::Tab => Some(KeyCode::Tab),
         _ => None,
     }
@@ -933,6 +935,18 @@ mod tests {
     fn focus_in_event_is_exposed() {
         let event = super::convert_input_event(termina::Event::FocusIn);
         assert_eq!(event, Some(Event::FocusGained));
+    }
+
+    #[test]
+    fn page_navigation_keys_are_mapped() {
+        assert_eq!(
+            super::map_key_code(termina::event::KeyCode::PageUp),
+            Some(KeyCode::PageUp)
+        );
+        assert_eq!(
+            super::map_key_code(termina::event::KeyCode::PageDown),
+            Some(KeyCode::PageDown)
+        );
     }
 
     #[derive(Default)]

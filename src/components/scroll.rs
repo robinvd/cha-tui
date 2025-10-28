@@ -76,8 +76,8 @@ impl ScrollState {
 
 #[derive(Clone, Copy, Debug)]
 pub enum ScrollMsg {
-    Delta(i32),
     AxisDelta { axis: ScrollAxis, amount: i32 },
+    AxisDeltaPercent { axis: ScrollAxis, ratio: f64 },
     Resize { viewport: Size, content: Size },
     JumpTo(f32),
     AxisJumpTo { axis: ScrollAxis, offset: f32 },
@@ -165,11 +165,8 @@ impl ScrollState {
 
     pub fn update(&mut self, msg: ScrollMsg) {
         match msg {
-            ScrollMsg::Delta(delta) => {
-                let axis = self.primary_axis();
-                self.apply_delta(axis, delta);
-            }
             ScrollMsg::AxisDelta { axis, amount } => self.apply_delta(axis, amount),
+            ScrollMsg::AxisDeltaPercent { axis, ratio } => self.apply_delta_percent(axis, ratio),
             ScrollMsg::Resize { viewport, content } => {
                 self.viewport = viewport;
                 self.content = content;
@@ -233,6 +230,16 @@ impl ScrollState {
         self.apply_delta_internal(axis, delta, now);
     }
 
+    fn apply_delta_percent(&mut self, axis: ScrollAxis, ratio: f64) {
+        let size = match axis {
+            ScrollAxis::Vertical => self.viewport.height,
+            ScrollAxis::Horizontal => self.viewport.width,
+        };
+
+        let delta = (size as f64 * ratio).round() as i32;
+
+        self.apply_delta(axis, delta);
+    }
     fn apply_delta_internal(&mut self, axis: ScrollAxis, delta: i32, now: Instant) {
         if !self.should_handle_axis(axis, now) {
             return;
@@ -377,7 +384,10 @@ pub fn scrollable_content<Msg>(
             } else {
                 step
             };
-            Some(mouse_handler(ScrollMsg::Delta(delta)))
+            Some(mouse_handler(ScrollMsg::AxisDelta {
+                axis: ScrollAxis::Vertical,
+                amount: delta,
+            }))
         }
         ScrollBehavior::Horizontal => {
             let wheel_triggered =
@@ -390,7 +400,10 @@ pub fn scrollable_content<Msg>(
             } else {
                 step
             };
-            Some(mouse_handler(ScrollMsg::Delta(delta)))
+            Some(mouse_handler(ScrollMsg::AxisDelta {
+                axis: ScrollAxis::Horizontal,
+                amount: delta,
+            }))
         }
         ScrollBehavior::Both => {
             if event.buttons.horz_wheel || (event.buttons.vert_wheel && event.shift) {

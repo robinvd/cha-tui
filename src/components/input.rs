@@ -1003,6 +1003,10 @@ impl InputState {
         self.document.is_dirty = true;
     }
 
+    pub fn revision(&self) -> u64 {
+        self.document.revision
+    }
+
     fn rope_slice_to_string(&self, range: Range<usize>) -> String {
         self.document.rope.slice(range).to_string()
     }
@@ -2722,6 +2726,7 @@ pub fn default_keybindings<UpdateMsg>(
             Some(InputMsg::InsertChar('\n'))
         }
         KeyCode::Char(_) => None,
+        KeyCode::PageUp | KeyCode::PageDown => None,
         KeyCode::Enter | KeyCode::Esc | KeyCode::Tab | KeyCode::Up | KeyCode::Down => None,
     }?;
 

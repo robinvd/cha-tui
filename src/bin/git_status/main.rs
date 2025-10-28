@@ -1775,7 +1775,10 @@ impl Model {
     }
 
     fn scroll_diff(&mut self, delta: i32) {
-        self.diff_scroll.update(ScrollMsg::Delta(delta));
+        self.diff_scroll.update(ScrollMsg::AxisDelta {
+            axis: ScrollAxis::Vertical,
+            amount: delta,
+        });
     }
 
     fn scroll_diff_horizontal(&mut self, delta: i32) {
@@ -1786,7 +1789,13 @@ impl Model {
     }
 
     fn scroll_files(&mut self, focus: Focus, delta: i32) {
-        self.update_section_scroll(focus, ScrollMsg::Delta(delta));
+        self.update_section_scroll(
+            focus,
+            ScrollMsg::AxisDelta {
+                axis: ScrollAxis::Vertical,
+                amount: delta,
+            },
+        );
     }
 
     fn scroll_files_in_focus(&mut self, delta: i32) {
@@ -1818,8 +1827,7 @@ impl Model {
     }
 
     fn update_section_scroll(&mut self, focus: Focus, msg: ScrollMsg) {
-        if matches!(msg, ScrollMsg::Delta(_) | ScrollMsg::AxisDelta { .. })
-            && self.tree_state(focus).visible().is_empty()
+        if matches!(msg, ScrollMsg::AxisDelta { .. }) && self.tree_state(focus).visible().is_empty()
         {
             return;
         }
