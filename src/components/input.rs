@@ -26,6 +26,15 @@ impl ViewId {
     }
 }
 
+fn digit_count(mut value: usize) -> usize {
+    let mut digits = 1;
+    while value >= 10 {
+        value /= 10;
+        digits += 1;
+    }
+    digits
+}
+
 impl Default for ViewId {
     fn default() -> Self {
         ViewId::new(0)
@@ -194,19 +203,18 @@ struct Viewport {
 /// Gutter configuration per view (line numbers, breakpoints, etc.).
 #[derive(Clone, Debug, Default)]
 struct GutterState {
-    #[allow(dead_code)]
     width: usize,
-    #[allow(dead_code)]
     kind: GutterKind,
     #[allow(dead_code)]
     markers: Vec<GutterMarker>,
 }
 
 /// Currently a placeholder for future gutter variants.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum GutterKind {
     #[default]
     None,
+    LineNumbers,
 }
 
 /// Gutter marker metadata (line-level markers such as diagnostics).
@@ -214,6 +222,57 @@ enum GutterKind {
 struct GutterMarker {
     #[allow(dead_code)]
     line: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GutterMetrics {
+    kind: GutterKind,
+    width: usize,
+    digits: usize,
+}
+
+impl GutterMetrics {
+    fn none() -> Self {
+        Self {
+            kind: GutterKind::None,
+            width: 0,
+            digits: 0,
+        }
+    }
+}
+
+impl GutterState {
+    fn set_kind(&mut self, kind: GutterKind) {
+        if self.kind != kind {
+            self.kind = kind;
+            self.width = 0;
+        }
+    }
+
+    fn update_width(&mut self, line_count: usize) {
+        self.width = match self.kind {
+            GutterKind::None => 0,
+            GutterKind::LineNumbers => {
+                let digits = digit_count(line_count.max(1));
+                digits + 3
+            }
+        };
+    }
+
+    fn metrics(&self, line_count: usize) -> GutterMetrics {
+        match self.kind {
+            GutterKind::None => GutterMetrics::none(),
+            GutterKind::LineNumbers => {
+                let digits = digit_count(line_count.max(1));
+                let width = digits + 3;
+                GutterMetrics {
+                    kind: self.kind,
+                    width,
+                    digits,
+                }
+            }
+        }
+    }
 }
 
 /// Highlight layers keyed by [`HighlightLayerId`].
@@ -914,6 +973,11 @@ impl InputState {
         caret.anchor = snapshot.anchor;
     }
 
+    fn refresh_gutter_metrics(&mut self) {
+        let line_count = self.line_count();
+        self.primary_view_mut().gutter.update_width(line_count);
+    }
+
     fn commit_edit(&mut self, command: EditCommand) -> bool {
         if command.transaction.is_empty() {
             return false;
@@ -931,6 +995,7 @@ impl InputState {
         self.set_caret_snapshot(command.after);
         self.reset_preferred_column();
         self.ensure_cursor_visible();
+        self.refresh_gutter_metrics();
     }
 
     fn mark_document_dirty(&mut self) {
@@ -991,6 +1056,23 @@ impl InputState {
         self.primary_caret().head
     }
 
+    pub fn set_line_number_gutter(&mut self, enabled: bool) {
+        let kind = if enabled {
+            GutterKind::LineNumbers
+        } else {
+            GutterKind::None
+        };
+        {
+            let gutter = &mut self.primary_view_mut().gutter;
+            gutter.set_kind(kind);
+        }
+        self.refresh_gutter_metrics();
+    }
+
+    pub fn line_number_gutter_enabled(&self) -> bool {
+        matches!(self.primary_view().gutter.kind, GutterKind::LineNumbers)
+    }
+
     pub fn scroll_x(&self) -> usize {
         self.viewport().scroll_x
     }
@@ -1001,6 +1083,10 @@ impl InputState {
 
     pub fn mode(&self) -> InputMode {
         self.mode
+    }
+
+    fn gutter_width(&self) -> usize {
+        self.primary_view().gutter.metrics(self.line_count()).width
     }
 
     pub fn is_multiline(&self) -> bool {
@@ -1045,6 +1131,7 @@ impl InputState {
         self.document.revision = self.document.revision.wrapping_add(1);
         self.document.is_dirty = false;
         self.last_change = None;
+        self.refresh_gutter_metrics();
     }
 
     pub fn set_value(&mut self, value: impl Into<String>) {
@@ -1067,6 +1154,7 @@ impl InputState {
         self.document.revision = self.document.revision.wrapping_add(1);
         self.document.is_dirty = false;
         self.last_change = None;
+        self.refresh_gutter_metrics();
     }
 
     pub fn undo(&mut self) -> bool {
@@ -1381,9 +1469,11 @@ impl InputState {
     }
 
     fn ensure_cursor_visible(&mut self) {
+        let gutter_width = self.gutter_width();
         let viewport_cols = {
             let viewport = self.viewport();
-            viewport.cols.max(1)
+            let content_cols = viewport.cols.saturating_sub(gutter_width);
+            content_cols.max(1)
         };
         let col = self.display_width_between(0, self.cursor());
         {
@@ -1753,6 +1843,7 @@ pub struct InputStyle {
     pub selection: Style,
     pub cursor: Style,
     pub cursor_symbol: &'static str,
+    pub gutter: Style,
 }
 
 impl Default for InputStyle {
@@ -1770,11 +1861,18 @@ impl Default for InputStyle {
             ..Style::default()
         };
 
+        let gutter = Style {
+            fg: Some(Color::BrightBlack),
+            dim: true,
+            ..Style::default()
+        };
+
         Self {
             text: Style::default(),
             selection,
             cursor,
             cursor_symbol: " ",
+            gutter,
         }
     }
 }
@@ -1921,6 +2019,8 @@ struct InputRenderable {
     cursor_line: usize,
     len_chars: usize,
     highlight_store: HighlightStore,
+    gutter_metrics: GutterMetrics,
+    gutter_style: Style,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1932,6 +2032,11 @@ enum RunStyle {
 }
 
 impl InputRenderable {
+    /// Create a new renderable
+    ///
+    /// This should not do any large amount of processing as this in the hot
+    /// path for rendering. For example spans should be sorted when they are
+    /// set and not here.
     fn new(state: &InputState, style: &InputStyle) -> Self {
         let rope = state.document.rope.clone();
         let len_chars = rope.len_chars();
@@ -1955,6 +2060,8 @@ impl InputRenderable {
         };
 
         let line_count = rope.len_lines().max(1);
+        let gutter_metrics = state.primary_view().gutter.metrics(line_count);
+        let gutter_style = style.gutter.clone();
         let cursor_line = rope.char_to_line(cursor);
         let max_width = Self::compute_max_width(
             &rope,
@@ -1963,6 +2070,7 @@ impl InputRenderable {
             cursor_line,
             len_chars,
             cursor_symbol_width,
+            gutter_metrics.width,
         );
 
         Self {
@@ -1979,6 +2087,8 @@ impl InputRenderable {
             cursor_line,
             len_chars,
             highlight_store: state.highlights.clone(),
+            gutter_metrics,
+            gutter_style,
         }
     }
 
@@ -1989,6 +2099,7 @@ impl InputRenderable {
         cursor_line: usize,
         len_chars: usize,
         cursor_symbol_width: usize,
+        gutter_width: usize,
     ) -> usize {
         let mut max_width = 0;
         let cursor_char = (cursor < len_chars).then(|| rope.char(cursor));
@@ -2008,7 +2119,9 @@ impl InputRenderable {
             max_width = cursor_symbol_width.max(1);
         }
 
-        max_width.max(1)
+        max_width = max_width.max(1);
+
+        max_width + gutter_width
     }
 
     fn line_display_width(rope: &Rope, line_idx: usize) -> usize {
@@ -2057,6 +2170,23 @@ impl InputRenderable {
         }
 
         None
+    }
+
+    fn gutter_text(&self, line_idx: usize) -> Option<String> {
+        match self.gutter_metrics.kind {
+            GutterKind::None => None,
+            GutterKind::LineNumbers => {
+                if line_idx >= self.line_count {
+                    return None;
+                }
+                let number = line_idx + 1;
+                Some(format!(
+                    "{number:>digits$} | ",
+                    number = number,
+                    digits = self.gutter_metrics.digits
+                ))
+            }
+        }
     }
 
     fn run_style_for_index(&self, idx: usize, highlight_runs: &[HighlightRun]) -> RunStyle {
@@ -2265,6 +2395,8 @@ impl Renderable for InputRenderable {
             || o.line_count != self.line_count
             || o.cursor_line != self.cursor_line
             || o.len_chars != self.len_chars
+            || o.gutter_metrics != self.gutter_metrics
+            || o.gutter_style != self.gutter_style
         {
             return false;
         }
@@ -2307,6 +2439,8 @@ impl Renderable for InputRenderable {
         let cursor_attrs = ctx.style_to_attributes(&self.cursor_style);
         let highlight_runs_ref = self.highlight_runs();
         let highlight_runs: &[HighlightRun] = &highlight_runs_ref;
+        let gutter_attrs = ctx.style_to_attributes(&self.gutter_style);
+        let gutter_width = self.gutter_metrics.width.min(area.width);
 
         let blank_line = " ".repeat(area.width);
         let mut cursor_position: Option<(usize, usize)> = None;
@@ -2319,17 +2453,40 @@ impl Renderable for InputRenderable {
 
             let line_idx = scroll_y + row;
             if line_idx >= self.line_count {
+                if gutter_width > 0 {
+                    if let Some(mut text) = self.gutter_text(line_idx) {
+                        if text.len() > gutter_width {
+                            let start = text.len() - gutter_width;
+                            text.replace_range(..start, "");
+                        }
+                        ctx.write_text(area.x, y, &text, &gutter_attrs);
+                    }
+                }
                 continue;
             }
 
-            let mut remaining = area.width;
-            let mut cursor_x = area.x;
+            if gutter_width > 0 {
+                if let Some(mut text) = self.gutter_text(line_idx) {
+                    if text.len() > gutter_width {
+                        let start = text.len() - gutter_width;
+                        text.replace_range(..start, "");
+                    }
+                    ctx.write_text(area.x, y, &text, &gutter_attrs);
+                }
+            }
+
+            let mut remaining = area.width.saturating_sub(gutter_width);
+            let mut cursor_x = area.x + gutter_width;
             let mut line_skip = skip_cols;
 
             let mut run_style: Option<RunStyle> = None;
             let mut run_text = String::new();
             let mut run_width = 0usize;
             let mut run_start_x = cursor_x;
+
+            if remaining == 0 {
+                continue;
+            }
 
             let line_start = self.rope.line_to_char(line_idx).min(self.len_chars);
             let line_end = if line_idx + 1 >= self.line_count {
@@ -3342,5 +3499,70 @@ mod tests {
             assert_eq!(cell.attrs.background(), Some(expected_text_bg));
             assert_ne!(cell.attrs.background(), Some(expected_cursor_bg));
         }
+    }
+
+    #[test]
+    fn line_number_gutter_reports_width() {
+        let mut state = InputState::with_value_multiline("foo\nbar\nbaz");
+        assert_eq!(state.gutter_width(), 0);
+        assert!(!state.line_number_gutter_enabled());
+
+        state.set_line_number_gutter(true);
+        assert!(state.line_number_gutter_enabled());
+        assert_eq!(state.gutter_width(), 4);
+
+        state.set_line_number_gutter(false);
+        assert!(!state.line_number_gutter_enabled());
+        assert_eq!(state.gutter_width(), 0);
+    }
+
+    #[test]
+    fn line_number_gutter_renders_numbers() {
+        let mut state = InputState::with_value_multiline("foo\nbar");
+        state.set_line_number_gutter(true);
+        state.update(InputMsg::SetViewportSize { cols: 10, rows: 2 });
+        let style = InputStyle::default();
+        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+
+        use crate::buffer::DoubleBuffer;
+        use crate::event::Size;
+        use crate::palette::Palette;
+        use crate::render::Renderer;
+
+        let mut buffer = DoubleBuffer::new(10, 2);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
+
+        node.layout_state.layout.size.width = 10.0;
+        node.layout_state.layout.size.height = 2.0;
+        node.layout_state.layout.location.x = 0.0;
+        node.layout_state.layout.location.y = 0.0;
+        node.layout_state.unrounded_layout.size.width = 10.0;
+        node.layout_state.unrounded_layout.size.height = 2.0;
+        node.layout_state.unrounded_layout.location.x = 0.0;
+        node.layout_state.unrounded_layout.location.y = 0.0;
+
+        renderer
+            .render(&node, Size::new(10, 2))
+            .expect("render should succeed");
+
+        let back = renderer.buffer().back_buffer();
+        let row0 = &back[0];
+        assert_eq!(row0[0].ch, '1');
+        assert_eq!(row0[1].ch, ' ');
+        assert_eq!(row0[2].ch, '|');
+        assert_eq!(row0[3].ch, ' ');
+        assert_eq!(row0[4].ch, 'f');
+        assert_eq!(row0[5].ch, 'o');
+        assert_eq!(row0[6].ch, 'o');
+        assert!(row0[0].attrs.is_dim());
+        assert!(!row0[4].attrs.is_dim());
+
+        let row1 = &back[1];
+        assert_eq!(row1[0].ch, '2');
+        assert_eq!(row1[2].ch, '|');
+        assert_eq!(row1[4].ch, 'b');
+        assert_eq!(row1[5].ch, 'a');
+        assert_eq!(row1[6].ch, 'r');
     }
 }
