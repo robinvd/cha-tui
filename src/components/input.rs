@@ -166,6 +166,100 @@ impl CursorSet {
             caret.preferred_column = None;
         }
     }
+
+    fn iter(&self) -> impl Iterator<Item = &Caret> {
+        self.carets.iter()
+    }
+
+    fn get_mut(&mut self, index: usize) -> Option<&mut Caret> {
+        self.carets.get_mut(index)
+    }
+
+    fn primary_index(&self) -> usize {
+        self.primary.min(self.carets.len().saturating_sub(1))
+    }
+
+    fn snapshot(&self) -> CursorSetSnapshot {
+        CursorSetSnapshot {
+            carets: self.carets.iter().cloned().collect(),
+            primary: self.primary_index(),
+        }
+    }
+
+    fn replace_all(&mut self, carets: Vec<Caret>, primary: usize) {
+        self.carets.clear();
+        if carets.is_empty() {
+            self.carets.push(Caret::default());
+            self.primary = 0;
+        } else {
+            self.carets.extend(carets);
+            self.primary = primary.min(self.carets.len().saturating_sub(1));
+        }
+    }
+
+    fn upsert_caret(&mut self, caret: Caret, make_primary: bool) -> usize {
+        if let Some(idx) = self
+            .carets
+            .iter()
+            .position(|existing| existing.head == caret.head)
+        {
+            let existing = &mut self.carets[idx];
+            existing.anchor = caret.anchor;
+            existing.preferred_column = caret.preferred_column;
+            if make_primary {
+                self.primary = idx;
+            }
+            return idx;
+        }
+
+        // Capture fields before moving caret so we can search after push.
+        let head = caret.head;
+        let anchor = caret.anchor;
+        let preferred_column = caret.preferred_column;
+
+        self.carets.push(Caret {
+            head,
+            anchor,
+            preferred_column,
+        });
+        self.carets.sort_by(|a, b| {
+            let a_start = a.head.min(a.anchor);
+            let b_start = b.head.min(b.anchor);
+            a_start
+                .cmp(&b_start)
+                .then_with(|| a.head.cmp(&b.head))
+                .then_with(|| a.anchor.cmp(&b.anchor))
+        });
+
+        let idx = self
+            .carets
+            .iter()
+            .position(|existing| existing.head == head && existing.anchor == anchor)
+            .or_else(|| {
+                self.carets
+                    .iter()
+                    .position(|existing| existing.head == head)
+            })
+            .unwrap_or_else(|| self.primary_index());
+
+        if make_primary {
+            self.primary = idx;
+        }
+
+        idx
+    }
+
+    fn restore(&mut self, snapshot: &CursorSetSnapshot) {
+        self.carets.clear();
+        if snapshot.carets.is_empty() {
+            self.carets.push(Caret::default());
+            self.primary = 0;
+            return;
+        }
+
+        self.carets.extend(snapshot.carets.iter().cloned());
+        self.primary = snapshot.primary.min(self.carets.len().saturating_sub(1));
+    }
 }
 
 impl Default for CursorSet {
@@ -183,6 +277,151 @@ struct Caret {
     head: usize,
     anchor: usize,
     preferred_column: Option<usize>,
+}
+
+/// Public caret snapshot for external consumers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CursorPosition {
+    pub head: usize,
+    pub anchor: usize,
+}
+
+impl CursorPosition {
+    pub fn as_range(&self) -> Range<usize> {
+        if self.head <= self.anchor {
+            self.head..self.anchor
+        } else {
+            self.anchor..self.head
+        }
+    }
+
+    pub fn is_selection(&self) -> bool {
+        self.head != self.anchor
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CaretInfo {
+    index: usize,
+    head: usize,
+    anchor: usize,
+    preferred_column: Option<usize>,
+}
+
+impl CaretInfo {
+    fn new(index: usize, caret: &Caret) -> Self {
+        Self {
+            index,
+            head: caret.head,
+            anchor: caret.anchor,
+            preferred_column: caret.preferred_column,
+        }
+    }
+
+    fn has_selection(&self) -> bool {
+        self.head != self.anchor
+    }
+
+    fn clamped_positions(&self, len: usize) -> (usize, usize) {
+        (self.head.min(len), self.anchor.min(len))
+    }
+
+    fn clamped_range(&self, len: usize) -> Range<usize> {
+        let (head, anchor) = self.clamped_positions(len);
+        if head <= anchor {
+            head..anchor
+        } else {
+            anchor..head
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CaretEdit {
+    index: usize,
+    range: Range<usize>,
+    inserted: String,
+    head_offset: usize,
+    anchor_offset: usize,
+}
+
+impl CaretEdit {
+    fn new(
+        index: usize,
+        range: Range<usize>,
+        inserted: String,
+        head_offset: usize,
+        anchor_offset: usize,
+    ) -> Self {
+        Self {
+            index,
+            range,
+            inserted,
+            head_offset,
+            anchor_offset,
+        }
+    }
+
+    fn deleted_len(&self) -> usize {
+        self.range.end.saturating_sub(self.range.start)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CaretUpdate {
+    index: usize,
+    head: usize,
+    anchor: usize,
+    preferred_column: Option<usize>,
+}
+
+impl CaretUpdate {
+    fn new(index: usize, head: usize, anchor: usize, preferred_column: Option<usize>) -> Self {
+        Self {
+            index,
+            head,
+            anchor,
+            preferred_column,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PointerModifiers {
+    pub ctrl: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub super_key: bool,
+}
+
+/// Captured multi-caret state for undo/redo.
+#[derive(Clone, Debug)]
+struct CursorSetSnapshot {
+    carets: Vec<Caret>,
+    primary: usize,
+}
+
+impl CursorSetSnapshot {
+    fn new(carets: Vec<Caret>, primary: usize) -> Self {
+        let primary = if carets.is_empty() {
+            0
+        } else {
+            primary.min(carets.len().saturating_sub(1))
+        };
+        Self { carets, primary }
+    }
+
+    fn primary_index(&self) -> usize {
+        if self.carets.is_empty() {
+            0
+        } else {
+            self.primary.min(self.carets.len().saturating_sub(1))
+        }
+    }
+
+    fn carets(&self) -> &[Caret] {
+        &self.carets
+    }
 }
 /// Selection granularity placeholder (line/block modes can be added later).
 #[derive(Clone, Copy, Debug, Default)]
@@ -739,38 +978,20 @@ impl EditHistory {
     }
 }
 
-/// Immutable caret state used to restore selection after replaying an edit.
-#[derive(Clone, Copy, Debug, Default)]
-struct CaretSnapshot {
-    head: usize,
-    anchor: usize,
-}
-
-impl CaretSnapshot {
-    fn new(head: usize, anchor: usize) -> Self {
-        Self { head, anchor }
-    }
-}
-
-impl From<&Caret> for CaretSnapshot {
-    fn from(value: &Caret) -> Self {
-        Self {
-            head: value.head,
-            anchor: value.anchor,
-        }
-    }
-}
-
 /// Individual edit that can participate in undo/redo.
 #[derive(Clone, Debug)]
 struct EditCommand {
-    before: CaretSnapshot,
-    after: CaretSnapshot,
+    before: CursorSetSnapshot,
+    after: CursorSetSnapshot,
     transaction: EditTransaction,
 }
 
 impl EditCommand {
-    fn new(before: CaretSnapshot, after: CaretSnapshot, transaction: EditTransaction) -> Self {
+    fn new(
+        before: CursorSetSnapshot,
+        after: CursorSetSnapshot,
+        transaction: EditTransaction,
+    ) -> Self {
         Self {
             before,
             after,
@@ -780,8 +1001,8 @@ impl EditCommand {
 
     fn inverse(&self) -> Self {
         Self {
-            before: self.after,
-            after: self.before,
+            before: self.after.clone(),
+            after: self.before.clone(),
             transaction: self.transaction.inverse(),
         }
     }
@@ -832,10 +1053,6 @@ impl EditTransaction {
         Self { edits }
     }
 
-    fn single(edit: TextEdit) -> Self {
-        Self::new(vec![edit])
-    }
-
     fn is_empty(&self) -> bool {
         self.edits.is_empty()
     }
@@ -847,7 +1064,7 @@ impl EditTransaction {
     }
 
     fn inverse(&self) -> Self {
-        let edits = self.edits.iter().map(|edit| edit.inverse()).collect();
+        let edits = self.edits.iter().rev().map(|edit| edit.inverse()).collect();
         EditTransaction { edits }
     }
 
@@ -935,6 +1152,14 @@ impl InputState {
             .expect("InputState always maintains at least one view")
     }
 
+    fn cursor_set(&self) -> &CursorSet {
+        &self.primary_view().cursor_set
+    }
+
+    fn cursor_set_mut(&mut self) -> &mut CursorSet {
+        &mut self.primary_view_mut().cursor_set
+    }
+
     fn primary_caret(&self) -> &Caret {
         self.primary_view().primary_caret()
     }
@@ -951,10 +1176,6 @@ impl InputState {
         &mut self.primary_view_mut().viewport
     }
 
-    fn anchor_position(&self) -> usize {
-        self.primary_caret().anchor
-    }
-
     fn cursor_position_mut(&mut self) -> &mut usize {
         &mut self.primary_caret_mut().head
     }
@@ -963,14 +1184,143 @@ impl InputState {
         &mut self.primary_caret_mut().anchor
     }
 
-    fn caret_snapshot(&self) -> CaretSnapshot {
-        self.primary_caret().into()
+    fn caret_snapshot(&self) -> CursorSetSnapshot {
+        self.primary_view().cursor_set.snapshot()
     }
 
-    fn set_caret_snapshot(&mut self, snapshot: CaretSnapshot) {
-        let caret = self.primary_caret_mut();
-        caret.head = snapshot.head;
-        caret.anchor = snapshot.anchor;
+    fn set_caret_snapshot(&mut self, snapshot: &CursorSetSnapshot) {
+        self.primary_view_mut().cursor_set.restore(snapshot);
+    }
+
+    #[cfg(test)]
+    fn snapshot_with_primary<F>(&self, f: F) -> CursorSetSnapshot
+    where
+        F: FnOnce(&mut Caret),
+    {
+        let cursor_set = self.cursor_set();
+        let mut carets: Vec<Caret> = cursor_set.iter().cloned().collect();
+        if carets.is_empty() {
+            carets.push(Caret::default());
+        }
+        let primary = cursor_set
+            .primary_index()
+            .min(carets.len().saturating_sub(1));
+        if let Some(caret) = carets.get_mut(primary) {
+            f(caret);
+        }
+        CursorSetSnapshot::new(carets, primary)
+    }
+
+    fn caret_infos(&self) -> Vec<CaretInfo> {
+        self.cursor_set()
+            .iter()
+            .enumerate()
+            .map(|(index, caret)| CaretInfo::new(index, caret))
+            .collect()
+    }
+
+    fn commit_caret_edits(&mut self, edits: Vec<CaretEdit>) -> bool {
+        if edits.is_empty() {
+            return false;
+        }
+
+        let mut edits = edits;
+        edits.sort_by(|a, b| {
+            a.range
+                .start
+                .cmp(&b.range.start)
+                .then_with(|| a.range.end.cmp(&b.range.end))
+                .then_with(|| a.index.cmp(&b.index))
+        });
+
+        debug_assert!(
+            edits
+                .windows(2)
+                .all(|pair| pair[0].range.end <= pair[1].range.start),
+            "overlapping caret edits are not supported"
+        );
+
+        let before = self.caret_snapshot();
+        let primary_index = before.primary_index();
+        let mut carets_after: Vec<Caret> = before.carets().to_vec();
+
+        let mut text_edits = Vec::with_capacity(edits.len());
+        let mut cumulative_delta: isize = 0;
+        for edit in edits.iter() {
+            let deleted = self.rope_slice_to_string(edit.range.clone());
+            let adjusted_start = (edit.range.start as isize + cumulative_delta).max(0) as usize;
+            let insert_len = edit.inserted.chars().count();
+            let deleted_len = edit.deleted_len();
+            let anchor_offset = edit.anchor_offset;
+            let head_offset = edit.head_offset;
+
+            if let Some(caret) = carets_after.get_mut(edit.index) {
+                caret.head = adjusted_start + head_offset;
+                caret.anchor = adjusted_start + anchor_offset;
+                caret.preferred_column = None;
+            }
+
+            text_edits.push(TextEdit::new(
+                edit.range.clone(),
+                deleted,
+                edit.inserted.clone(),
+            ));
+
+            cumulative_delta += insert_len as isize - deleted_len as isize;
+        }
+
+        let transaction = EditTransaction::new(text_edits);
+        if transaction.is_empty() {
+            return false;
+        }
+
+        let after = CursorSetSnapshot::new(carets_after, primary_index);
+        let command = EditCommand::new(before, after, transaction);
+        self.commit_edit(command)
+    }
+
+    fn build_caret_edits<F>(&self, mut f: F) -> Vec<CaretEdit>
+    where
+        F: FnMut(&CaretInfo) -> Option<CaretEdit>,
+    {
+        self.caret_infos()
+            .into_iter()
+            .filter_map(|info| f(&info))
+            .collect()
+    }
+
+    fn build_caret_updates<F>(&self, mut f: F) -> Vec<CaretUpdate>
+    where
+        F: FnMut(&CaretInfo) -> Option<CaretUpdate>,
+    {
+        self.caret_infos()
+            .into_iter()
+            .filter_map(|info| f(&info))
+            .collect()
+    }
+
+    fn apply_caret_updates(&mut self, updates: Vec<CaretUpdate>) -> bool {
+        if updates.is_empty() {
+            return false;
+        }
+
+        let cursor_set = self.cursor_set_mut();
+        let mut changed = false;
+        for update in updates {
+            if let Some(caret) = cursor_set.get_mut(update.index) {
+                if caret.head == update.head
+                    && caret.anchor == update.anchor
+                    && caret.preferred_column == update.preferred_column
+                {
+                    continue;
+                }
+                caret.head = update.head;
+                caret.anchor = update.anchor;
+                caret.preferred_column = update.preferred_column;
+                changed = true;
+            }
+        }
+        changed
     }
 
     fn refresh_gutter_metrics(&mut self) {
@@ -992,7 +1342,7 @@ impl InputState {
         command.transaction.apply(&mut self.document.rope);
         self.highlights.apply_edit(&command.transaction);
         self.last_change = Some(TextChangeSet::from_transaction(&command.transaction));
-        self.set_caret_snapshot(command.after);
+        self.set_caret_snapshot(&command.after);
         self.reset_preferred_column();
         self.ensure_cursor_visible();
         self.refresh_gutter_metrics();
@@ -1008,15 +1358,14 @@ impl InputState {
     }
 
     fn rope_slice_to_string(&self, range: Range<usize>) -> String {
-        self.document.rope.slice(range).to_string()
-    }
-
-    fn preferred_column(&self) -> Option<usize> {
-        self.primary_caret().preferred_column
-    }
-
-    fn set_preferred_column(&mut self, value: Option<usize>) {
-        self.primary_caret_mut().preferred_column = value;
+        let len = self.document.rope.len_chars();
+        let start = range.start.min(len);
+        let end = range.end.min(len);
+        if start >= end {
+            String::new()
+        } else {
+            self.document.rope.slice(start..end).to_string()
+        }
     }
 
     pub fn value(&self) -> String {
@@ -1058,6 +1407,89 @@ impl InputState {
 
     pub fn cursor(&self) -> usize {
         self.primary_caret().head
+    }
+
+    pub fn carets(&self) -> Vec<CursorPosition> {
+        self.cursor_set()
+            .iter()
+            .map(|caret| CursorPosition {
+                head: caret.head,
+                anchor: caret.anchor,
+            })
+            .collect()
+    }
+
+    pub fn primary_caret_position(&self) -> CursorPosition {
+        let caret = self.primary_caret();
+        CursorPosition {
+            head: caret.head,
+            anchor: caret.anchor,
+        }
+    }
+
+    pub fn primary_caret_index(&self) -> usize {
+        self.cursor_set().primary_index()
+    }
+
+    pub fn set_carets<I>(&mut self, carets: I, primary_index: usize)
+    where
+        I: IntoIterator<Item = CursorPosition>,
+    {
+        let len = self.len_chars();
+        let mut entries: Vec<(Caret, bool)> = carets
+            .into_iter()
+            .enumerate()
+            .map(|(idx, pos)| {
+                let caret = Caret {
+                    head: pos.head.min(len),
+                    anchor: pos.anchor.min(len),
+                    preferred_column: None,
+                };
+                (caret, idx == primary_index)
+            })
+            .collect();
+
+        if entries.is_empty() {
+            entries.push((Caret::default(), true));
+        } else {
+            entries.sort_by(|(a, _), (b, _)| {
+                let a_start = a.head.min(a.anchor);
+                let b_start = b.head.min(b.anchor);
+                a_start
+                    .cmp(&b_start)
+                    .then_with(|| a.head.cmp(&b.head))
+                    .then_with(|| a.anchor.cmp(&b.anchor))
+            });
+
+            let mut merged: Vec<(Caret, bool)> = Vec::with_capacity(entries.len());
+            for (caret, is_primary) in entries.into_iter() {
+                if let Some((last_caret, last_primary)) = merged.last_mut()
+                    && last_caret.head == caret.head
+                    && last_caret.anchor == caret.anchor
+                {
+                    if is_primary {
+                        *last_primary = true;
+                    }
+                    continue;
+                }
+                merged.push((caret, is_primary));
+            }
+            entries = merged;
+        }
+
+        let primary_idx = entries
+            .iter()
+            .position(|(_, is_primary)| *is_primary)
+            .unwrap_or(0);
+
+        let new_carets: Vec<Caret> = entries.into_iter().map(|(caret, _)| caret).collect();
+
+        {
+            let cursor_set = self.cursor_set_mut();
+            cursor_set.replace_all(new_carets, primary_idx);
+            cursor_set.reset_primary_preferred_column();
+        }
+        self.ensure_cursor_visible();
     }
 
     pub fn set_line_number_gutter(&mut self, enabled: bool) {
@@ -1119,11 +1551,14 @@ impl InputState {
 
     pub fn clear(&mut self) {
         self.document.rope = Rope::new();
+        let caret = Caret {
+            head: 0,
+            anchor: 0,
+            preferred_column: None,
+        };
         {
-            let caret = self.primary_view_mut().primary_caret_mut();
-            caret.head = 0;
-            caret.anchor = 0;
-            caret.preferred_column = None;
+            let cursor_set = self.cursor_set_mut();
+            cursor_set.replace_all(vec![caret], 0);
         }
         {
             let viewport = &mut self.primary_view_mut().viewport;
@@ -1142,11 +1577,14 @@ impl InputState {
         let value = value.into();
         self.document.rope = Rope::from_str(&value);
         let len = self.len_chars();
+        let caret = Caret {
+            head: len,
+            anchor: len,
+            preferred_column: None,
+        };
         {
-            let caret = self.primary_view_mut().primary_caret_mut();
-            caret.head = len;
-            caret.anchor = len;
-            caret.preferred_column = None;
+            let cursor_set = self.cursor_set_mut();
+            cursor_set.replace_all(vec![caret], 0);
         }
         {
             let viewport = &mut self.primary_view_mut().viewport;
@@ -1187,6 +1625,14 @@ impl InputState {
 
     pub fn can_redo(&self) -> bool {
         self.history.can_redo()
+    }
+
+    pub fn add_caret_above(&mut self) -> bool {
+        self.add_caret_vertical(-1)
+    }
+
+    pub fn add_caret_below(&mut self) -> bool {
+        self.add_caret_vertical(1)
     }
 
     fn reset_preferred_column(&mut self) {
@@ -1275,19 +1721,14 @@ impl InputState {
             }
             InputMsg::MoveLineStart { extend } => self.move_line_start(extend),
             InputMsg::MoveLineEnd { extend } => self.move_line_end(extend),
-            InputMsg::MoveWordLeft { extend } => {
-                let target = self.word_start_before(self.cursor());
-                self.move_to_index(target, extend)
-            }
-            InputMsg::MoveWordRight { extend } => {
-                let target = self.next_word_boundary(self.cursor());
-                self.move_to_index(target, extend)
-            }
+            InputMsg::MoveWordLeft { extend } => self.move_word_left(extend),
+            InputMsg::MoveWordRight { extend } => self.move_word_right(extend),
             InputMsg::Pointer {
                 column,
                 row,
                 click_count,
-            } => self.handle_pointer(column as usize, row as usize, click_count.max(1)),
+                modifiers,
+            } => self.handle_pointer(column as usize, row as usize, click_count.max(1), modifiers),
             InputMsg::Replace(text) => {
                 self.set_value(text);
                 self.ensure_cursor_visible();
@@ -1299,9 +1740,20 @@ impl InputState {
                 true
             }
             InputMsg::ClearSelection => {
-                let cursor = self.cursor();
-                if cursor != self.anchor_position() {
-                    *self.anchor_position_mut() = cursor;
+                let updates = self.build_caret_updates(|info| {
+                    if info.has_selection() {
+                        Some(CaretUpdate::new(
+                            info.index,
+                            info.head,
+                            info.head,
+                            info.preferred_column,
+                        ))
+                    } else {
+                        None
+                    }
+                });
+
+                if self.apply_caret_updates(updates) {
                     self.reset_preferred_column();
                     self.ensure_cursor_visible();
                     true
@@ -1340,70 +1792,89 @@ impl InputState {
             return false;
         }
 
-        let before = self.caret_snapshot();
         let inserted_len = sanitized.chars().count();
-        let (text_edit, new_pos) = if let Some((start, end)) = self.selection() {
-            let deleted = self.rope_slice_to_string(start..end);
-            (
-                TextEdit::new(start..end, deleted, sanitized.clone()),
-                start + inserted_len,
-            )
-        } else {
-            let cursor = self.cursor();
-            (
-                TextEdit::new(cursor..cursor, String::new(), sanitized.clone()),
-                cursor + inserted_len,
-            )
-        };
+        let len = self.len_chars();
+        let edits = self.build_caret_edits(|info| {
+            let range = info.clamped_range(len);
+            Some(CaretEdit::new(
+                info.index,
+                range,
+                sanitized.clone(),
+                inserted_len,
+                inserted_len,
+            ))
+        });
 
-        let after = CaretSnapshot::new(new_pos, new_pos);
-        let transaction = EditTransaction::single(text_edit);
-        let command = EditCommand::new(before, after, transaction);
-        self.commit_edit(command)
+        self.commit_caret_edits(edits)
     }
 
     fn delete_backward(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
+        let len = self.len_chars();
+        let edits = self.build_caret_edits(|info| {
+            let (head, anchor) = info.clamped_positions(len);
+            if head != anchor {
+                return Some(CaretEdit::new(
+                    info.index,
+                    info.clamped_range(len),
+                    String::new(),
+                    0,
+                    0,
+                ));
+            }
 
-        if self.cursor() == 0 {
-            return false;
-        }
+            if head == 0 {
+                return None;
+            }
 
-        let prev = self.cursor() - 1;
-        let range = prev..self.cursor();
-        let deleted = self.rope_slice_to_string(range.clone());
-        let before = self.caret_snapshot();
-        let after = CaretSnapshot::new(prev, prev);
-        let text_edit = TextEdit::new(range, deleted, String::new());
-        let transaction = EditTransaction::single(text_edit);
-        let command = EditCommand::new(before, after, transaction);
-        self.commit_edit(command)
+            Some(CaretEdit::new(
+                info.index,
+                head - 1..head,
+                String::new(),
+                0,
+                0,
+            ))
+        });
+
+        self.commit_caret_edits(edits)
     }
 
     fn delete_word_backward(&mut self) -> bool {
-        if self.delete_selection() {
-            return true;
-        }
+        let len = self.len_chars();
+        let edits = self.build_caret_edits(|info| {
+            let (head, anchor) = info.clamped_positions(len);
+            if head != anchor {
+                return Some(CaretEdit::new(
+                    info.index,
+                    if head <= anchor {
+                        head..anchor
+                    } else {
+                        anchor..head
+                    },
+                    String::new(),
+                    0,
+                    0,
+                ));
+            }
 
-        if self.cursor() == 0 {
-            return false;
-        }
+            if head == 0 {
+                return None;
+            }
 
-        let boundary = self.word_start_before(self.cursor());
-        if boundary == self.cursor() {
-            return false;
-        }
+            let boundary = self.word_start_before(head);
+            if boundary == info.head {
+                return None;
+            }
 
-        let range = boundary..self.cursor();
-        let deleted = self.rope_slice_to_string(range.clone());
-        let before = self.caret_snapshot();
-        let after = CaretSnapshot::new(boundary, boundary);
-        let text_edit = TextEdit::new(range, deleted, String::new());
-        let transaction = EditTransaction::single(text_edit);
-        let command = EditCommand::new(before, after, transaction);
-        self.commit_edit(command)
+            Some(CaretEdit::new(
+                info.index,
+                boundary..head,
+                String::new(),
+                0,
+                0,
+            ))
+        });
+
+        self.commit_caret_edits(edits)
     }
 
     fn delete_to_start(&mut self) -> bool {
@@ -1411,19 +1882,25 @@ impl InputState {
             return true;
         }
 
-        if self.cursor() == 0 {
+        let primary = self.primary_caret_index();
+        let len = self.len_chars();
+        let edits = self.build_caret_edits(|info| {
+            if info.index != primary {
+                return None;
+            }
+            let head = info.head.min(len);
+            if head == 0 {
+                return None;
+            }
+            Some(CaretEdit::new(info.index, 0..head, String::new(), 0, 0))
+        });
+
+        if edits.is_empty() {
             self.ensure_cursor_visible();
             return false;
         }
 
-        let range = 0..self.cursor();
-        let deleted = self.rope_slice_to_string(range.clone());
-        let before = self.caret_snapshot();
-        let after = CaretSnapshot::new(0, 0);
-        let text_edit = TextEdit::new(range, deleted, String::new());
-        let transaction = EditTransaction::single(text_edit);
-        let command = EditCommand::new(before, after, transaction);
-        self.commit_edit(command)
+        self.commit_caret_edits(edits)
     }
 
     fn delete_to_end(&mut self) -> bool {
@@ -1432,44 +1909,56 @@ impl InputState {
         }
 
         let len = self.len_chars();
-        if self.cursor() == len {
+        let primary = self.primary_caret_index();
+        let edits = self.build_caret_edits(|info| {
+            if info.index != primary {
+                return None;
+            }
+            if info.head >= len {
+                return None;
+            }
+            Some(CaretEdit::new(
+                info.index,
+                info.head.min(len)..len,
+                String::new(),
+                0,
+                0,
+            ))
+        });
+
+        if edits.is_empty() {
             return false;
         }
-        let start = self.cursor();
-        let range = start..len;
-        let deleted = self.rope_slice_to_string(range.clone());
-        let before = self.caret_snapshot();
-        let after = CaretSnapshot::new(start, start);
-        let text_edit = TextEdit::new(range, deleted, String::new());
-        let transaction = EditTransaction::single(text_edit);
-        let command = EditCommand::new(before, after, transaction);
-        self.commit_edit(command)
+
+        self.commit_caret_edits(edits)
     }
 
     fn move_left(&mut self, extend: bool) -> bool {
-        if !extend && let Some((start, _)) = self.selection() {
-            *self.cursor_position_mut() = start;
-            *self.anchor_position_mut() = start;
+        let len = self.len_chars();
+        let updates = self.build_caret_updates(|info| {
+            let (head, anchor) = info.clamped_positions(len);
+            if !extend && head != anchor {
+                let pos = if head <= anchor { head } else { anchor };
+                return Some(CaretUpdate::new(info.index, pos, pos, None));
+            }
+
+            if head == 0 {
+                return None;
+            }
+
+            let new_head = head - 1;
+            let new_anchor = if extend { anchor } else { new_head };
+            Some(CaretUpdate::new(info.index, new_head, new_anchor, None))
+        });
+
+        let changed = self.apply_caret_updates(updates);
+        if changed {
             self.reset_preferred_column();
             self.ensure_cursor_visible();
-            return true;
+        } else if !extend {
+            self.cursor_set_mut().reset_primary_preferred_column();
         }
-
-        if self.cursor() == 0 {
-            if !extend {
-                *self.anchor_position_mut() = self.cursor();
-            }
-            return false;
-        }
-
-        let new_pos = self.cursor() - 1;
-        *self.cursor_position_mut() = new_pos;
-        if !extend {
-            *self.anchor_position_mut() = new_pos;
-        }
-        self.reset_preferred_column();
-        self.ensure_cursor_visible();
-        true
+        changed
     }
 
     fn ensure_cursor_visible(&mut self) {
@@ -1517,30 +2006,31 @@ impl InputState {
     }
 
     fn move_right(&mut self, extend: bool) -> bool {
-        if !extend && let Some((_, end)) = self.selection() {
-            *self.cursor_position_mut() = end;
-            *self.anchor_position_mut() = end;
+        let len = self.len_chars();
+        let updates = self.build_caret_updates(|info| {
+            let (head, anchor) = info.clamped_positions(len);
+            if !extend && head != anchor {
+                let pos = if head <= anchor { anchor } else { head };
+                return Some(CaretUpdate::new(info.index, pos, pos, None));
+            }
+
+            if head >= len {
+                return None;
+            }
+
+            let new_head = head + 1;
+            let new_anchor = if extend { anchor } else { new_head };
+            Some(CaretUpdate::new(info.index, new_head, new_anchor, None))
+        });
+
+        let changed = self.apply_caret_updates(updates);
+        if changed {
             self.reset_preferred_column();
             self.ensure_cursor_visible();
-            return true;
+        } else if !extend {
+            self.cursor_set_mut().reset_primary_preferred_column();
         }
-
-        let len = self.len_chars();
-        if self.cursor() >= len {
-            if !extend {
-                *self.anchor_position_mut() = self.cursor();
-            }
-            return false;
-        }
-
-        let new_pos = self.cursor() + 1;
-        *self.cursor_position_mut() = new_pos;
-        if !extend {
-            *self.anchor_position_mut() = new_pos;
-        }
-        self.reset_preferred_column();
-        self.ensure_cursor_visible();
-        true
+        changed
     }
 
     fn move_up(&mut self, extend: bool) -> bool {
@@ -1551,10 +2041,80 @@ impl InputState {
         self.move_vertical(1, extend)
     }
 
+    fn add_caret_vertical(&mut self, line_delta: isize) -> bool {
+        if line_delta == 0 {
+            return false;
+        }
+
+        if !self.is_multiline() {
+            return false;
+        }
+
+        let len_chars = self.len_chars();
+        let rope = &self.document.rope;
+        let line_count = self.line_count();
+
+        let primary_head = self.primary_caret().head.min(len_chars);
+        let current_line = rope.char_to_line(primary_head);
+
+        let target_line = if line_delta < 0 {
+            let delta = line_delta.unsigned_abs() as usize;
+            if current_line < delta {
+                return false;
+            }
+            current_line - delta
+        } else {
+            let delta = line_delta as usize;
+            let target = current_line + delta;
+            if target >= line_count {
+                return false;
+            }
+            target
+        };
+
+        let desired_column = self
+            .primary_caret()
+            .preferred_column
+            .unwrap_or_else(|| self.column_in_line(current_line, primary_head));
+        let target_index = self.index_at_line_column(target_line, desired_column);
+
+        let already_exists = self
+            .cursor_set()
+            .iter()
+            .any(|caret| caret.head == target_index);
+
+        {
+            let view = self.primary_view_mut();
+            let idx = view.cursor_set.upsert_caret(
+                Caret {
+                    head: target_index,
+                    anchor: target_index,
+                    preferred_column: Some(desired_column),
+                },
+                true,
+            );
+            if let Some(caret) = view.cursor_set.get_mut(idx) {
+                caret.preferred_column = Some(desired_column);
+            }
+        }
+
+        self.ensure_cursor_visible();
+        !already_exists
+    }
+
     fn move_vertical(&mut self, line_delta: isize, extend: bool) -> bool {
         if !self.is_multiline() {
             if !extend {
-                *self.anchor_position_mut() = self.cursor();
+                let updates = self.build_caret_updates(|info| {
+                    if info.anchor != info.head {
+                        Some(CaretUpdate::new(info.index, info.head, info.head, None))
+                    } else {
+                        None
+                    }
+                });
+                if !updates.is_empty() {
+                    self.apply_caret_updates(updates);
+                }
             }
             return false;
         }
@@ -1562,89 +2122,239 @@ impl InputState {
         let line_count = self.line_count();
         if line_count <= 1 {
             if !extend {
-                *self.anchor_position_mut() = self.cursor();
+                let updates = self.build_caret_updates(|info| {
+                    if info.anchor != info.head {
+                        Some(CaretUpdate::new(info.index, info.head, info.head, None))
+                    } else {
+                        None
+                    }
+                });
+                if !updates.is_empty() {
+                    self.apply_caret_updates(updates);
+                }
             }
             return false;
         }
 
-        let current_line = self.cursor_line();
-        let target_line = match line_delta {
-            d if d < 0 => {
-                if current_line == 0 {
-                    if !extend {
-                        *self.anchor_position_mut() = self.cursor();
-                    }
-                    return false;
+        let rope = &self.document.rope;
+        let len_chars = self.len_chars();
+        let mut updates = Vec::new();
+
+        for info in self.caret_infos() {
+            let head = info.head.min(len_chars);
+            let current_line = rope.char_to_line(head);
+            let target_line = if line_delta < 0 {
+                let delta = line_delta.unsigned_abs();
+                if current_line < delta {
+                    None
+                } else {
+                    Some(current_line - delta)
                 }
-                current_line - 1
-            }
-            d if d > 0 => {
-                if current_line + 1 >= line_count {
-                    if !extend {
-                        *self.anchor_position_mut() = self.cursor();
-                    }
-                    return false;
+            } else if line_delta > 0 {
+                let delta = line_delta as usize;
+                let target = current_line + delta;
+                if target >= line_count {
+                    None
+                } else {
+                    Some(target)
                 }
-                current_line + 1
-            }
-            _ => current_line,
-        };
+            } else {
+                Some(current_line)
+            };
 
-        let desired_col = match self.preferred_column() {
-            Some(col) => col,
-            None => {
-                let col = self.column_in_line(current_line, self.cursor());
-                self.set_preferred_column(Some(col));
-                col
-            }
-        };
+            let Some(target_line) = target_line else {
+                if !extend && info.anchor != info.head {
+                    updates.push(CaretUpdate::new(
+                        info.index,
+                        info.head,
+                        info.head,
+                        info.preferred_column,
+                    ));
+                }
+                continue;
+            };
 
-        let target_index = self.index_at_line_column(target_line, desired_col);
+            let desired_column = info
+                .preferred_column
+                .unwrap_or_else(|| self.column_in_line(current_line, head));
+            let target_index = self.index_at_line_column(target_line, desired_column);
 
-        if target_index == self.cursor() {
-            if !extend {
-                *self.anchor_position_mut() = target_index;
+            if target_index == info.head {
+                if !extend && info.anchor != info.head {
+                    updates.push(CaretUpdate::new(
+                        info.index,
+                        info.head,
+                        info.head,
+                        info.preferred_column,
+                    ));
+                }
+                continue;
             }
-            self.ensure_cursor_visible();
-            return false;
+
+            let new_anchor = if extend { info.anchor } else { target_index };
+            updates.push(CaretUpdate::new(
+                info.index,
+                target_index,
+                new_anchor,
+                Some(desired_column),
+            ));
         }
 
-        *self.cursor_position_mut() = target_index;
-        if !extend {
-            *self.anchor_position_mut() = target_index;
+        let changed = self.apply_caret_updates(updates);
+        if !changed && !extend {
+            self.cursor_set_mut().reset_primary_preferred_column();
         }
-        self.set_preferred_column(Some(desired_col));
         self.ensure_cursor_visible();
-        true
-    }
-
-    fn move_line_start(&mut self, extend: bool) -> bool {
-        let line_index = self.cursor_line();
-        let (line_start, _) = self.line_bounds(line_index);
-        self.move_to_index(line_start, extend)
-    }
-
-    fn move_line_end(&mut self, extend: bool) -> bool {
-        let line_index = self.cursor_line();
-        let (_, line_end) = self.line_bounds(line_index);
-        self.move_to_index(line_end, extend)
+        changed
     }
 
     fn move_to_index(&mut self, index: usize, extend: bool) -> bool {
-        let clamped = index.min(self.len_chars());
-        if !extend {
-            *self.anchor_position_mut() = clamped;
+        let len = self.len_chars();
+        let clamped = index.min(len);
+        let updates = self.build_caret_updates(|info| {
+            let anchor = if extend {
+                info.anchor.min(len)
+            } else {
+                clamped
+            };
+            if info.head == clamped && info.anchor.min(len) == anchor {
+                return None;
+            }
+            Some(CaretUpdate::new(info.index, clamped, anchor, None))
+        });
+
+        let changed = self.apply_caret_updates(updates);
+        if changed {
+            self.reset_preferred_column();
+            self.ensure_cursor_visible();
+        } else if !extend {
+            self.cursor_set_mut().reset_primary_preferred_column();
         }
-        if self.cursor() == clamped && self.anchor_position() == clamped {
-            return false;
+        changed
+    }
+
+    fn move_line_start(&mut self, extend: bool) -> bool {
+        let rope = &self.document.rope;
+        let len = self.len_chars();
+        let updates = self.build_caret_updates(|info| {
+            let head = info.head.min(len);
+            let line_index = rope.char_to_line(head);
+            let (line_start, _) = self.line_bounds(line_index);
+            let anchor = if extend {
+                info.anchor.min(len)
+            } else {
+                line_start
+            };
+            if head == line_start && info.anchor.min(len) == anchor {
+                return None;
+            }
+            Some(CaretUpdate::new(info.index, line_start, anchor, None))
+        });
+
+        let changed = self.apply_caret_updates(updates);
+        if changed {
+            self.reset_preferred_column();
+            self.ensure_cursor_visible();
+        } else if !extend {
+            self.cursor_set_mut().reset_primary_preferred_column();
         }
-        *self.cursor_position_mut() = clamped;
-        if !extend {
-            *self.anchor_position_mut() = clamped;
+        changed
+    }
+
+    fn move_line_end(&mut self, extend: bool) -> bool {
+        let rope = &self.document.rope;
+        let len = self.len_chars();
+        let updates = self.build_caret_updates(|info| {
+            let head = info.head.min(len);
+            let line_index = rope.char_to_line(head);
+            let (_, line_end) = self.line_bounds(line_index);
+            let anchor = if extend {
+                info.anchor.min(len)
+            } else {
+                line_end
+            };
+            if head == line_end && info.anchor.min(len) == anchor {
+                return None;
+            }
+            Some(CaretUpdate::new(info.index, line_end, anchor, None))
+        });
+
+        let changed = self.apply_caret_updates(updates);
+        if changed {
+            self.reset_preferred_column();
+            self.ensure_cursor_visible();
+        } else if !extend {
+            self.cursor_set_mut().reset_primary_preferred_column();
         }
-        self.reset_preferred_column();
-        self.ensure_cursor_visible();
-        true
+        changed
+    }
+
+    fn move_word_left(&mut self, extend: bool) -> bool {
+        let len = self.len_chars();
+        let updates = self.build_caret_updates(|info| {
+            let head = info.head.min(len);
+            if head == 0 {
+                if !extend && info.anchor != head {
+                    Some(CaretUpdate::new(info.index, head, head, None))
+                } else {
+                    None
+                }
+            } else {
+                let boundary = self.word_start_before(head);
+                let anchor = if extend {
+                    info.anchor.min(len)
+                } else {
+                    boundary
+                };
+                if head == boundary && info.anchor.min(len) == anchor {
+                    return None;
+                }
+                Some(CaretUpdate::new(info.index, boundary, anchor, None))
+            }
+        });
+
+        let changed = self.apply_caret_updates(updates);
+        if changed {
+            self.reset_preferred_column();
+            self.ensure_cursor_visible();
+        } else if !extend {
+            self.cursor_set_mut().reset_primary_preferred_column();
+        }
+        changed
+    }
+
+    fn move_word_right(&mut self, extend: bool) -> bool {
+        let len = self.len_chars();
+        let updates = self.build_caret_updates(|info| {
+            let head = info.head.min(len);
+            if head >= len {
+                if !extend && info.anchor != head {
+                    Some(CaretUpdate::new(info.index, head, head, None))
+                } else {
+                    None
+                }
+            } else {
+                let boundary = self.next_word_boundary(head);
+                let anchor = if extend {
+                    info.anchor.min(len)
+                } else {
+                    boundary
+                };
+                if head == boundary && info.anchor.min(len) == anchor {
+                    return None;
+                }
+                Some(CaretUpdate::new(info.index, boundary, anchor, None))
+            }
+        });
+
+        let changed = self.apply_caret_updates(updates);
+        if changed {
+            self.reset_preferred_column();
+            self.ensure_cursor_visible();
+        } else if !extend {
+            self.cursor_set_mut().reset_primary_preferred_column();
+        }
+        changed
     }
 
     fn set_selection(&mut self, start: usize, end: usize) {
@@ -1658,52 +2368,108 @@ impl InputState {
     }
 
     fn delete_selection(&mut self) -> bool {
-        if let Some((start, end)) = self.selection() {
-            let range = start..end;
-            let before = self.caret_snapshot();
-            let deleted = self.rope_slice_to_string(range.clone());
-            let after = CaretSnapshot::new(range.start, range.start);
-            let text_edit = TextEdit::new(range, deleted, String::new());
-            let transaction = EditTransaction::single(text_edit);
-            let command = EditCommand::new(before, after, transaction);
-            self.commit_edit(command)
-        } else {
-            false
-        }
+        let len = self.len_chars();
+        let edits = self.build_caret_edits(|info| {
+            if !info.has_selection() {
+                return None;
+            }
+            Some(CaretEdit::new(
+                info.index,
+                info.clamped_range(len),
+                String::new(),
+                0,
+                0,
+            ))
+        });
+
+        self.commit_caret_edits(edits)
     }
 
-    fn handle_pointer(&mut self, column: usize, row: usize, click_count: u8) -> bool {
+    fn handle_pointer(
+        &mut self,
+        column: usize,
+        row: usize,
+        click_count: u8,
+        modifiers: PointerModifiers,
+    ) -> bool {
         let index = self.column_to_index(column, row);
 
+        if modifiers.alt {
+            return self.add_pointer_caret(index, click_count.max(1));
+        }
+
         match click_count {
-            1 => self.move_to_index(index, false),
+            1 => {
+                let len = self.len_chars();
+                let anchor = if modifiers.shift {
+                    self.primary_caret().anchor.min(len)
+                } else {
+                    index
+                };
+                self.set_carets(
+                    [CursorPosition {
+                        head: index,
+                        anchor,
+                    }],
+                    0,
+                );
+                self.reset_preferred_column();
+                true
+            }
             2 => {
                 let (start, end) = self.word_range_at(index);
-                self.set_selection(start, end);
+                self.set_carets(
+                    [CursorPosition {
+                        head: end,
+                        anchor: start,
+                    }],
+                    0,
+                );
+                self.reset_preferred_column();
                 true
             }
             3 => {
                 let len = self.len_chars();
-                self.set_selection(0, len);
+                self.set_carets(
+                    [CursorPosition {
+                        head: len,
+                        anchor: 0,
+                    }],
+                    0,
+                );
+                self.reset_preferred_column();
                 true
             }
-            _ => self.move_to_index(index, false),
+            _ => {
+                self.set_carets(
+                    [CursorPosition {
+                        head: index,
+                        anchor: index,
+                    }],
+                    0,
+                );
+                self.reset_preferred_column();
+                true
+            }
         }
     }
 
     fn column_to_index(&self, column: usize, row: usize) -> usize {
+        let gutter_width = self.gutter_width();
+        let text_column = column.saturating_sub(gutter_width);
+        
         if self.is_multiline() {
             let line_count = self.line_count();
             let max_index = line_count - 1;
             let scroll_y = self.viewport().scroll_y;
             let absolute_row = scroll_y.saturating_add(row).min(max_index);
-            self.index_at_line_column(absolute_row, column)
+            self.index_at_line_column(absolute_row, text_column)
         } else {
             let mut consumed = 0usize;
             let mut index = 0usize;
             for ch in self.document.rope.chars() {
                 let width = Self::char_width(ch);
-                if column < consumed + width {
+                if text_column < consumed + width {
                     return index;
                 }
                 consumed += width;
@@ -1711,6 +2477,34 @@ impl InputState {
             }
             index
         }
+    }
+
+    fn add_pointer_caret(&mut self, index: usize, click_count: u8) -> bool {
+        let click = click_count.max(1);
+        let (head, anchor) = match click {
+            1 => (index, index),
+            2 => {
+                let (start, end) = self.word_range_at(index);
+                (end, start)
+            }
+            3 => {
+                let len = self.len_chars();
+                (len, 0)
+            }
+            _ => (index, index),
+        };
+
+        let caret = Caret {
+            head,
+            anchor,
+            preferred_column: None,
+        };
+
+        let cursor_set = &mut self.primary_view_mut().cursor_set;
+        cursor_set.upsert_caret(caret, true);
+        self.reset_preferred_column();
+        self.ensure_cursor_visible();
+        true
     }
 
     fn prev_word_boundary(&self, mut index: usize) -> usize {
@@ -1925,6 +2719,7 @@ pub enum InputMsg {
         column: u16,
         row: u16,
         click_count: u8,
+        modifiers: PointerModifiers,
     },
     Replace(String),
     SelectRange {
@@ -1983,6 +2778,12 @@ where
                 column: event.local_x,
                 row: event.local_y,
                 click_count: event.click_count,
+                modifiers: PointerModifiers {
+                    ctrl: event.ctrl,
+                    alt: event.alt,
+                    shift: event.shift,
+                    super_key: event.super_key,
+                },
             };
             Some(mouse_handler(msg))
         } else {
@@ -2012,7 +2813,9 @@ struct HighlightRun {
 struct InputRenderable {
     rope: Rope,
     cursor: usize,
+    cursor_heads: Vec<usize>,
     selection: Option<(usize, usize)>,
+    selection_ranges: Vec<(usize, usize)>, // all caret selections
     base_style: Style,
     selection_style: Style,
     cursor_style: Style,
@@ -2046,10 +2849,34 @@ impl InputRenderable {
         let len_chars = rope.len_chars();
         let cursor = state.cursor().min(len_chars);
         let selection = state.selection();
+        // Collect all caret heads (including primary) to render their cells with cursor style.
+        let cursor_heads: Vec<usize> = state
+            .carets()
+            .into_iter()
+            .map(|c| c.head.min(len_chars))
+            .collect();
 
         let base_style = style.text.clone();
         let selection_style = style.selection.clone();
         let cursor_style = style.cursor.clone();
+
+        // Build selection ranges for all carets (including primary)
+        let selection_ranges: Vec<(usize, usize)> = state
+            .carets()
+            .into_iter()
+            .filter_map(|c| {
+                if c.head == c.anchor {
+                    None
+                } else {
+                    let (start, end) = if c.head < c.anchor {
+                        (c.head, c.anchor)
+                    } else {
+                        (c.anchor, c.head)
+                    };
+                    Some((start.min(len_chars), end.min(len_chars)))
+                }
+            })
+            .collect();
 
         let cursor_symbol = style.cursor_symbol.to_string();
         let symbol_width_sum: usize = cursor_symbol
@@ -2080,7 +2907,9 @@ impl InputRenderable {
         Self {
             rope,
             cursor,
+            cursor_heads,
             selection,
+            selection_ranges,
             base_style,
             selection_style,
             cursor_style,
@@ -2194,11 +3023,20 @@ impl InputRenderable {
     }
 
     fn run_style_for_index(&self, idx: usize, highlight_runs: &[HighlightRun]) -> RunStyle {
+        // Any selection range (from any caret) takes precedence over cursor heads.
+        for (start, end) in &self.selection_ranges {
+            if idx >= *start && idx < *end {
+                return RunStyle::Selection;
+            }
+        }
+        // Fallback to legacy single-selection (primary) if present (covers case with only one caret).
         if let Some((start, end)) = self.selection {
             if idx >= start && idx < end {
                 return RunStyle::Selection;
             }
-        } else if idx == self.cursor && self.cursor < self.len_chars {
+        }
+        // Cursor highlighting for any caret head.
+        if self.cursor_heads.iter().any(|&h| h == idx) && idx < self.len_chars {
             return RunStyle::Cursor;
         }
         if let Some(style) = Self::highlight_style_at(highlight_runs, idx) {
@@ -2457,7 +3295,9 @@ impl Renderable for InputRenderable {
 
             let line_idx = scroll_y + row;
             if line_idx >= self.line_count {
-                if gutter_width > 0 && let Some(mut text) = self.gutter_text(line_idx) {
+                if gutter_width > 0
+                    && let Some(mut text) = self.gutter_text(line_idx)
+                {
                     if text.len() > gutter_width {
                         let start = text.len() - gutter_width;
                         text.replace_range(..start, "");
@@ -2467,7 +3307,9 @@ impl Renderable for InputRenderable {
                 continue;
             }
 
-            if gutter_width > 0 && let Some(mut text) = self.gutter_text(line_idx) {
+            if gutter_width > 0
+                && let Some(mut text) = self.gutter_text(line_idx)
+            {
                 if text.len() > gutter_width {
                     let start = text.len() - gutter_width;
                     text.replace_range(..start, "");
@@ -2807,7 +3649,11 @@ mod tests {
             "YZ".into(),
         );
         let transaction = EditTransaction::new(vec![first_edit, second_edit]);
-        let after = CaretSnapshot::new(0, 0);
+        let after = state.snapshot_with_primary(|caret| {
+            caret.head = 0;
+            caret.anchor = 0;
+            caret.preferred_column = None;
+        });
         let command = EditCommand::new(before, after, transaction);
 
         assert!(state.commit_edit(command));
@@ -2815,6 +3661,115 @@ mod tests {
 
         assert!(state.undo());
         assert_eq!(state.value(), "abcdef");
+    }
+
+    #[test]
+    fn multi_caret_insert_text_inserts_at_each_caret() {
+        let mut state = InputState::with_value("abcd");
+        state.set_carets(
+            [
+                CursorPosition { head: 0, anchor: 0 },
+                CursorPosition {
+                    head: state.len_chars(),
+                    anchor: state.len_chars(),
+                },
+            ],
+            0,
+        );
+
+        assert!(state.update(InputMsg::InsertText("x".into())));
+        assert_eq!(state.value(), "xabcdx");
+        assert_eq!(
+            state.carets(),
+            vec![
+                CursorPosition { head: 1, anchor: 1 },
+                CursorPosition { head: 6, anchor: 6 },
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_caret_backspace_deletes_each_caret() {
+        let mut state = InputState::with_value("abcdef");
+        state.set_carets(
+            [
+                CursorPosition { head: 2, anchor: 2 },
+                CursorPosition { head: 5, anchor: 5 },
+            ],
+            0,
+        );
+
+        assert!(state.update(InputMsg::DeleteBackward));
+        assert_eq!(state.value(), "acdf");
+        assert_eq!(
+            state.carets(),
+            vec![
+                CursorPosition { head: 1, anchor: 1 },
+                CursorPosition { head: 3, anchor: 3 },
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_caret_move_right_advances_each_caret() {
+        let mut state = InputState::with_value("wxyz");
+        state.set_carets(
+            [
+                CursorPosition { head: 0, anchor: 0 },
+                CursorPosition { head: 2, anchor: 2 },
+            ],
+            0,
+        );
+
+        assert!(state.update(InputMsg::MoveRight { extend: false }));
+        assert_eq!(
+            state.carets(),
+            vec![
+                CursorPosition { head: 1, anchor: 1 },
+                CursorPosition { head: 3, anchor: 3 },
+            ]
+        );
+    }
+
+    #[test]
+    fn multi_caret_undo_restores_carets_and_text() {
+        let mut state = InputState::with_value("hello");
+        state.set_carets(
+            [
+                CursorPosition { head: 1, anchor: 1 },
+                CursorPosition { head: 4, anchor: 4 },
+            ],
+            1,
+        );
+        let before_positions = state.carets();
+
+        state.update(InputMsg::InsertChar('!'));
+        assert_ne!(state.value(), "hello");
+
+        assert!(state.undo());
+        assert_eq!(state.value(), "hello");
+        assert_eq!(state.carets(), before_positions);
+    }
+
+    #[test]
+    fn set_carets_sorts_and_preserves_primary() {
+        let mut state = InputState::with_value("abcd");
+        state.set_carets(
+            [
+                CursorPosition { head: 3, anchor: 3 },
+                CursorPosition { head: 1, anchor: 1 },
+            ],
+            0,
+        );
+
+        assert_eq!(
+            state.carets(),
+            vec![
+                CursorPosition { head: 1, anchor: 1 },
+                CursorPosition { head: 3, anchor: 3 },
+            ]
+        );
+        assert_eq!(state.primary_caret_index(), 1);
     }
 
     #[test]
@@ -2831,6 +3786,7 @@ mod tests {
             column: 2,
             row: 0,
             click_count: 2,
+            modifiers: PointerModifiers::default(),
         });
         assert_eq!(state.selection(), Some((0, 3)));
     }
@@ -2871,8 +3827,55 @@ mod tests {
             column: 0,
             row: 1,
             click_count: 1,
+            modifiers: PointerModifiers::default(),
         });
         assert_eq!(state.cursor(), 6);
+    }
+
+    #[test]
+    fn pointer_accounts_for_gutter_offset() {
+        let mut state = InputState::with_value_multiline("hello\nworld");
+        state.set_line_number_gutter(true);
+        
+        let gutter_width = state.gutter_width();
+        assert!(gutter_width > 0, "gutter should have non-zero width");
+        
+        state.update(InputMsg::Pointer {
+            column: gutter_width as u16,
+            row: 0,
+            click_count: 1,
+            modifiers: PointerModifiers::default(),
+        });
+        assert_eq!(state.cursor(), 0, "click at gutter edge should place cursor at start of line");
+        
+        state.update(InputMsg::Pointer {
+            column: (gutter_width + 2) as u16,
+            row: 0,
+            click_count: 1,
+            modifiers: PointerModifiers::default(),
+        });
+        assert_eq!(state.cursor(), 2, "click at gutter+2 should place cursor at index 2");
+    }
+
+    #[test]
+    fn pointer_works_correctly_in_single_line_without_gutter() {
+        let mut state = InputState::with_value("hello");
+        
+        state.update(InputMsg::Pointer {
+            column: 0,
+            row: 0,
+            click_count: 1,
+            modifiers: PointerModifiers::default(),
+        });
+        assert_eq!(state.cursor(), 0);
+        
+        state.update(InputMsg::Pointer {
+            column: 2,
+            row: 0,
+            click_count: 1,
+            modifiers: PointerModifiers::default(),
+        });
+        assert_eq!(state.cursor(), 2);
     }
 
     #[test]
@@ -3043,8 +4046,8 @@ mod tests {
     #[test]
     fn default_keybindings_ctrl_a_e_multiline_move_line_bounds() {
         let state = InputState::new_multiline();
-        let ctrl_a = Key::with_modifiers(KeyCode::Char('a'), true, false, false);
-        let ctrl_shift_e = Key::with_modifiers(KeyCode::Char('e'), true, false, true);
+        let ctrl_a = Key::with_modifiers(KeyCode::Char('a'), true, false, false, false);
+        let ctrl_shift_e = Key::with_modifiers(KeyCode::Char('e'), true, false, true, false);
 
         assert!(matches!(
             default_keybindings(&state, ctrl_a, |m| m),
@@ -3059,8 +4062,8 @@ mod tests {
     #[test]
     fn default_keybindings_ctrl_a_e_single_line_move_buffer_bounds() {
         let state = InputState::default();
-        let ctrl_a = Key::with_modifiers(KeyCode::Char('a'), true, false, false);
-        let ctrl_e = Key::with_modifiers(KeyCode::Char('e'), true, false, false);
+        let ctrl_a = Key::with_modifiers(KeyCode::Char('a'), true, false, false, false);
+        let ctrl_e = Key::with_modifiers(KeyCode::Char('e'), true, false, false, false);
 
         assert!(matches!(
             default_keybindings(&state, ctrl_a, |m| m),
@@ -3076,7 +4079,7 @@ mod tests {
     fn default_keybindings_home_end_single_line_move_buffer_bounds() {
         let state = InputState::default();
         let home = Key::new(KeyCode::Home);
-        let shift_end = Key::with_modifiers(KeyCode::End, false, false, true);
+        let shift_end = Key::with_modifiers(KeyCode::End, false, false, true, false);
 
         assert!(matches!(
             default_keybindings(&state, home, |m| m),
@@ -3092,9 +4095,9 @@ mod tests {
     fn default_keybindings_home_end_multiline_respect_ctrl() {
         let state = InputState::new_multiline();
         let home = Key::new(KeyCode::Home);
-        let ctrl_home = Key::with_modifiers(KeyCode::Home, true, false, false);
+        let ctrl_home = Key::with_modifiers(KeyCode::Home, true, false, false, false);
         let end = Key::new(KeyCode::End);
-        let ctrl_shift_end = Key::with_modifiers(KeyCode::End, true, false, true);
+        let ctrl_shift_end = Key::with_modifiers(KeyCode::End, true, false, true, false);
 
         assert!(matches!(
             default_keybindings(&state, home, |m| m),
@@ -3625,5 +4628,91 @@ mod tests {
         assert_eq!(row1[4].ch, 'b');
         assert_eq!(row1[5].ch, 'a');
         assert_eq!(row1[6].ch, 'r');
+    }
+    // --- New multi-caret and pointer behavior tests (moved from text_editor) ---
+    #[test]
+    fn add_caret_above_adds_new_caret() {
+        let mut state = InputState::with_value_multiline("line1\nline2\nline3");
+        // Move cursor to second line (line2)
+        state.update(InputMsg::MoveDown { extend: false });
+        assert_eq!(state.carets().len(), 1, "should start with single caret");
+        let added = state.add_caret_above();
+        assert!(added, "add_caret_above should report a new caret added");
+        assert_eq!(state.carets().len(), 2, "should now have two carets");
+    }
+
+    #[test]
+    fn add_caret_below_adds_new_caret() {
+        let mut state = InputState::with_value_multiline("line1\nline2\nline3");
+        // Move caret to start (initial position is end-of-buffer for with_value_multiline),
+        // then down to the middle line so there is a valid line below to add a caret on.
+        state.update(InputMsg::MoveToStart { extend: false });
+        state.update(InputMsg::MoveDown { extend: false });
+        assert_eq!(state.carets().len(), 1, "should start with single caret");
+        let added = state.add_caret_below();
+        assert!(added, "add_caret_below should report a new caret added");
+        assert_eq!(state.carets().len(), 2, "should now have two carets");
+    }
+
+    #[test]
+    fn alt_click_adds_caret() {
+        let mut state = InputState::with_value_multiline("line1\nline2\nline3");
+        assert_eq!(state.carets().len(), 1);
+        // Alt single click on second line (row = 1)
+        state.update(InputMsg::Pointer {
+            column: 0,
+            row: 1,
+            click_count: 1,
+            modifiers: PointerModifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+                super_key: false,
+            },
+        });
+        assert_eq!(
+            state.carets().len(),
+            2,
+            "alt click should add a new caret without removing existing ones"
+        );
+    }
+
+    #[test]
+    fn plain_click_resets_to_single_caret() {
+        let mut state = InputState::with_value_multiline("line1\nline2\nline3");
+        // First add an extra caret via alt click
+        state.update(InputMsg::Pointer {
+            column: 0,
+            row: 1,
+            click_count: 1,
+            modifiers: PointerModifiers {
+                ctrl: false,
+                alt: true,
+                shift: false,
+                super_key: false,
+            },
+        });
+        assert_eq!(
+            state.carets().len(),
+            2,
+            "alt click should create second caret"
+        );
+        // Plain click (no alt) on third line should collapse to single caret
+        state.update(InputMsg::Pointer {
+            column: 0,
+            row: 2,
+            click_count: 1,
+            modifiers: PointerModifiers {
+                ctrl: false,
+                alt: false,
+                shift: false,
+                super_key: false,
+            },
+        });
+        assert_eq!(
+            state.carets().len(),
+            1,
+            "plain click should collapse back to a single caret"
+        );
     }
 }

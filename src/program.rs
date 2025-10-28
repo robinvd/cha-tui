@@ -664,6 +664,7 @@ fn map_mouse_event(mouse: termina::event::MouseEvent) -> Option<Event> {
         mouse.modifiers.contains(termina::event::Modifiers::CONTROL),
         mouse.modifiers.contains(termina::event::Modifiers::ALT),
         mouse.modifiers.contains(termina::event::Modifiers::SHIFT),
+        mouse.modifiers.contains(termina::event::Modifiers::SUPER),
     )))
 }
 
@@ -674,6 +675,7 @@ fn map_key_event(key: termina::event::KeyEvent) -> Option<Event> {
         ctrl: key.modifiers.contains(termina::event::Modifiers::CONTROL),
         alt: key.modifiers.contains(termina::event::Modifiers::ALT),
         shift: key.modifiers.contains(termina::event::Modifiers::SHIFT),
+        super_key: key.modifiers.contains(termina::event::Modifiers::SUPER),
     };
     Some(Event::Key(event_key))
 }

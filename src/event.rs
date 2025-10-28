@@ -12,6 +12,7 @@ pub struct Key {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+    pub super_key: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -24,6 +25,7 @@ pub struct MouseEvent {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
+    pub super_key: bool,
     pub click_count: u8,
 }
 
@@ -85,15 +87,23 @@ impl Key {
             ctrl: false,
             alt: false,
             shift: false,
+            super_key: false,
         }
     }
 
-    pub fn with_modifiers(code: KeyCode, ctrl: bool, alt: bool, shift: bool) -> Self {
+    pub fn with_modifiers(
+        code: KeyCode,
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+        super_key: bool,
+    ) -> Self {
         Self {
             code,
             ctrl,
             alt,
             shift,
+            super_key,
         }
     }
 }
@@ -109,6 +119,7 @@ impl MouseEvent {
             ctrl: false,
             alt: false,
             shift: false,
+            super_key: false,
             click_count: 0,
         }
     }
@@ -120,6 +131,7 @@ impl MouseEvent {
         ctrl: bool,
         alt: bool,
         shift: bool,
+        super_key: bool,
     ) -> Self {
         Self {
             x,
@@ -130,6 +142,7 @@ impl MouseEvent {
             ctrl,
             alt,
             shift,
+            super_key,
             click_count: 0,
         }
     }
