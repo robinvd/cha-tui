@@ -2002,6 +2002,7 @@ struct FileVersions {
     old: Option<FileContent>,
     new: Option<FileContent>,
     truncated: bool,
+    is_binary: bool,
 }
 
 #[derive(Clone)]
@@ -2019,7 +2020,7 @@ struct LineContent {
 
 impl FileContent {
     fn from_source(path: &str, source: LoadedContent) -> Self {
-        let LoadedContent { text, truncated } = source;
+        let LoadedContent { text, truncated, is_binary: _ } = source;
         let ends_with_newline = text.ends_with('\n');
         let text_lines: Vec<String> = text.lines().map(str::to_string).collect();
         let line_count = text_lines.len();
@@ -2109,11 +2110,14 @@ fn load_file_versions(entry: &FileEntry, focus: Focus) -> Result<FileVersions> {
 
     let old_truncated = old_source.as_ref().is_some_and(|content| content.truncated);
     let new_truncated = new_source.as_ref().is_some_and(|content| content.truncated);
+    let old_binary = old_source.as_ref().is_some_and(|content| content.is_binary);
+    let new_binary = new_source.as_ref().is_some_and(|content| content.is_binary);
 
     Ok(FileVersions {
         old: old_source.map(|content| FileContent::from_source(&entry.path, content)),
         new: new_source.map(|content| FileContent::from_source(&entry.path, content)),
         truncated: old_truncated || new_truncated,
+        is_binary: old_binary || new_binary,
     })
 }
 
@@ -2150,12 +2154,20 @@ fn load_limited_from_file(file: File) -> Result<LoadedContent> {
         false
     };
 
+    let sample_size = buffer.len().min(8000);
+    let is_binary = buffer[..sample_size].contains(&0);
     let text = String::from_utf8_lossy(&buffer).into_owned();
-    Ok(LoadedContent { text, truncated })
+    Ok(LoadedContent { text, truncated, is_binary })
 }
 
 fn build_diff_lines(versions: &FileVersions) -> Vec<DiffLine> {
     const CONTEXT_RADIUS: usize = 3;
+
+    if versions.is_binary {
+        let mut style = Style::fg(highlight::EVERFOREST_GREY1);
+        style.dim = true;
+        return vec![DiffLine::styled("Binary file (not shown)".to_string(), style)];
+    }
 
     let old_text = versions
         .old
@@ -2748,6 +2760,7 @@ mod tests {
             LoadedContent {
                 text: "foo\n".to_string(),
                 truncated: false,
+                is_binary: false,
             },
         );
         let new_content = FileContent::from_source(
@@ -2755,12 +2768,14 @@ mod tests {
             LoadedContent {
                 text: "bar\n".to_string(),
                 truncated: false,
+                is_binary: false,
             },
         );
         let versions = FileVersions {
             old: Some(old_content),
             new: Some(new_content),
             truncated: false,
+            is_binary: false,
         };
 
         let lines = build_diff_lines(&versions);
@@ -2825,6 +2840,7 @@ mod tests {
             LoadedContent {
                 text: "impl Example {\n    fn foo() {}\n}\n".to_string(),
                 truncated: false,
+                is_binary: false,
             },
         );
         let new_content = FileContent::from_source(
@@ -2833,12 +2849,14 @@ mod tests {
                 text: "impl Example {\n    fn foo() {\n        println!(\"hi\");\n    }\n}\n"
                     .to_string(),
                 truncated: false,
+                is_binary: false,
             },
         );
         let versions = FileVersions {
             old: Some(old_content),
             new: Some(new_content),
             truncated: false,
+            is_binary: false,
         };
 
         let lines = build_diff_lines(&versions);
@@ -3021,6 +3039,38 @@ mod tests {
                 "    M scroll.rs".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn binary_files_show_message_instead_of_diff() {
+        let old_content = FileContent::from_source(
+            "image.png",
+            LoadedContent {
+                text: String::from_utf8_lossy(&[0x89, 0x50, 0x4E, 0x47, 0x00]).to_string(),
+                truncated: false,
+                is_binary: true,
+            },
+        );
+        let new_content = FileContent::from_source(
+            "image.png",
+            LoadedContent {
+                text: String::from_utf8_lossy(&[0x89, 0x50, 0x4E, 0x47, 0x01]).to_string(),
+                truncated: false,
+                is_binary: true,
+            },
+        );
+        let versions = FileVersions {
+            old: Some(old_content),
+            new: Some(new_content),
+            truncated: false,
+            is_binary: true,
+        };
+
+        let lines = build_diff_lines(&versions);
+
+        assert_eq!(lines.len(), 1);
+        let line_text = &lines[0].spans[0].content;
+        assert_eq!(line_text, "Binary file (not shown)");
     }
 }
 

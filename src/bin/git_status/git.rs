@@ -155,6 +155,7 @@ impl ParsedStatus {
 pub struct LoadedContent {
     pub text: String,
     pub truncated: bool,
+    pub is_binary: bool,
 }
 
 pub fn read_index_file(path: &str) -> Result<Option<LoadedContent>> {
@@ -163,6 +164,11 @@ pub fn read_index_file(path: &str) -> Result<Option<LoadedContent>> {
 
 pub fn read_head_file(path: &str) -> Result<Option<LoadedContent>> {
     git_show(&format!("HEAD:{}", path))
+}
+
+fn is_likely_binary(data: &[u8]) -> bool {
+    let sample_size = data.len().min(8000);
+    data[..sample_size].contains(&0)
 }
 
 fn git_show(spec: &str) -> Result<Option<LoadedContent>> {
@@ -181,8 +187,9 @@ fn git_show(spec: &str) -> Result<Option<LoadedContent>> {
         } else {
             stdout.as_slice()
         };
+        let is_binary = is_likely_binary(slice);
         let text = String::from_utf8_lossy(slice).into_owned();
-        return Ok(Some(LoadedContent { text, truncated }));
+        return Ok(Some(LoadedContent { text, truncated, is_binary }));
     }
 
     if matches!(output.status.code(), Some(128)) {
