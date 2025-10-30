@@ -1,6 +1,6 @@
 use ropey::Rope;
 use smallvec::{SmallVec, smallvec};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ops::Range;
 use termwiz::cell::unicode_column_width;
 
@@ -2457,7 +2457,7 @@ impl InputState {
     fn column_to_index(&self, column: usize, row: usize) -> usize {
         let gutter_width = self.gutter_width();
         let text_column = column.saturating_sub(gutter_width);
-        
+
         if self.is_multiline() {
             let line_count = self.line_count();
             let max_index = line_count - 1;
@@ -2640,7 +2640,6 @@ pub struct InputStyle {
     pub text: Style,
     pub selection: Style,
     pub cursor: Style,
-    pub cursor_symbol: &'static str,
     pub gutter: Style,
 }
 
@@ -2669,7 +2668,6 @@ impl Default for InputStyle {
             text: Style::default(),
             selection,
             cursor,
-            cursor_symbol: " ",
             gutter,
         }
     }
@@ -2733,6 +2731,7 @@ pub enum InputMsg {
     },
 }
 
+/// Classification of characters for word boundary detection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WordKind {
     Whitespace,
@@ -2812,15 +2811,13 @@ struct HighlightRun {
 #[derive(Clone, Debug)]
 struct InputRenderable {
     rope: Rope,
-    cursor: usize,
-    cursor_heads: Vec<usize>,
+    primary_cursor: usize,
+    cursor_positions: HashSet<usize>,
     selection: Option<(usize, usize)>,
     selection_ranges: Vec<(usize, usize)>, // all caret selections
     base_style: Style,
     selection_style: Style,
     cursor_style: Style,
-    cursor_symbol: String,
-    cursor_symbol_width: usize,
     max_width: usize,
     line_count: usize,
     cursor_line: usize,
@@ -2849,8 +2846,7 @@ impl InputRenderable {
         let len_chars = rope.len_chars();
         let cursor = state.cursor().min(len_chars);
         let selection = state.selection();
-        // Collect all caret heads (including primary) to render their cells with cursor style.
-        let cursor_heads: Vec<usize> = state
+        let cursor_positions: HashSet<usize> = state
             .carets()
             .into_iter()
             .map(|c| c.head.min(len_chars))
@@ -2860,7 +2856,6 @@ impl InputRenderable {
         let selection_style = style.selection.clone();
         let cursor_style = style.cursor.clone();
 
-        // Build selection ranges for all carets (including primary)
         let selection_ranges: Vec<(usize, usize)> = state
             .carets()
             .into_iter()
@@ -2878,18 +2873,6 @@ impl InputRenderable {
             })
             .collect();
 
-        let cursor_symbol = style.cursor_symbol.to_string();
-        let symbol_width_sum: usize = cursor_symbol
-            .chars()
-            .map(InputState::char_width)
-            .filter(|width| *width > 0)
-            .sum();
-        let cursor_symbol_width = if symbol_width_sum == 0 {
-            1
-        } else {
-            symbol_width_sum
-        };
-
         let line_count = rope.len_lines().max(1);
         let gutter_metrics = state.primary_view().gutter.metrics(line_count);
         let gutter_style = style.gutter.clone();
@@ -2900,21 +2883,18 @@ impl InputRenderable {
             cursor,
             cursor_line,
             len_chars,
-            cursor_symbol_width,
             gutter_metrics.width,
         );
 
         Self {
             rope,
-            cursor,
-            cursor_heads,
+            primary_cursor: cursor,
+            cursor_positions,
             selection,
             selection_ranges,
             base_style,
             selection_style,
             cursor_style,
-            cursor_symbol,
-            cursor_symbol_width,
             max_width,
             line_count,
             cursor_line,
@@ -2931,7 +2911,6 @@ impl InputRenderable {
         cursor: usize,
         cursor_line: usize,
         len_chars: usize,
-        cursor_symbol_width: usize,
         gutter_width: usize,
     ) -> usize {
         let mut max_width = 0;
@@ -2943,13 +2922,13 @@ impl InputRenderable {
                 && line_idx == cursor_line
                 && (cursor == len_chars || matches!(cursor_char, Some('\n')))
             {
-                width += cursor_symbol_width;
+                width += 1;
             }
             max_width = max_width.max(width);
         }
 
         if max_width == 0 && selection.is_none() {
-            max_width = cursor_symbol_width.max(1);
+            max_width = 1;
         }
 
         max_width = max_width.max(1);
@@ -3023,20 +3002,15 @@ impl InputRenderable {
     }
 
     fn run_style_for_index(&self, idx: usize, highlight_runs: &[HighlightRun]) -> RunStyle {
-        // Any selection range (from any caret) takes precedence over cursor heads.
         for (start, end) in &self.selection_ranges {
             if idx >= *start && idx < *end {
                 return RunStyle::Selection;
             }
         }
-        // Fallback to legacy single-selection (primary) if present (covers case with only one caret).
-        if let Some((start, end)) = self.selection {
-            if idx >= start && idx < end {
-                return RunStyle::Selection;
-            }
-        }
-        // Cursor highlighting for any caret head.
-        if self.cursor_heads.iter().any(|&h| h == idx) && idx < self.len_chars {
+        if self.cursor_positions.contains(&idx)
+            && idx < self.len_chars
+            && idx != self.primary_cursor
+        {
             return RunStyle::Cursor;
         }
         if let Some(style) = Self::highlight_style_at(highlight_runs, idx) {
@@ -3059,6 +3033,8 @@ impl InputRenderable {
         base_attrs: &CellAttributes,
         selection_attrs: &CellAttributes,
         cursor_attrs: &CellAttributes,
+        run_start_idx: usize,
+        primary_cursor: usize,
     ) {
         if run_text.is_empty() || *run_width == 0 {
             run_text.clear();
@@ -3088,7 +3064,10 @@ impl InputRenderable {
             }
         }
 
-        if matches!(style_ref, RunStyle::Cursor) && cursor_position.is_none() {
+        if matches!(style_ref, RunStyle::Cursor)
+            && cursor_position.is_none()
+            && run_start_idx == primary_cursor
+        {
             cursor_position.replace((*run_start_x, y));
         }
 
@@ -3099,124 +3078,6 @@ impl InputRenderable {
         *run_style = None;
         *run_start_x = *cursor_x;
     }
-
-    #[allow(clippy::too_many_arguments)]
-    fn emit_cursor_symbol(
-        &self,
-        ctx: &mut RenderContext<'_>,
-        skip_cols: &mut usize,
-        remaining: &mut usize,
-        cursor_x: &mut usize,
-        run_style: &mut Option<RunStyle>,
-        run_text: &mut String,
-        run_width: &mut usize,
-        run_start_x: &mut usize,
-        y: usize,
-        cursor_position: &mut Option<(usize, usize)>,
-        base_attrs: &CellAttributes,
-        selection_attrs: &CellAttributes,
-        cursor_attrs: &CellAttributes,
-    ) {
-        for ch in self.cursor_symbol.chars() {
-            let width = InputState::char_width(ch);
-            if width == 0 {
-                continue;
-            }
-            if *skip_cols >= width {
-                *skip_cols -= width;
-                continue;
-            } else if *skip_cols > 0 {
-                *skip_cols = 0;
-            }
-
-            if width > *remaining {
-                Self::flush_run(
-                    ctx,
-                    run_style,
-                    run_text,
-                    run_width,
-                    run_start_x,
-                    cursor_x,
-                    remaining,
-                    y,
-                    cursor_position,
-                    base_attrs,
-                    selection_attrs,
-                    cursor_attrs,
-                );
-                break;
-            }
-
-            if !matches!(run_style.as_ref(), Some(RunStyle::Cursor)) {
-                Self::flush_run(
-                    ctx,
-                    run_style,
-                    run_text,
-                    run_width,
-                    run_start_x,
-                    cursor_x,
-                    remaining,
-                    y,
-                    cursor_position,
-                    base_attrs,
-                    selection_attrs,
-                    cursor_attrs,
-                );
-                if *remaining == 0 {
-                    break;
-                }
-                *run_style = Some(RunStyle::Cursor);
-                *run_start_x = *cursor_x;
-            }
-
-            if *run_width + width > *remaining {
-                Self::flush_run(
-                    ctx,
-                    run_style,
-                    run_text,
-                    run_width,
-                    run_start_x,
-                    cursor_x,
-                    remaining,
-                    y,
-                    cursor_position,
-                    base_attrs,
-                    selection_attrs,
-                    cursor_attrs,
-                );
-                if *remaining == 0 {
-                    break;
-                }
-                if !matches!(run_style.as_ref(), Some(RunStyle::Cursor)) {
-                    *run_style = Some(RunStyle::Cursor);
-                    *run_start_x = *cursor_x;
-                }
-            }
-
-            if run_text.is_empty() {
-                *run_style = Some(RunStyle::Cursor);
-                *run_start_x = *cursor_x;
-            }
-
-            run_text.push(ch);
-            *run_width += width;
-        }
-
-        Self::flush_run(
-            ctx,
-            run_style,
-            run_text,
-            run_width,
-            run_start_x,
-            cursor_x,
-            remaining,
-            y,
-            cursor_position,
-            base_attrs,
-            selection_attrs,
-            cursor_attrs,
-        );
-    }
 }
 
 impl Renderable for InputRenderable {
@@ -3226,13 +3087,11 @@ impl Renderable for InputRenderable {
         };
 
         if o.rope != self.rope
-            || o.cursor != self.cursor
+            || o.primary_cursor != self.primary_cursor
             || o.selection != self.selection
             || o.base_style != self.base_style
             || o.selection_style != self.selection_style
             || o.cursor_style != self.cursor_style
-            || o.cursor_symbol != self.cursor_symbol
-            || o.cursor_symbol_width != self.cursor_symbol_width
             || o.max_width != self.max_width
             || o.line_count != self.line_count
             || o.cursor_line != self.cursor_line
@@ -3337,13 +3196,18 @@ impl Renderable for InputRenderable {
                 self.rope.line_to_char(line_idx + 1).min(self.len_chars)
             };
 
+            let mut run_start_idx = line_start;
+
             let mut idx = line_start;
             while idx < line_end {
                 let ch = self.rope.char(idx);
                 let style = self.run_style_for_index(idx, highlight_runs);
 
                 if ch == '\n' {
-                    if matches!(style, RunStyle::Cursor) && self.selection.is_none() {
+                    if idx == self.primary_cursor
+                        && self.selection.is_none()
+                        && cursor_position.is_none()
+                    {
                         Self::flush_run(
                             ctx,
                             &mut run_style,
@@ -3357,23 +3221,10 @@ impl Renderable for InputRenderable {
                             &base_attrs,
                             &selection_attrs,
                             &cursor_attrs,
+                            run_start_idx,
+                            self.primary_cursor,
                         );
-
-                        self.emit_cursor_symbol(
-                            ctx,
-                            &mut line_skip,
-                            &mut remaining,
-                            &mut cursor_x,
-                            &mut run_style,
-                            &mut run_text,
-                            &mut run_width,
-                            &mut run_start_x,
-                            y,
-                            &mut cursor_position,
-                            &base_attrs,
-                            &selection_attrs,
-                            &cursor_attrs,
-                        );
+                        cursor_position = Some((cursor_x, y));
                     }
                     idx += 1;
                     continue;
@@ -3407,12 +3258,15 @@ impl Renderable for InputRenderable {
                         &base_attrs,
                         &selection_attrs,
                         &cursor_attrs,
+                        run_start_idx,
+                        self.primary_cursor,
                     );
                     if remaining == 0 {
                         break;
                     }
                     run_style = Some(style.clone());
                     run_start_x = cursor_x;
+                    run_start_idx = idx;
                 }
 
                 if width > remaining {
@@ -3429,6 +3283,8 @@ impl Renderable for InputRenderable {
                         &base_attrs,
                         &selection_attrs,
                         &cursor_attrs,
+                        run_start_idx,
+                        self.primary_cursor,
                     );
                     break;
                 }
@@ -3447,6 +3303,8 @@ impl Renderable for InputRenderable {
                         &base_attrs,
                         &selection_attrs,
                         &cursor_attrs,
+                        run_start_idx,
+                        self.primary_cursor,
                     );
                     if remaining == 0 {
                         break;
@@ -3454,12 +3312,21 @@ impl Renderable for InputRenderable {
                     if run_style.is_none() {
                         run_style = Some(style.clone());
                         run_start_x = cursor_x;
+                        run_start_idx = idx;
                     }
                 }
 
                 if run_style.is_none() {
                     run_style = Some(style.clone());
                     run_start_x = cursor_x;
+                    run_start_idx = idx;
+                }
+
+                if idx == self.primary_cursor
+                    && cursor_position.is_none()
+                    && self.selection.is_none()
+                {
+                    cursor_position = Some((run_start_x + run_width, y));
                 }
 
                 run_text.push(ch);
@@ -3480,27 +3347,17 @@ impl Renderable for InputRenderable {
                 &base_attrs,
                 &selection_attrs,
                 &cursor_attrs,
+                run_start_idx,
+                self.primary_cursor,
             );
 
             if self.selection.is_none()
-                && self.cursor == self.len_chars
+                && self.primary_cursor == self.len_chars
                 && line_idx == self.cursor_line
             {
-                self.emit_cursor_symbol(
-                    ctx,
-                    &mut line_skip,
-                    &mut remaining,
-                    &mut cursor_x,
-                    &mut run_style,
-                    &mut run_text,
-                    &mut run_width,
-                    &mut run_start_x,
-                    y,
-                    &mut cursor_position,
-                    &base_attrs,
-                    &selection_attrs,
-                    &cursor_attrs,
-                );
+                if cursor_position.is_none() {
+                    cursor_position = Some((cursor_x, y));
+                }
             }
         }
 
@@ -3836,31 +3693,39 @@ mod tests {
     fn pointer_accounts_for_gutter_offset() {
         let mut state = InputState::with_value_multiline("hello\nworld");
         state.set_line_number_gutter(true);
-        
+
         let gutter_width = state.gutter_width();
         assert!(gutter_width > 0, "gutter should have non-zero width");
-        
+
         state.update(InputMsg::Pointer {
             column: gutter_width as u16,
             row: 0,
             click_count: 1,
             modifiers: PointerModifiers::default(),
         });
-        assert_eq!(state.cursor(), 0, "click at gutter edge should place cursor at start of line");
-        
+        assert_eq!(
+            state.cursor(),
+            0,
+            "click at gutter edge should place cursor at start of line"
+        );
+
         state.update(InputMsg::Pointer {
             column: (gutter_width + 2) as u16,
             row: 0,
             click_count: 1,
             modifiers: PointerModifiers::default(),
         });
-        assert_eq!(state.cursor(), 2, "click at gutter+2 should place cursor at index 2");
+        assert_eq!(
+            state.cursor(),
+            2,
+            "click at gutter+2 should place cursor at index 2"
+        );
     }
 
     #[test]
     fn pointer_works_correctly_in_single_line_without_gutter() {
         let mut state = InputState::with_value("hello");
-        
+
         state.update(InputMsg::Pointer {
             column: 0,
             row: 0,
@@ -3868,7 +3733,7 @@ mod tests {
             modifiers: PointerModifiers::default(),
         });
         assert_eq!(state.cursor(), 0);
-        
+
         state.update(InputMsg::Pointer {
             column: 2,
             row: 0,
@@ -3930,8 +3795,7 @@ mod tests {
 
         state.update(InputMsg::SetViewportSize { cols: 4, rows: 2 });
 
-        let mut style = InputStyle::default();
-        style.cursor_symbol = "|";
+        let style = InputStyle::default();
 
         let renderable = InputRenderable::new(&state, &style);
         assert_eq!(state.scroll_x(), 0);
@@ -3969,7 +3833,7 @@ mod tests {
         let first = lines.next().unwrap_or("");
         let second = lines.next().unwrap_or("");
 
-        assert!(first.starts_with("123|"), "first line: {:?}", first);
+        assert!(first.starts_with("123"), "first line: {:?}", first);
         assert!(second.starts_with("4"), "second line: {:?}", second);
     }
 
@@ -4151,13 +4015,10 @@ mod tests {
 
         let back = renderer.buffer().back_buffer();
         let cursor_cell = &back[0][0];
-        let expected_bg = Rgba::opaque(229, 229, 229);
-        let expected_fg = Rgba::opaque(0, 0, 0);
 
         assert_eq!(cursor_cell.ch, 'a');
-        assert_eq!(cursor_cell.attrs.background(), Some(expected_bg));
-        assert_eq!(cursor_cell.attrs.foreground(), Some(expected_fg));
-        assert!(cursor_cell.attrs.is_bold());
+        assert_eq!(cursor_cell.attrs.background(), None);
+        assert!(!cursor_cell.attrs.is_bold());
 
         let next_cell = &back[0][1];
         assert_eq!(next_cell.ch, 'b');
@@ -4481,16 +4342,8 @@ mod tests {
         assert_eq!(back[0][1].attrs.background(), None);
         assert!(!back[0][1].attrs.is_bold());
 
-        // The cursor placeholder space uses cursor style
-        let expected_bg = Rgba::opaque(229, 229, 229); // White
-        let expected_fg = Rgba::opaque(0, 0, 0); // Black
-        let cursor_cell = &back[0][2];
-        assert_eq!(cursor_cell.ch, ' ');
-        assert_eq!(cursor_cell.attrs.background(), Some(expected_bg));
-        assert_eq!(cursor_cell.attrs.foreground(), Some(expected_fg));
-        assert!(cursor_cell.attrs.is_bold());
-
-        for cell in &back[0][3..] {
+        // Remaining cells have no special styling - cursor is shown via terminal cursor
+        for cell in &back[0][2..] {
             assert_eq!(cell.attrs.background(), None);
             assert!(!cell.attrs.is_bold());
         }
@@ -4545,23 +4398,16 @@ mod tests {
         let row = &back[0];
 
         let expected_text_bg = Rgba::opaque(0x44, 0x55, 0x66);
-        let expected_cursor_bg = Rgba::opaque(0x11, 0x22, 0x33);
-        let expected_cursor_fg = Rgba::opaque(0xee, 0xdd, 0xcc);
 
         let text_len = state.len_chars();
         for cell in &row[..text_len] {
             assert_eq!(cell.attrs.background(), Some(expected_text_bg));
         }
 
-        let cursor_cell = &row[text_len];
-        assert_eq!(cursor_cell.ch, ' ');
-        assert_eq!(cursor_cell.attrs.background(), Some(expected_cursor_bg));
-        assert_eq!(cursor_cell.attrs.foreground(), Some(expected_cursor_fg));
-
-        for cell in &row[(text_len + 1)..] {
+        // All cells after the text should have the text background
+        for cell in &row[text_len..] {
             assert_eq!(cell.ch, ' ');
             assert_eq!(cell.attrs.background(), Some(expected_text_bg));
-            assert_ne!(cell.attrs.background(), Some(expected_cursor_bg));
         }
     }
 

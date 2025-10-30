@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{BufReader, ErrorKind, Read};
+use std::ops::Range;
 use std::path::Path;
 use std::result::Result as StdResult;
 
@@ -2013,6 +2014,7 @@ struct FileContent {
 struct LineContent {
     text: String,
     spans: Vec<TextSpan>,
+    context: Option<String>,
 }
 
 impl FileContent {
@@ -2021,12 +2023,19 @@ impl FileContent {
         let ends_with_newline = text.ends_with('\n');
         let text_lines: Vec<String> = text.lines().map(str::to_string).collect();
         let line_count = text_lines.len();
-        let highlight_lines = if truncated {
-            None
+        let (highlight_lines, line_contexts) = if truncated {
+            (None, vec![None; line_count])
         } else {
-            match highlight::highlight_lines(Path::new(path), &text) {
-                Some(lines) if lines.len() == line_count => Some(lines),
-                _ => None,
+            match highlight::highlight_with_context(Path::new(path), &text) {
+                Some((lines, contexts))
+                    if lines.len() == line_count && contexts.len() == line_count =>
+                {
+                    (Some(lines), contexts)
+                }
+                Some((lines, _)) if lines.len() == line_count => {
+                    (Some(lines), vec![None; line_count])
+                }
+                _ => (None, vec![None; line_count]),
             }
         };
         let mut lines = Vec::with_capacity(text_lines.len());
@@ -2047,6 +2056,7 @@ impl FileContent {
             lines.push(LineContent {
                 text: text_line,
                 spans,
+                context: line_contexts.get(idx).cloned().unwrap_or(None),
             });
         }
 
@@ -2058,6 +2068,12 @@ impl FileContent {
 
     fn line(&self, index: usize) -> Option<&LineContent> {
         self.lines.get(index)
+    }
+
+    fn context(&self, index: usize) -> Option<&str> {
+        self.lines
+            .get(index)
+            .and_then(|line| line.context.as_deref())
     }
 
     fn as_text(&self) -> String {
@@ -2171,7 +2187,7 @@ fn build_diff_lines(versions: &FileVersions) -> Vec<DiffLine> {
     let mut result = Vec::new();
 
     for group in diff.grouped_ops(CONTEXT_RADIUS) {
-        if let Some(header) = build_hunk_header(&group) {
+        if let Some(header) = build_hunk_header(&group, versions) {
             let mut style = Style::fg(highlight::EVERFOREST_GREY1);
             style.dim = true;
             result.push(DiffLine::styled(header, style));
@@ -2378,7 +2394,7 @@ fn prefix_match_len(a: &str, b: &str) -> usize {
     len
 }
 
-fn build_hunk_header(group: &[DiffOp]) -> Option<String> {
+fn build_hunk_header(group: &[DiffOp], versions: &FileVersions) -> Option<String> {
     if group.is_empty() {
         return None;
     }
@@ -2410,7 +2426,13 @@ fn build_hunk_header(group: &[DiffOp]) -> Option<String> {
     let old_range = format_hunk_range(old_start, old_count);
     let new_range = format_hunk_range(new_start, new_count);
 
-    Some(format!("@@ -{} +{} @@", old_range, new_range))
+    let mut header = format!("@@ -{} +{} @@", old_range, new_range);
+    if let Some(context) = hunk_context(group, versions) {
+        header.push(' ');
+        header.push_str(&context);
+    }
+
+    Some(header)
 }
 
 fn format_hunk_range(start: usize, count: usize) -> String {
@@ -2421,6 +2443,89 @@ fn format_hunk_range(start: usize, count: usize) -> String {
     } else {
         format!("{},{}", start + 1, count)
     }
+}
+
+fn hunk_context(group: &[DiffOp], versions: &FileVersions) -> Option<String> {
+    if versions.truncated {
+        return None;
+    }
+
+    if let Some(new_content) = &versions.new
+        && let Some(context) = context_from_content(new_content, group, |op| op.new_range())
+    {
+        return Some(context);
+    }
+
+    if let Some(old_content) = &versions.old
+        && let Some(context) = context_from_content(old_content, group, |op| op.old_range())
+    {
+        return Some(context);
+    }
+
+    None
+}
+
+fn context_from_content<F>(
+    content: &FileContent,
+    group: &[DiffOp],
+    mut range_fn: F,
+) -> Option<String>
+where
+    F: FnMut(&DiffOp) -> Range<usize>,
+{
+    let mut changed_ranges = Vec::new();
+    let mut all_ranges = Vec::new();
+
+    for op in group {
+        let range = range_fn(op);
+        if range.is_empty() {
+            continue;
+        }
+        if !matches!(op.tag(), DiffTag::Equal) {
+            changed_ranges.push(range.clone());
+        }
+        all_ranges.push(range);
+    }
+
+    for range in changed_ranges.iter().chain(all_ranges.iter()) {
+        if let Some(context) = context_in_range(content, range) {
+            return Some(context);
+        }
+    }
+
+    None
+}
+
+fn context_in_range(content: &FileContent, range: &Range<usize>) -> Option<String> {
+    let mut best: Option<(usize, usize, String)> = None;
+
+    for idx in range.clone() {
+        if let Some(context) = content.context(idx) {
+            if context.is_empty() {
+                continue;
+            }
+
+            let segments = context.split(" -> ").count();
+            let length = context.len();
+
+            match &mut best {
+                Some((best_segments, best_length, best_value)) => {
+                    if segments > *best_segments
+                        || (segments == *best_segments && length > *best_length)
+                    {
+                        *best_segments = segments;
+                        *best_length = length;
+                        *best_value = context.to_string();
+                    }
+                }
+                None => {
+                    best = Some((segments, length, context.to_string()));
+                }
+            }
+        }
+    }
+
+    best.map(|(_, _, value)| value)
 }
 
 fn highlight_with_fallback(
@@ -2702,6 +2807,53 @@ mod tests {
         assert!(
             added_row.starts_with("  1 | +bar"),
             "expected added row to show gutter, got {added_row:?}"
+        );
+    }
+
+    #[test]
+    fn build_hunk_header_includes_context_path() {
+        if std::env::var(runtime::HELIX_RUNTIME_ENV).is_err() {
+            eprintln!(
+                "Skipping build_hunk_header_includes_context_path because {} is not set",
+                runtime::HELIX_RUNTIME_ENV
+            );
+            return;
+        }
+
+        let old_content = FileContent::from_source(
+            "example.rs",
+            LoadedContent {
+                text: "impl Example {\n    fn foo() {}\n}\n".to_string(),
+                truncated: false,
+            },
+        );
+        let new_content = FileContent::from_source(
+            "example.rs",
+            LoadedContent {
+                text: "impl Example {\n    fn foo() {\n        println!(\"hi\");\n    }\n}\n"
+                    .to_string(),
+                truncated: false,
+            },
+        );
+        let versions = FileVersions {
+            old: Some(old_content),
+            new: Some(new_content),
+            truncated: false,
+        };
+
+        let lines = build_diff_lines(&versions);
+        let header = lines
+            .first()
+            .expect("expected header line")
+            .spans
+            .first()
+            .expect("expected header span")
+            .content
+            .clone();
+
+        assert!(
+            header.contains("impl Example -> fn foo"),
+            "expected header to include context, got {header:?}"
         );
     }
 

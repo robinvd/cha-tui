@@ -6,9 +6,10 @@ use std::time::Duration;
 
 use once_cell::sync::Lazy;
 use ropey::Rope;
+use tree_house::tree_sitter::Node;
 use tree_house::{
     InjectionLanguageMarker, Language as TreeHouseLanguage, LanguageConfig,
-    LanguageLoader as TreeHouseLanguageLoader, Syntax,
+    LanguageLoader as TreeHouseLanguageLoader, Syntax, TreeCursor,
     highlighter::{Highlight, HighlightEvent, Highlighter as TreeHouseHighlighter},
 };
 
@@ -523,14 +524,23 @@ pub fn language_for_path(path: &Path) -> Option<&'static str> {
     None
 }
 
-pub fn highlight_lines(path: &Path, source: &str) -> Option<Vec<Vec<TextSpan>>> {
+pub fn highlight_with_context(path: &Path, source: &str) -> Option<HighlightResult> {
     let language = language_for_path(path)?;
-    REGISTRY.highlight(language, source).ok()
+    REGISTRY.highlight_with_context(language, source).ok()
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn highlight_lines(path: &Path, source: &str) -> Option<HighlightLines> {
+    highlight_with_context(path, source).map(|(lines, _)| lines)
 }
 
 struct HighlightRegistry {
     loader: TreeHouseLoader,
 }
+
+type HighlightLines = Vec<Vec<TextSpan>>;
+type LineContexts = Vec<Option<String>>;
+type HighlightResult = (HighlightLines, LineContexts);
 
 impl HighlightRegistry {
     fn new() -> Result<Self> {
@@ -539,7 +549,7 @@ impl HighlightRegistry {
         })
     }
 
-    fn highlight(&self, language_name: &str, source: &str) -> Result<Vec<Vec<TextSpan>>> {
+    fn highlight_with_context(&self, language_name: &str, source: &str) -> Result<HighlightResult> {
         let language = self
             .loader
             .language_for_name(language_name)
@@ -600,7 +610,207 @@ impl HighlightRegistry {
             lines.push(current_line);
         }
 
-        Ok(lines)
+        let contexts = build_line_contexts(&syntax, source);
+
+        Ok((lines, contexts))
+    }
+}
+
+const MAX_CONTEXT_SEGMENTS: usize = 4;
+
+fn build_line_contexts(syntax: &Syntax, source: &str) -> Vec<Option<String>> {
+    if source.is_empty() {
+        return Vec::new();
+    }
+
+    let byte_ranges = line_byte_ranges(source);
+    if byte_ranges.is_empty() {
+        return Vec::new();
+    }
+
+    let mut cursor = syntax.walk();
+    let bytes = source.as_bytes();
+
+    byte_ranges
+        .into_iter()
+        .map(|(start, end)| {
+            let inclusive_end = if end > start { end - 1 } else { start };
+            cursor.reset_to_byte_range(start, inclusive_end);
+            let mut parts = extract_node_path(&mut cursor, bytes);
+            if parts.is_empty() {
+                return None;
+            }
+            if parts.len() > MAX_CONTEXT_SEGMENTS {
+                parts.drain(..parts.len() - MAX_CONTEXT_SEGMENTS);
+            }
+            Some(parts.join(" -> "))
+        })
+        .collect()
+}
+
+fn line_byte_ranges(source: &str) -> Vec<(u32, u32)> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    for (idx, byte) in source.as_bytes().iter().enumerate() {
+        if *byte == b'\n' {
+            ranges.push((start as u32, idx as u32));
+            start = idx + 1;
+        }
+    }
+
+    if start < source.len() {
+        ranges.push((start as u32, source.len() as u32));
+    }
+
+    ranges
+}
+
+fn extract_node_path(cursor: &mut TreeCursor<'_>, source_bytes: &[u8]) -> Vec<String> {
+    let mut parts = Vec::new();
+
+    loop {
+        let node = cursor.node();
+        if node.parent().is_none() {
+            break;
+        }
+
+        if node.is_named()
+            && let Some(description) = describe_node(&node, source_bytes)
+            && parts.last() != Some(&description)
+        {
+            parts.push(description);
+        }
+
+        if !cursor.goto_parent() {
+            break;
+        }
+    }
+
+    parts.reverse();
+    parts
+}
+
+fn describe_node(node: &Node<'_>, source_bytes: &[u8]) -> Option<String> {
+    let kind = node.kind();
+    if kind == "ERROR" || kind == "source_file" || kind == "program" {
+        return None;
+    }
+
+    if let Some(text) = first_field_text(node, &["name", "identifier"], source_bytes) {
+        return Some(format_named_kind(kind, &text));
+    }
+
+    if kind == "impl_item" {
+        let trait_text = first_field_text(node, &["trait"], source_bytes);
+        let type_text = first_field_text(node, &["type"], source_bytes);
+
+        return match (trait_text, type_text) {
+            (Some(trait_name), Some(type_name)) => {
+                Some(format!("impl {trait_name} for {type_name}"))
+            }
+            (None, Some(type_name)) => Some(format!("impl {type_name}")),
+            _ => Some("impl".to_string()),
+        };
+    }
+
+    if kind == "impl_declaration"
+        && let Some(type_name) = first_field_text(node, &["type"], source_bytes)
+    {
+        return Some(format!("impl {type_name}"));
+    }
+
+    if kind.ends_with("_list")
+        || kind.ends_with("_block")
+        || kind.ends_with("_clause")
+        || kind.ends_with("_body")
+        || kind.ends_with("_parameters")
+        || kind.ends_with("_arguments")
+        || kind.ends_with("_statement")
+    {
+        return None;
+    }
+
+    let display = kind.replace('_', " ");
+    if display.is_empty() {
+        None
+    } else {
+        Some(display)
+    }
+}
+
+fn first_field_text(node: &Node<'_>, fields: &[&str], source_bytes: &[u8]) -> Option<String> {
+    fields
+        .iter()
+        .find_map(|field| child_text_by_field(node, field, source_bytes))
+}
+
+fn child_text_by_field(node: &Node<'_>, field: &str, source_bytes: &[u8]) -> Option<String> {
+    let mut cursor = node.walk();
+    if !cursor.goto_first_child() {
+        return None;
+    }
+
+    loop {
+        if cursor.field_name() == Some(field)
+            && let Some(text) = extract_node_text(&cursor.node(), source_bytes)
+        {
+            return Some(text);
+        }
+
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+
+    None
+}
+
+fn extract_node_text(node: &Node<'_>, source_bytes: &[u8]) -> Option<String> {
+    let range = node.byte_range();
+    let start = usize::try_from(range.start).ok()?;
+    let end = usize::try_from(range.end).ok()?;
+    if start >= end || end > source_bytes.len() {
+        return None;
+    }
+
+    let raw = std::str::from_utf8(&source_bytes[start..end]).ok()?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+
+    let sanitized = raw
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim()
+        .to_string();
+
+    if sanitized.is_empty() {
+        None
+    } else {
+        Some(sanitized)
+    }
+}
+
+fn format_named_kind(kind: &str, name: &str) -> String {
+    match kind {
+        "function_item"
+        | "function_definition"
+        | "function_declaration"
+        | "method_definition"
+        | "method_declaration" => format!("fn {name}"),
+        "struct_item" | "struct_definition" | "struct_declaration" => format!("struct {name}"),
+        "enum_item" | "enum_definition" | "enum_declaration" => format!("enum {name}"),
+        "class_definition" | "class_declaration" | "class_specifier" => format!("class {name}"),
+        "interface_declaration" | "interface_definition" => format!("interface {name}"),
+        "trait_item" | "trait_declaration" => format!("trait {name}"),
+        "impl_item" | "impl_declaration" => format!("impl {name}"),
+        "mod_item" | "module" | "module_definition" => format!("mod {name}"),
+        "namespace_definition" | "namespace_declaration" => format!("namespace {name}"),
+        _ => {
+            let display = kind.replace('_', " ");
+            format!("{display} {name}")
+        }
     }
 }
 
