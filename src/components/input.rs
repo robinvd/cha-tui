@@ -5060,7 +5060,7 @@ mod tests {
         let row0 = &back[0];
         assert_eq!(row0[0].ch, '1');
         assert_eq!(row0[1].ch, ' ');
-        assert_eq!(row0[2].ch, '|');
+        assert_eq!(row0[2].ch, ' ');
         assert_eq!(row0[3].ch, ' ');
         assert_eq!(row0[4].ch, 'f');
         assert_eq!(row0[5].ch, 'o');
@@ -5070,7 +5070,7 @@ mod tests {
 
         let row1 = &back[1];
         assert_eq!(row1[0].ch, '2');
-        assert_eq!(row1[2].ch, '|');
+        assert_eq!(row1[2].ch, ' ');
         assert_eq!(row1[4].ch, 'b');
         assert_eq!(row1[5].ch, 'a');
         assert_eq!(row1[6].ch, 'r');
