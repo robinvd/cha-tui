@@ -189,7 +189,11 @@ fn git_show(spec: &str) -> Result<Option<LoadedContent>> {
         };
         let is_binary = is_likely_binary(slice);
         let text = String::from_utf8_lossy(slice).into_owned();
-        return Ok(Some(LoadedContent { text, truncated, is_binary }));
+        return Ok(Some(LoadedContent {
+            text,
+            truncated,
+            is_binary,
+        }));
     }
 
     if matches!(output.status.code(), Some(128)) {
@@ -219,6 +223,65 @@ pub fn discard_unstaged_changes(path: &str, code: char) -> Result<()> {
 
     // Restore the worktree copy to the index state (discarding unstaged changes).
     run_git(["restore", "--worktree", "--", path]).map(|_| ())
+}
+
+/// Load files changed in a diff spec (commit, range, HEAD~N, etc.)
+/// For a single commit (no ".."), shows only that commit's changes.
+/// For a range like "A..B", shows changes from A to B.
+pub fn load_diff_files(spec: &str) -> Result<Vec<FileEntry>> {
+    let effective_spec = if spec.contains("..") {
+        spec.to_string()
+    } else {
+        // Single commit: show only that commit's changes (like git show)
+        format!("{}^..{}", spec, spec)
+    };
+
+    let output = run_git(["diff", "--name-status", &effective_spec])?;
+    let mut entries = Vec::new();
+
+    for line in output.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let mut parts = line.splitn(2, '\t');
+        let code = parts.next().and_then(|s| s.chars().next()).unwrap_or('M');
+        let path = parts.next().unwrap_or("").to_string();
+
+        if !path.is_empty() {
+            let display = format!("{} {}", code, &path);
+            entries.push(FileEntry::new(path, code, display));
+        }
+    }
+
+    Ok(entries)
+}
+
+/// Read file content at a specific git ref (commit:path format)
+pub fn read_ref_file(git_ref: &str, path: &str) -> Result<Option<LoadedContent>> {
+    git_show(&format!("{}:{}", git_ref, path))
+}
+
+/// Get the base ref for comparing files in a diff spec.
+/// For single commit "abc123", returns "abc123^" (parent).
+/// For ranges like "A..B", returns "A".
+pub fn diff_base_ref(spec: &str) -> String {
+    if let Some((left, _right)) = spec.split_once("..") {
+        left.to_string()
+    } else {
+        format!("{}^", spec)
+    }
+}
+
+/// Get the target ref for comparing files in a diff spec.
+/// For single commit "abc123", returns "abc123".
+/// For ranges like "A..B", returns "B".
+pub fn diff_target_ref(spec: &str) -> String {
+    if let Some((_left, right)) = spec.split_once("..") {
+        right.to_string()
+    } else {
+        spec.to_string()
+    }
 }
 
 pub fn run_git<I, S>(args: I) -> Result<String>

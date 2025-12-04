@@ -33,14 +33,67 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::git::{FileEntry, GitStatus, LoadedContent};
+use clap::{Parser, Subcommand};
 use smol::unblock;
 mod shortcuts;
 
+#[derive(Parser)]
+#[command(name = "gs")]
+struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Show changes from a commit (like git show)
+    Show {
+        /// Commit to show (default: HEAD)
+        #[arg(default_value = "HEAD")]
+        commit: String,
+    },
+    /// Show diff between commits (like git diff)
+    Diff {
+        /// Diff spec (commit, range, HEAD~N, etc.)
+        spec: String,
+    },
+}
+
+#[derive(Clone, Debug, Default)]
+enum ViewMode {
+    #[default]
+    WorkingTree,
+    Diff {
+        spec: String,
+    },
+}
+
+impl ViewMode {
+    fn is_diff(&self) -> bool {
+        matches!(self, ViewMode::Diff { .. })
+    }
+
+    fn spec(&self) -> Option<&str> {
+        match self {
+            ViewMode::Diff { spec } => Some(spec),
+            ViewMode::WorkingTree => None,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     color_eyre::install()?;
+
+    let args = Args::parse();
+    let view_mode = match args.command {
+        Some(Command::Show { commit }) => ViewMode::Diff { spec: commit },
+        Some(Command::Diff { spec }) => ViewMode::Diff { spec },
+        None => ViewMode::WorkingTree,
+    };
+
     init_tracing()?;
 
-    let mut program = Program::new(Model::new(), update, view).map_event(map_event);
+    let mut program = Program::new(Model::new(view_mode), update, view).map_event(map_event);
 
     if let Err(error) = smol::block_on(program.run_async()) {
         eprintln!("Program exited with error: {:?}", error);
@@ -106,6 +159,7 @@ fn handle_navigation_msg(model: &mut Model, msg: NavigationMsg) -> Transition<Ms
             match model.focus {
                 Focus::Unstaged => model.focus_staged(),
                 Focus::Staged => model.focus_unstaged(),
+                Focus::Changed => {}
             }
             match model.start_diff_refresh(false) {
                 Some(task) => Transition::Task(task),
@@ -266,7 +320,12 @@ fn view(model: &Model) -> Node<Msg> {
     .with_min_height(Dimension::ZERO)
     .with_id("main-row");
 
-    let mut header_spans = vec![TextSpan::new("Git Status", title_style())];
+    let title = if model.view_mode.is_diff() {
+        "Git Diff"
+    } else {
+        "Git Status"
+    };
+    let mut header_spans = vec![TextSpan::new(title, title_style())];
     if let Some(error) = model.error.as_deref()
         && !error.is_empty()
     {
@@ -281,21 +340,32 @@ fn view(model: &Model) -> Node<Msg> {
         .with_min_width(Dimension::ZERO)
         .with_id("header-title");
 
-    let branch_label = model
-        .current_branch
-        .as_deref()
-        .filter(|branch| !branch.is_empty())
-        .unwrap_or("(unknown)");
-    let mut branch_spans = vec![
-        TextSpan::new("branch: ", Style::dim()),
-        TextSpan::new(branch_label, branch_name_style()),
-    ];
-    if model.status_loading {
-        branch_spans.push(TextSpan::new("  refreshing…", Style::dim()));
-    }
-    let branch_node = rich_text::<Msg>(branch_spans).with_id("header-branch");
+    let header_right = if let Some(spec) = model.view_mode.spec() {
+        let mut spans = vec![
+            TextSpan::new("diff: ", Style::dim()),
+            TextSpan::new(spec, branch_name_style()),
+        ];
+        if model.status_loading {
+            spans.push(TextSpan::new("  refreshing…", Style::dim()));
+        }
+        rich_text::<Msg>(spans).with_id("header-diff-spec")
+    } else {
+        let branch_label = model
+            .current_branch
+            .as_deref()
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or("(unknown)");
+        let mut branch_spans = vec![
+            TextSpan::new("branch: ", Style::dim()),
+            TextSpan::new(branch_label, branch_name_style()),
+        ];
+        if model.status_loading {
+            branch_spans.push(TextSpan::new("  refreshing…", Style::dim()));
+        }
+        rich_text::<Msg>(branch_spans).with_id("header-branch")
+    };
 
-    let header = row(vec![header_left, branch_node])
+    let header = row(vec![header_left, header_right])
         .with_width(Dimension::percent(1.))
         .with_id("header");
 
@@ -303,23 +373,29 @@ fn view(model: &Model) -> Node<Msg> {
         .with_fill()
         .with_id("root");
 
-    // Stack any active modal dialogs on top of the base UI.
+    // Stack any active modal dialogs on top of the base UI (only in working tree mode).
     let mut layered = base;
-    if let Some(modal) = &model.commit_modal {
-        layered = column(vec![layered, render_commit_modal(modal)])
-            .with_fill()
-            .with_id("root-with-commit-modal");
-    }
-    if let Some(modal) = &model.delete_modal {
-        layered = column(vec![layered, render_delete_modal(modal)])
-            .with_fill()
-            .with_id("root-with-delete-modal");
+    if !model.view_mode.is_diff() {
+        if let Some(modal) = &model.commit_modal {
+            layered = column(vec![layered, render_commit_modal(modal)])
+                .with_fill()
+                .with_id("root-with-commit-modal");
+        }
+        if let Some(modal) = &model.delete_modal {
+            layered = column(vec![layered, render_delete_modal(modal)])
+                .with_fill()
+                .with_id("root-with-delete-modal");
+        }
     }
 
     layered
 }
 
 fn render_left_pane(model: &Model) -> Node<Msg> {
+    if model.view_mode.is_diff() {
+        return render_changed_pane(model);
+    }
+
     let unstaged_list = render_file_tree(
         Model::UNSTAGED_ITEM_ID,
         &model.unstaged_tree,
@@ -395,6 +471,49 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
     column(vec![
         unstaged.with_flex_grow(1.).with_flex_basis(Dimension::ZERO),
         staged.with_flex_grow(1.).with_flex_basis(Dimension::ZERO),
+    ])
+    .with_id("left-pane")
+}
+
+fn render_changed_pane(model: &Model) -> Node<Msg> {
+    let changed_list = render_file_tree(
+        Model::CHANGED_ITEM_ID,
+        &model.changed_tree,
+        true,
+        |tree_msg| Msg::Section {
+            focus: Focus::Changed,
+            msg: SectionMsg::Tree(tree_msg),
+        },
+    )
+    .with_min_height(Dimension::ZERO)
+    .with_flex_grow(1.)
+    .with_flex_basis(Dimension::ZERO);
+
+    let changed = block_with_title(
+        "Changed",
+        vec![
+            scrollable_content(
+                Model::CHANGED_CONTAINER_ID,
+                &model.changed_scroll,
+                1,
+                |scroll_msg| Msg::Scroll {
+                    focus: Focus::Changed,
+                    msg: scroll_msg,
+                },
+                changed_list,
+            )
+            .with_min_height(Dimension::ZERO)
+            .with_flex_grow(1.)
+            .with_flex_basis(Dimension::ZERO),
+        ],
+    )
+    .with_min_height(Dimension::ZERO)
+    .with_flex_grow(1.)
+    .with_flex_basis(Dimension::ZERO)
+    .with_id("changed-section");
+
+    column(vec![
+        changed.with_flex_grow(1.).with_flex_basis(Dimension::ZERO),
     ])
     .with_id("left-pane")
 }
@@ -572,7 +691,7 @@ fn render_diff_lines(lines: &[DiffLine], show_line_numbers: bool) -> Node<Msg> {
 
 fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
     let title = text::<Msg>("Commit staged changes").with_style(Style::bold());
-    let instructions = text::<Msg>("Ctrl-D commits, Esc cancels").with_style(Style::dim());
+    let instructions = text::<Msg>("Shift-D commits, Esc cancels").with_style(Style::dim());
     let input_style = commit_input_style();
 
     let prompt = text::<Msg>("> ").with_style(Style::fg(highlight::EVERFOREST_GREEN));
@@ -715,6 +834,7 @@ enum Focus {
     #[default]
     Unstaged,
     Staged,
+    Changed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -1056,18 +1176,23 @@ impl DeleteModal {
 
 #[derive(Default)]
 struct Model {
+    view_mode: ViewMode,
     unstaged: Vec<FileEntry>,
     staged: Vec<FileEntry>,
+    changed: Vec<FileEntry>,
     unstaged_tree: TreeState<FileNodeId>,
     staged_tree: TreeState<FileNodeId>,
+    changed_tree: TreeState<FileNodeId>,
     unstaged_initialized: bool,
     staged_initialized: bool,
+    changed_initialized: bool,
     focus: Focus,
     diff_lines: Vec<DiffLine>,
     diff_truncated: bool,
     diff_scroll: ScrollState,
     unstaged_scroll: ScrollState,
     staged_scroll: ScrollState,
+    changed_scroll: ScrollState,
 
     error: Option<String>,
     commit_modal: Option<CommitModal>,
@@ -1094,11 +1219,14 @@ enum DiffMode {
 impl Model {
     const UNSTAGED_CONTAINER_ID: &'static str = "unstaged-section-content";
     const STAGED_CONTAINER_ID: &'static str = "staged-section-content";
+    const CHANGED_CONTAINER_ID: &'static str = "changed-section-content";
     const UNSTAGED_ITEM_ID: &'static str = "unstaged-entry";
     const STAGED_ITEM_ID: &'static str = "staged-entry";
+    const CHANGED_ITEM_ID: &'static str = "changed-entry";
 
-    fn new() -> Self {
+    fn new(view_mode: ViewMode) -> Self {
         let mut model = Self {
+            view_mode,
             diff_scroll: ScrollState::both(),
             ..Default::default()
         };
@@ -1116,6 +1244,7 @@ impl Model {
         match focus {
             Focus::Unstaged => &self.unstaged_tree,
             Focus::Staged => &self.staged_tree,
+            Focus::Changed => &self.changed_tree,
         }
     }
 
@@ -1123,6 +1252,7 @@ impl Model {
         match focus {
             Focus::Unstaged => &mut self.unstaged_tree,
             Focus::Staged => &mut self.staged_tree,
+            Focus::Changed => &mut self.changed_tree,
         }
     }
 
@@ -1313,7 +1443,7 @@ impl Model {
         // Determine the selected entry code to decide how to discard.
         let code = match self.focus {
             Focus::Unstaged => self.current_entry().map(|e| e.code).unwrap_or(' '),
-            Focus::Staged => ' ',
+            Focus::Staged | Focus::Changed => ' ',
         };
 
         let result = git::discard_unstaged_changes(&path, code);
@@ -1370,9 +1500,44 @@ impl Model {
     }
 
     fn refresh_status(&mut self) -> Result<()> {
-        let status = git::load_status()?;
-        let _ = self.apply_status(status, false, DiffMode::Sync);
+        match &self.view_mode {
+            ViewMode::WorkingTree => {
+                let status = git::load_status()?;
+                let _ = self.apply_status(status, false, DiffMode::Sync);
+            }
+            ViewMode::Diff { spec } => {
+                let files = git::load_diff_files(spec)?;
+                self.apply_diff_files(files, false, DiffMode::Sync);
+            }
+        }
         Ok(())
+    }
+
+    fn apply_diff_files(
+        &mut self,
+        files: Vec<FileEntry>,
+        preserve_diff_scroll: bool,
+        diff_mode: DiffMode,
+    ) -> Option<TaskFn<Msg>> {
+        self.changed = files;
+        let changed_nodes = build_file_tree(&self.changed);
+        self.changed_tree.set_items(changed_nodes);
+        if !self.changed_initialized && !self.changed_tree.visible().is_empty() {
+            self.changed_tree.expand_all();
+            self.changed_initialized = true;
+        }
+        self.focus = Focus::Changed;
+        self.ensure_tree_selection(Focus::Changed);
+        self.clamp_file_scrolls();
+        self.clear_error();
+
+        match diff_mode {
+            DiffMode::Sync => {
+                self.update_diff_sync(preserve_diff_scroll);
+                None
+            }
+            DiffMode::Async => self.start_diff_refresh(preserve_diff_scroll),
+        }
     }
 
     fn apply_status(
@@ -1450,6 +1615,12 @@ impl Model {
     }
 
     fn ensure_focus_valid(&mut self) {
+        if self.view_mode.is_diff() {
+            self.ensure_tree_selection(Focus::Changed);
+            self.clamp_file_scrolls();
+            return;
+        }
+
         if self.focus == Focus::Unstaged
             && self.unstaged_tree.visible().is_empty()
             && !self.staged_tree.visible().is_empty()
@@ -1487,9 +1658,10 @@ impl Model {
                 self.diff_truncated = false;
 
                 let focus = self.focus;
+                let view_mode = self.view_mode.clone();
 
                 let future = async move {
-                    let result = unblock(move || diff_for(&entry, focus))
+                    let result = unblock(move || diff_for(&entry, focus, &view_mode))
                         .await
                         .map_err(|err| err.to_string());
                     Msg::DiffLoaded { request_id, result }
@@ -1522,7 +1694,7 @@ impl Model {
 
         let selected_id = self.selected_id(self.focus);
         match (self.current_entry(), selected_id.as_ref()) {
-            (Some(entry), _) => match diff_for(entry, self.focus) {
+            (Some(entry), _) => match diff_for(entry, self.focus, &self.view_mode) {
                 Ok(preview) => self.apply_diff_preview(preview, preserve_scroll),
                 Err(err) => {
                     self.diff_lines = vec![DiffLine::plain("Failed to load diff")];
@@ -1613,6 +1785,7 @@ impl Model {
         match focus {
             Focus::Unstaged => &self.unstaged,
             Focus::Staged => &self.staged,
+            Focus::Changed => &self.changed,
         }
     }
 
@@ -1620,6 +1793,7 @@ impl Model {
         match focus {
             Focus::Unstaged => &mut self.unstaged_scroll,
             Focus::Staged => &mut self.staged_scroll,
+            Focus::Changed => &mut self.changed_scroll,
         }
     }
 
@@ -1659,6 +1833,15 @@ impl Model {
                     self.queue_scroll_for_staged();
                 }
             }
+            Focus::Changed => {
+                if self.changed_tree.visible().is_empty() {
+                    return;
+                }
+                if !self.is_first_selected(Focus::Changed) {
+                    self.tree_state_mut(Focus::Changed).select_prev();
+                    self.queue_scroll_for_changed();
+                }
+            }
         }
     }
 
@@ -1686,11 +1869,19 @@ impl Model {
                     return;
                 }
                 if self.is_last_selected(Focus::Staged) {
-                    // Stay within staged list; no wrap-around.
                     return;
                 }
                 self.tree_state_mut(Focus::Staged).select_next();
                 self.queue_scroll_for_staged();
+            }
+            Focus::Changed => {
+                if self.changed_tree.visible().is_empty() {
+                    return;
+                }
+                if !self.is_last_selected(Focus::Changed) {
+                    self.tree_state_mut(Focus::Changed).select_next();
+                    self.queue_scroll_for_changed();
+                }
             }
         }
     }
@@ -1712,16 +1903,23 @@ impl Model {
     }
 
     fn toggle_stage_selected(&mut self) {
+        if self.view_mode.is_diff() {
+            return;
+        }
         if let Some(id) = self.selected_id(self.focus) {
             self.toggle_stage_for_id(self.focus, &id);
         }
     }
 
     fn toggle_stage_for_id(&mut self, focus: Focus, id: &FileNodeId) {
+        if self.view_mode.is_diff() {
+            return;
+        }
         let path = id.path();
         let result = match focus {
             Focus::Unstaged => git::stage_path(path),
             Focus::Staged => git::unstage_path(path),
+            Focus::Changed => return,
         };
 
         if let Err(err) = result {
@@ -1808,6 +2006,7 @@ impl Model {
         match focus {
             Focus::Unstaged => self.queue_scroll_for_unstaged(),
             Focus::Staged => self.queue_scroll_for_staged(),
+            Focus::Changed => self.queue_scroll_for_changed(),
         }
     }
 
@@ -1824,6 +2023,14 @@ impl Model {
             let target = ScrollTarget::with_mixin(Self::STAGED_ITEM_ID, id.mixin());
             self.staged_scroll
                 .ensure_visible(Self::STAGED_CONTAINER_ID, target);
+        }
+    }
+
+    fn queue_scroll_for_changed(&mut self) {
+        if let Some(id) = self.selected_id(Focus::Changed) {
+            let target = ScrollTarget::with_mixin(Self::CHANGED_ITEM_ID, id.mixin());
+            self.changed_scroll
+                .ensure_visible(Self::CHANGED_CONTAINER_ID, target);
         }
     }
 
@@ -1981,8 +2188,8 @@ struct DiffPreview {
     truncated: bool,
 }
 
-fn diff_for(entry: &FileEntry, focus: Focus) -> Result<DiffPreview> {
-    let versions = load_file_versions(entry, focus)?;
+fn diff_for(entry: &FileEntry, focus: Focus, view_mode: &ViewMode) -> Result<DiffPreview> {
+    let versions = load_file_versions(entry, focus, view_mode)?;
     if versions.old.is_none() && versions.new.is_none() {
         return Ok(DiffPreview {
             lines: Vec::new(),
@@ -2020,7 +2227,11 @@ struct LineContent {
 
 impl FileContent {
     fn from_source(path: &str, source: LoadedContent) -> Self {
-        let LoadedContent { text, truncated, is_binary: _ } = source;
+        let LoadedContent {
+            text,
+            truncated,
+            is_binary: _,
+        } = source;
         let ends_with_newline = text.ends_with('\n');
         let text_lines: Vec<String> = text.lines().map(str::to_string).collect();
         let line_count = text_lines.len();
@@ -2091,21 +2302,39 @@ impl FileContent {
     }
 }
 
-fn load_file_versions(entry: &FileEntry, focus: Focus) -> Result<FileVersions> {
-    let old_source = match focus {
-        Focus::Unstaged => {
-            if entry.code == '?' {
-                None
-            } else {
-                git::read_index_file(&entry.path)?
-            }
+fn load_file_versions(
+    entry: &FileEntry,
+    focus: Focus,
+    view_mode: &ViewMode,
+) -> Result<FileVersions> {
+    let (old_source, new_source) = match view_mode {
+        ViewMode::Diff { spec } => {
+            let base_ref = git::diff_base_ref(spec);
+            let target_ref = git::diff_target_ref(spec);
+            let old = git::read_ref_file(&base_ref, &entry.path)?;
+            let new = git::read_ref_file(&target_ref, &entry.path)?;
+            (old, new)
         }
-        Focus::Staged => git::read_head_file(&entry.path)?,
-    };
+        ViewMode::WorkingTree => {
+            let old_source = match focus {
+                Focus::Unstaged => {
+                    if entry.code == '?' {
+                        None
+                    } else {
+                        git::read_index_file(&entry.path)?
+                    }
+                }
+                Focus::Staged => git::read_head_file(&entry.path)?,
+                Focus::Changed => None,
+            };
 
-    let new_source = match focus {
-        Focus::Unstaged => read_worktree_file(&entry.path)?,
-        Focus::Staged => git::read_index_file(&entry.path)?,
+            let new_source = match focus {
+                Focus::Unstaged => read_worktree_file(&entry.path)?,
+                Focus::Staged => git::read_index_file(&entry.path)?,
+                Focus::Changed => None,
+            };
+            (old_source, new_source)
+        }
     };
 
     let old_truncated = old_source.as_ref().is_some_and(|content| content.truncated);
@@ -2157,7 +2386,11 @@ fn load_limited_from_file(file: File) -> Result<LoadedContent> {
     let sample_size = buffer.len().min(8000);
     let is_binary = buffer[..sample_size].contains(&0);
     let text = String::from_utf8_lossy(&buffer).into_owned();
-    Ok(LoadedContent { text, truncated, is_binary })
+    Ok(LoadedContent {
+        text,
+        truncated,
+        is_binary,
+    })
 }
 
 fn build_diff_lines(versions: &FileVersions) -> Vec<DiffLine> {
@@ -2166,7 +2399,10 @@ fn build_diff_lines(versions: &FileVersions) -> Vec<DiffLine> {
     if versions.is_binary {
         let mut style = Style::fg(highlight::EVERFOREST_GREY1);
         style.dim = true;
-        return vec![DiffLine::styled("Binary file (not shown)".to_string(), style)];
+        return vec![DiffLine::styled(
+            "Binary file (not shown)".to_string(),
+            style,
+        )];
     }
 
     let old_text = versions
