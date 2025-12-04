@@ -24,9 +24,9 @@ use chatui::{
     column, default_input_keybindings, input, modal, rich_text, row, text,
 };
 use chatui::{TreeMsg, TreeNode, TreeState, TreeStyle, tree_view};
-use miette::{Context, IntoDiagnostic, Result, miette};
 use facet::Facet;
 use facet_args as args;
+use miette::{Context, IntoDiagnostic, Result, miette};
 use similar::{Algorithm, ChangeTag, DiffOp, DiffTag, InlineChange, TextDiff};
 use taffy::Dimension;
 use taffy::prelude::{FromLength, TaffyZero};
@@ -752,7 +752,6 @@ fn render_diff_lines(lines: &[DiffLine], show_line_numbers: bool) -> Node<Msg> {
 
 fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
     let title = text::<Msg>("Commit staged changes").with_style(Style::bold());
-    let instructions = text::<Msg>("Shift-D commits, Esc cancels").with_style(Style::dim());
     let input_style = commit_input_style();
 
     let prompt = text::<Msg>("> ").with_style(Style::fg(highlight::EVERFOREST_GREEN));
@@ -763,11 +762,10 @@ fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
     .with_flex_basis(Dimension::ZERO)
     .with_min_width(Dimension::ZERO);
     let input_row = row(vec![prompt, input_field])
-        .with_width(Dimension::percent(1.0))
-        .with_height(Dimension::length(3.))
+        .with_fill()
         .with_id("commit-modal-input-row");
 
-    let content = column(vec![title, instructions, input_row])
+    let content = column(vec![title, input_row])
         .with_min_width(Dimension::length(30.0))
         .with_min_height(Dimension::length(5.0));
 
@@ -1341,10 +1339,7 @@ impl Model {
 
         match &id {
             FileNodeId::Dir(path) => {
-                if self
-                    .tree_state(focus)
-                    .is_some_and(|s| s.is_expanded(&id))
-                {
+                if self.tree_state(focus).is_some_and(|s| s.is_expanded(&id)) {
                     if let Some(state) = self.tree_state_mut(focus) {
                         state.set_expanded(id.clone(), false);
                     }
@@ -1397,10 +1392,7 @@ impl Model {
 
         match &id {
             FileNodeId::Dir(_) => {
-                if !self
-                    .tree_state(focus)
-                    .is_some_and(|s| s.is_expanded(&id))
-                {
+                if !self.tree_state(focus).is_some_and(|s| s.is_expanded(&id)) {
                     if let Some(state) = self.tree_state_mut(focus) {
                         state.set_expanded(id.clone(), true);
                     }
@@ -2190,8 +2182,7 @@ impl Model {
                 if wt.unstaged_tree.visible().is_empty() {
                     wt.unstaged_scroll.reset();
                 } else {
-                    let max_offset =
-                        (wt.unstaged_tree.visible().len().saturating_sub(1)) as f32;
+                    let max_offset = (wt.unstaged_tree.visible().len().saturating_sub(1)) as f32;
                     if wt.unstaged_scroll.offset() > max_offset {
                         wt.unstaged_scroll.set_offset(max_offset);
                     }
@@ -2199,8 +2190,7 @@ impl Model {
                 if wt.staged_tree.visible().is_empty() {
                     wt.staged_scroll.reset();
                 } else {
-                    let max_offset =
-                        (wt.staged_tree.visible().len().saturating_sub(1)) as f32;
+                    let max_offset = (wt.staged_tree.visible().len().saturating_sub(1)) as f32;
                     if wt.staged_scroll.offset() > max_offset {
                         wt.staged_scroll.set_offset(max_offset);
                     }
@@ -2210,8 +2200,7 @@ impl Model {
                 if diff.changed_tree.visible().is_empty() {
                     diff.changed_scroll.reset();
                 } else {
-                    let max_offset =
-                        (diff.changed_tree.visible().len().saturating_sub(1)) as f32;
+                    let max_offset = (diff.changed_tree.visible().len().saturating_sub(1)) as f32;
                     if diff.changed_scroll.offset() > max_offset {
                         diff.changed_scroll.set_offset(max_offset);
                     }
@@ -2538,7 +2527,7 @@ fn load_limited_from_file(file: File) -> Result<LoadedContent> {
                 Err(err) => {
                     return Err(err)
                         .into_diagnostic()
-                        .wrap_err("failed to read file tail")
+                        .wrap_err("failed to read file tail");
                 }
             }
         }

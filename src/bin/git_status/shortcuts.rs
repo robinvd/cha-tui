@@ -703,14 +703,14 @@ const DIFF_VIEW_SHORTCUTS: &[Shortcut] = &[
 
 const COMMIT_MODAL_SHORTCUTS: &[Shortcut] = &[
     Shortcut {
-        label: "Shift-D",
+        label: "Ctrl-Enter",
         description: "Commit",
         show_in_bar: true,
         binding: Some(Binding::new(
-            KeyCode::Char('D'),
-            ModifierRequirement::Disabled,
-            ModifierRequirement::Disabled,
+            KeyCode::Enter,
             ModifierRequirement::Enabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
         )),
         msg: Some(Msg::Commit(CommitMsg::Submit)),
     },
