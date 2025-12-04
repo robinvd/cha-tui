@@ -65,26 +65,73 @@ fn default_commit() -> String {
     "HEAD".to_string()
 }
 
-#[derive(Clone, Debug, Default)]
 enum ViewMode {
-    #[default]
-    WorkingTree,
-    Diff {
-        spec: String,
-    },
+    WorkingTree(Box<WorkingTreeState>),
+    Diff(Box<DiffModeState>),
+}
+
+impl Default for ViewMode {
+    fn default() -> Self {
+        ViewMode::WorkingTree(Box::default())
+    }
 }
 
 impl ViewMode {
     fn is_diff(&self) -> bool {
-        matches!(self, ViewMode::Diff { .. })
+        matches!(self, ViewMode::Diff(_))
     }
 
     fn spec(&self) -> Option<&str> {
         match self {
-            ViewMode::Diff { spec } => Some(spec),
-            ViewMode::WorkingTree => None,
+            ViewMode::Diff(state) => Some(&state.spec),
+            ViewMode::WorkingTree(_) => None,
         }
     }
+
+    fn working_tree(&self) -> Option<&WorkingTreeState> {
+        match self {
+            ViewMode::WorkingTree(state) => Some(state),
+            ViewMode::Diff(_) => None,
+        }
+    }
+
+    fn working_tree_mut(&mut self) -> Option<&mut WorkingTreeState> {
+        match self {
+            ViewMode::WorkingTree(state) => Some(state),
+            ViewMode::Diff(_) => None,
+        }
+    }
+
+    fn diff_state_mut(&mut self) -> Option<&mut DiffModeState> {
+        match self {
+            ViewMode::Diff(state) => Some(state),
+            ViewMode::WorkingTree(_) => None,
+        }
+    }
+}
+
+#[derive(Default)]
+struct WorkingTreeState {
+    unstaged: Vec<FileEntry>,
+    staged: Vec<FileEntry>,
+    unstaged_tree: TreeState<FileNodeId>,
+    staged_tree: TreeState<FileNodeId>,
+    unstaged_initialized: bool,
+    staged_initialized: bool,
+    unstaged_scroll: ScrollState,
+    staged_scroll: ScrollState,
+    commit_modal: Option<CommitModal>,
+    delete_modal: Option<DeleteModal>,
+    current_branch: Option<String>,
+}
+
+#[derive(Default)]
+struct DiffModeState {
+    spec: String,
+    changed: Vec<FileEntry>,
+    changed_tree: TreeState<FileNodeId>,
+    changed_initialized: bool,
+    changed_scroll: ScrollState,
 }
 
 fn main() -> Result<()> {
@@ -92,9 +139,15 @@ fn main() -> Result<()> {
 
     let args: Args = facet_args::from_std_args()?;
     let view_mode = match args.command {
-        Some(Command::Show { commit }) => ViewMode::Diff { spec: commit },
-        Some(Command::Diff { spec }) => ViewMode::Diff { spec },
-        None => ViewMode::WorkingTree,
+        Some(Command::Show { commit }) => ViewMode::Diff(Box::new(DiffModeState {
+            spec: commit,
+            ..Default::default()
+        })),
+        Some(Command::Diff { spec }) => ViewMode::Diff(Box::new(DiffModeState {
+            spec,
+            ..Default::default()
+        })),
+        None => ViewMode::WorkingTree(Box::default()),
     };
 
     init_tracing()?;
@@ -242,7 +295,7 @@ fn handle_commit_msg(model: &mut Model, msg: CommitMsg) -> Transition<Msg> {
             Transition::Continue
         }
         CommitMsg::Input(input_msg) => {
-            if let Some(modal) = model.commit_modal.as_mut() {
+            if let Some(modal) = model.commit_modal_mut() {
                 modal.update(input_msg);
             }
             Transition::Continue
@@ -266,7 +319,7 @@ fn handle_delete_msg(model: &mut Model, msg: DeleteMsg) -> Transition<Msg> {
 
 fn handle_key(model: &mut Model, key: Key) -> Transition<Msg> {
     // If the delete modal is active, it consumes keys like Enter/Esc/Y/N.
-    if model.delete_modal.is_some() {
+    if model.delete_modal().is_some() {
         return handle_delete_modal_key(model, key);
     }
 
@@ -277,7 +330,7 @@ fn handle_key(model: &mut Model, key: Key) -> Transition<Msg> {
     }
 
     // When commit modal is open, feed non-modified character input to it.
-    if model.commit_modal.is_some() {
+    if model.commit_modal().is_some() {
         return handle_commit_modal_key(model, key);
     }
 
@@ -285,7 +338,7 @@ fn handle_key(model: &mut Model, key: Key) -> Transition<Msg> {
 }
 
 fn handle_commit_modal_key(model: &mut Model, key: Key) -> Transition<Msg> {
-    if let Some(msg) = model.commit_modal.as_ref().and_then(|modal| {
+    if let Some(msg) = model.commit_modal().and_then(|modal| {
         default_input_keybindings(&modal.input, key, |input_msg| {
             Msg::Commit(CommitMsg::Input(input_msg))
         })
@@ -357,8 +410,7 @@ fn view(model: &Model) -> Node<Msg> {
         rich_text::<Msg>(spans).with_id("header-diff-spec")
     } else {
         let branch_label = model
-            .current_branch
-            .as_deref()
+            .current_branch()
             .filter(|branch| !branch.is_empty())
             .unwrap_or("(unknown)");
         let mut branch_spans = vec![
@@ -381,13 +433,13 @@ fn view(model: &Model) -> Node<Msg> {
 
     // Stack any active modal dialogs on top of the base UI (only in working tree mode).
     let mut layered = base;
-    if !model.view_mode.is_diff() {
-        if let Some(modal) = &model.commit_modal {
+    if let Some(wt) = model.view_mode.working_tree() {
+        if let Some(modal) = &wt.commit_modal {
             layered = column(vec![layered, render_commit_modal(modal)])
                 .with_fill()
                 .with_id("root-with-commit-modal");
         }
-        if let Some(modal) = &model.delete_modal {
+        if let Some(modal) = &wt.delete_modal {
             layered = column(vec![layered, render_delete_modal(modal)])
                 .with_fill()
                 .with_id("root-with-delete-modal");
@@ -398,14 +450,17 @@ fn view(model: &Model) -> Node<Msg> {
 }
 
 fn render_left_pane(model: &Model) -> Node<Msg> {
-    if model.view_mode.is_diff() {
-        return render_changed_pane(model);
+    match &model.view_mode {
+        ViewMode::Diff(diff) => render_changed_pane(diff),
+        ViewMode::WorkingTree(wt) => render_working_tree_pane(wt, model.focus),
     }
+}
 
+fn render_working_tree_pane(wt: &WorkingTreeState, focus: Focus) -> Node<Msg> {
     let unstaged_list = render_file_tree(
         Model::UNSTAGED_ITEM_ID,
-        &model.unstaged_tree,
-        model.focus == Focus::Unstaged,
+        &wt.unstaged_tree,
+        focus == Focus::Unstaged,
         |tree_msg| Msg::Section {
             focus: Focus::Unstaged,
             msg: SectionMsg::Tree(tree_msg),
@@ -420,7 +475,7 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
         vec![
             scrollable_content(
                 "unstaged-section-content",
-                &model.unstaged_scroll,
+                &wt.unstaged_scroll,
                 1,
                 |scroll_msg| Msg::Scroll {
                     focus: Focus::Unstaged,
@@ -440,8 +495,8 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
 
     let staged_list = render_file_tree(
         Model::STAGED_ITEM_ID,
-        &model.staged_tree,
-        model.focus == Focus::Staged,
+        &wt.staged_tree,
+        focus == Focus::Staged,
         |tree_msg| Msg::Section {
             focus: Focus::Staged,
             msg: SectionMsg::Tree(tree_msg),
@@ -456,7 +511,7 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
         vec![
             scrollable_content(
                 "staged-section-content",
-                &model.staged_scroll,
+                &wt.staged_scroll,
                 1,
                 |scroll_msg| Msg::Scroll {
                     focus: Focus::Staged,
@@ -481,10 +536,10 @@ fn render_left_pane(model: &Model) -> Node<Msg> {
     .with_id("left-pane")
 }
 
-fn render_changed_pane(model: &Model) -> Node<Msg> {
+fn render_changed_pane(diff: &DiffModeState) -> Node<Msg> {
     let changed_list = render_file_tree(
         Model::CHANGED_ITEM_ID,
-        &model.changed_tree,
+        &diff.changed_tree,
         true,
         |tree_msg| Msg::Section {
             focus: Focus::Changed,
@@ -500,7 +555,7 @@ fn render_changed_pane(model: &Model) -> Node<Msg> {
         vec![
             scrollable_content(
                 Model::CHANGED_CONTAINER_ID,
-                &model.changed_scroll,
+                &diff.changed_scroll,
                 1,
                 |scroll_msg| Msg::Scroll {
                     focus: Focus::Changed,
@@ -1183,29 +1238,13 @@ impl DeleteModal {
 #[derive(Default)]
 struct Model {
     view_mode: ViewMode,
-    unstaged: Vec<FileEntry>,
-    staged: Vec<FileEntry>,
-    changed: Vec<FileEntry>,
-    unstaged_tree: TreeState<FileNodeId>,
-    staged_tree: TreeState<FileNodeId>,
-    changed_tree: TreeState<FileNodeId>,
-    unstaged_initialized: bool,
-    staged_initialized: bool,
-    changed_initialized: bool,
     focus: Focus,
     diff_lines: Vec<DiffLine>,
     diff_truncated: bool,
     diff_scroll: ScrollState,
-    unstaged_scroll: ScrollState,
-    staged_scroll: ScrollState,
-    changed_scroll: ScrollState,
-
     error: Option<String>,
-    commit_modal: Option<CommitModal>,
-    delete_modal: Option<DeleteModal>,
     show_all_shortcuts: bool,
     show_diff_line_numbers: bool,
-    current_branch: Option<String>,
     status_loading: bool,
     diff_loading: bool,
     next_diff_request_id: u64,
@@ -1246,40 +1285,45 @@ impl Model {
         model
     }
 
-    fn tree_state(&self, focus: Focus) -> &TreeState<FileNodeId> {
-        match focus {
-            Focus::Unstaged => &self.unstaged_tree,
-            Focus::Staged => &self.staged_tree,
-            Focus::Changed => &self.changed_tree,
+    fn tree_state(&self, focus: Focus) -> Option<&TreeState<FileNodeId>> {
+        match (&self.view_mode, focus) {
+            (ViewMode::WorkingTree(state), Focus::Unstaged) => Some(&state.unstaged_tree),
+            (ViewMode::WorkingTree(state), Focus::Staged) => Some(&state.staged_tree),
+            (ViewMode::Diff(state), Focus::Changed) => Some(&state.changed_tree),
+            _ => None,
         }
     }
 
-    fn tree_state_mut(&mut self, focus: Focus) -> &mut TreeState<FileNodeId> {
-        match focus {
-            Focus::Unstaged => &mut self.unstaged_tree,
-            Focus::Staged => &mut self.staged_tree,
-            Focus::Changed => &mut self.changed_tree,
+    fn tree_state_mut(&mut self, focus: Focus) -> Option<&mut TreeState<FileNodeId>> {
+        match (&mut self.view_mode, focus) {
+            (ViewMode::WorkingTree(state), Focus::Unstaged) => Some(&mut state.unstaged_tree),
+            (ViewMode::WorkingTree(state), Focus::Staged) => Some(&mut state.staged_tree),
+            (ViewMode::Diff(state), Focus::Changed) => Some(&mut state.changed_tree),
+            _ => None,
         }
     }
 
     fn selected_id(&self, focus: Focus) -> Option<FileNodeId> {
-        self.tree_state(focus).selected().cloned()
+        self.tree_state(focus)?.selected().cloned()
     }
 
     fn select_tree_id(&mut self, focus: Focus, id: &FileNodeId) {
-        let state = self.tree_state_mut(focus);
-        state.select(id.clone());
-        state.ensure_selected();
+        if let Some(state) = self.tree_state_mut(focus) {
+            state.select(id.clone());
+            state.ensure_selected();
+        }
     }
 
     fn ensure_tree_selection(&mut self, focus: Focus) {
-        self.tree_state_mut(focus).ensure_selected();
+        if let Some(state) = self.tree_state_mut(focus) {
+            state.ensure_selected();
+        }
     }
 
     fn select_if_different(&mut self, focus: Focus, id: &FileNodeId) -> bool {
         let should_change = self
             .tree_state(focus)
-            .selected()
+            .and_then(|state| state.selected())
             .map(|selected| selected != id)
             .unwrap_or(true);
         if should_change {
@@ -1297,16 +1341,25 @@ impl Model {
 
         match &id {
             FileNodeId::Dir(path) => {
-                if self.tree_state(focus).is_expanded(&id) {
-                    self.tree_state_mut(focus).set_expanded(id.clone(), false);
+                if self
+                    .tree_state(focus)
+                    .is_some_and(|s| s.is_expanded(&id))
+                {
+                    if let Some(state) = self.tree_state_mut(focus) {
+                        state.set_expanded(id.clone(), false);
+                    }
                     changed = true;
                 } else if let Some(parent) = parent_dir_node(path) {
                     if self.select_if_different(focus, &parent) {
                         changed = true;
                     }
-                    if self.tree_state(focus).is_expanded(&parent) {
-                        self.tree_state_mut(focus)
-                            .set_expanded(parent.clone(), false);
+                    if self
+                        .tree_state(focus)
+                        .is_some_and(|s| s.is_expanded(&parent))
+                    {
+                        if let Some(state) = self.tree_state_mut(focus) {
+                            state.set_expanded(parent.clone(), false);
+                        }
                         changed = true;
                     }
                 }
@@ -1316,9 +1369,13 @@ impl Model {
                     if self.select_if_different(focus, &parent) {
                         changed = true;
                     }
-                    if self.tree_state(focus).is_expanded(&parent) {
-                        self.tree_state_mut(focus)
-                            .set_expanded(parent.clone(), false);
+                    if self
+                        .tree_state(focus)
+                        .is_some_and(|s| s.is_expanded(&parent))
+                    {
+                        if let Some(state) = self.tree_state_mut(focus) {
+                            state.set_expanded(parent.clone(), false);
+                        }
                         changed = true;
                     }
                 }
@@ -1340,17 +1397,25 @@ impl Model {
 
         match &id {
             FileNodeId::Dir(_) => {
-                if !self.tree_state(focus).is_expanded(&id) {
-                    self.tree_state_mut(focus).set_expanded(id.clone(), true);
+                if !self
+                    .tree_state(focus)
+                    .is_some_and(|s| s.is_expanded(&id))
+                {
+                    if let Some(state) = self.tree_state_mut(focus) {
+                        state.set_expanded(id.clone(), true);
+                    }
                     changed = true;
                 }
             }
             FileNodeId::File(path) => {
                 if let Some(parent) = parent_dir_node(path)
-                    && !self.tree_state(focus).is_expanded(&parent)
+                    && !self
+                        .tree_state(focus)
+                        .is_some_and(|s| s.is_expanded(&parent))
                 {
-                    self.tree_state_mut(focus)
-                        .set_expanded(parent.clone(), true);
+                    if let Some(state) = self.tree_state_mut(focus) {
+                        state.set_expanded(parent.clone(), true);
+                    }
                     changed = true;
                 }
             }
@@ -1363,7 +1428,9 @@ impl Model {
     }
 
     fn is_first_selected(&self, focus: Focus) -> bool {
-        let state = self.tree_state(focus);
+        let Some(state) = self.tree_state(focus) else {
+            return true;
+        };
         match (state.selected(), state.visible().first()) {
             (Some(selected), Some(first)) => selected == &first.id,
             _ => true,
@@ -1371,7 +1438,9 @@ impl Model {
     }
 
     fn is_last_selected(&self, focus: Focus) -> bool {
-        let state = self.tree_state(focus);
+        let Some(state) = self.tree_state(focus) else {
+            return true;
+        };
         match (state.selected(), state.visible().last()) {
             (Some(selected), Some(last)) => selected == &last.id,
             _ => true,
@@ -1387,23 +1456,59 @@ impl Model {
     }
 
     fn open_commit_modal(&mut self) {
-        self.commit_modal = Some(CommitModal::default());
+        if let Some(state) = self.view_mode.working_tree_mut() {
+            state.commit_modal = Some(CommitModal::default());
+        }
     }
 
     fn close_commit_modal(&mut self) {
-        self.commit_modal = None;
+        if let Some(state) = self.view_mode.working_tree_mut() {
+            state.commit_modal = None;
+        }
+    }
+
+    fn commit_modal(&self) -> Option<&CommitModal> {
+        self.view_mode
+            .working_tree()
+            .and_then(|s| s.commit_modal.as_ref())
+    }
+
+    fn commit_modal_mut(&mut self) -> Option<&mut CommitModal> {
+        self.view_mode
+            .working_tree_mut()
+            .and_then(|s| s.commit_modal.as_mut())
+    }
+
+    fn delete_modal(&self) -> Option<&DeleteModal> {
+        self.view_mode
+            .working_tree()
+            .and_then(|s| s.delete_modal.as_ref())
     }
 
     fn open_delete_modal(&mut self) {
-        if let Some(entry) = self.current_entry()
-            && self.focus == Focus::Unstaged
+        let entry_path = if self.focus == Focus::Unstaged {
+            self.current_entry().map(|e| e.path.clone())
+        } else {
+            None
+        };
+
+        if let Some(path) = entry_path
+            && let Some(state) = self.view_mode.working_tree_mut()
         {
-            self.delete_modal = Some(DeleteModal::new(entry.path.clone()));
+            state.delete_modal = Some(DeleteModal::new(path));
         }
     }
 
     fn close_delete_modal(&mut self) {
-        self.delete_modal = None;
+        if let Some(state) = self.view_mode.working_tree_mut() {
+            state.delete_modal = None;
+        }
+    }
+
+    fn current_branch(&self) -> Option<&str> {
+        self.view_mode
+            .working_tree()
+            .and_then(|s| s.current_branch.as_deref())
     }
 
     fn toggle_shortcuts_help(&mut self) {
@@ -1415,7 +1520,7 @@ impl Model {
     }
 
     fn submit_commit(&mut self) -> Transition<Msg> {
-        let message = match self.commit_modal.as_ref() {
+        let message = match self.commit_modal() {
             Some(modal) => modal.message(),
             None => return Transition::Continue,
         };
@@ -1427,7 +1532,7 @@ impl Model {
 
         match git::run_git(["commit", "-m", message.as_str()]) {
             Ok(_) => {
-                self.commit_modal = None;
+                self.close_commit_modal();
                 if let Err(err) = self.refresh_status() {
                     self.set_error(err);
                 }
@@ -1441,7 +1546,7 @@ impl Model {
     }
 
     fn confirm_delete(&mut self) -> Transition<Msg> {
-        let path = match self.delete_modal.as_ref() {
+        let path = match self.delete_modal() {
             Some(modal) => modal.path.clone(),
             None => return Transition::Continue,
         };
@@ -1453,7 +1558,7 @@ impl Model {
         };
 
         let result = git::discard_unstaged_changes(&path, code);
-        self.delete_modal = None;
+        self.close_delete_modal();
 
         match result.and_then(|_| self.refresh_status()) {
             Ok(_) => {}
@@ -1507,12 +1612,12 @@ impl Model {
 
     fn refresh_status(&mut self) -> Result<()> {
         match &self.view_mode {
-            ViewMode::WorkingTree => {
+            ViewMode::WorkingTree(_) => {
                 let status = git::load_status()?;
                 let _ = self.apply_status(status, false, DiffMode::Sync);
             }
-            ViewMode::Diff { spec } => {
-                let files = git::load_diff_files(spec)?;
+            ViewMode::Diff(state) => {
+                let files = git::load_diff_files(&state.spec)?;
                 self.apply_diff_files(files, false, DiffMode::Sync);
             }
         }
@@ -1525,12 +1630,13 @@ impl Model {
         preserve_diff_scroll: bool,
         diff_mode: DiffMode,
     ) -> Option<TaskFn<Msg>> {
-        self.changed = files;
-        let changed_nodes = build_file_tree(&self.changed);
-        self.changed_tree.set_items(changed_nodes);
-        if !self.changed_initialized && !self.changed_tree.visible().is_empty() {
-            self.changed_tree.expand_all();
-            self.changed_initialized = true;
+        let state = self.view_mode.diff_state_mut()?;
+        state.changed = files;
+        let changed_nodes = build_file_tree(&state.changed);
+        state.changed_tree.set_items(changed_nodes);
+        if !state.changed_initialized && !state.changed_tree.visible().is_empty() {
+            state.changed_tree.expand_all();
+            state.changed_initialized = true;
         }
         self.focus = Focus::Changed;
         self.ensure_tree_selection(Focus::Changed);
@@ -1571,25 +1677,27 @@ impl Model {
             (None, None)
         };
 
+        let wt = self.view_mode.working_tree_mut()?;
+
         let GitStatus {
             unstaged,
             staged,
             branch,
         } = status;
-        self.unstaged = unstaged;
-        self.staged = staged;
-        self.current_branch = branch;
-        let unstaged_nodes = build_file_tree(&self.unstaged);
-        let staged_nodes = build_file_tree(&self.staged);
-        self.unstaged_tree.set_items(unstaged_nodes);
-        self.staged_tree.set_items(staged_nodes);
-        if !self.unstaged_initialized && !self.unstaged_tree.visible().is_empty() {
-            self.unstaged_tree.expand_all();
-            self.unstaged_initialized = true;
+        wt.unstaged = unstaged;
+        wt.staged = staged;
+        wt.current_branch = branch;
+        let unstaged_nodes = build_file_tree(&wt.unstaged);
+        let staged_nodes = build_file_tree(&wt.staged);
+        wt.unstaged_tree.set_items(unstaged_nodes);
+        wt.staged_tree.set_items(staged_nodes);
+        if !wt.unstaged_initialized && !wt.unstaged_tree.visible().is_empty() {
+            wt.unstaged_tree.expand_all();
+            wt.unstaged_initialized = true;
         }
-        if !self.staged_initialized && !self.staged_tree.visible().is_empty() {
-            self.staged_tree.expand_all();
-            self.staged_initialized = true;
+        if !wt.staged_initialized && !wt.staged_tree.visible().is_empty() {
+            wt.staged_tree.expand_all();
+            wt.staged_initialized = true;
         }
         self.ensure_focus_valid();
         self.clear_error();
@@ -1604,7 +1712,7 @@ impl Model {
             && self.focus == prev_focus
             && self
                 .tree_state(self.focus)
-                .selected()
+                .and_then(|s| s.selected())
                 .is_some_and(|current| current == &prev_selection)
         {
             if let Some(offset) = previous_diff_offset_y {
@@ -1621,26 +1729,28 @@ impl Model {
     }
 
     fn ensure_focus_valid(&mut self) {
-        if self.view_mode.is_diff() {
-            self.ensure_tree_selection(Focus::Changed);
-            self.clamp_file_scrolls();
-            return;
+        match &self.view_mode {
+            ViewMode::Diff(_) => {
+                self.ensure_tree_selection(Focus::Changed);
+                self.clamp_file_scrolls();
+            }
+            ViewMode::WorkingTree(wt) => {
+                if self.focus == Focus::Unstaged
+                    && wt.unstaged_tree.visible().is_empty()
+                    && !wt.staged_tree.visible().is_empty()
+                {
+                    self.focus = Focus::Staged;
+                } else if self.focus == Focus::Staged
+                    && wt.staged_tree.visible().is_empty()
+                    && !wt.unstaged_tree.visible().is_empty()
+                {
+                    self.focus = Focus::Unstaged;
+                }
+                self.ensure_tree_selection(Focus::Unstaged);
+                self.ensure_tree_selection(Focus::Staged);
+                self.clamp_file_scrolls();
+            }
         }
-
-        if self.focus == Focus::Unstaged
-            && self.unstaged_tree.visible().is_empty()
-            && !self.staged_tree.visible().is_empty()
-        {
-            self.focus = Focus::Staged;
-        } else if self.focus == Focus::Staged
-            && self.staged_tree.visible().is_empty()
-            && !self.unstaged_tree.visible().is_empty()
-        {
-            self.focus = Focus::Unstaged;
-        }
-        self.ensure_tree_selection(Focus::Unstaged);
-        self.ensure_tree_selection(Focus::Staged);
-        self.clamp_file_scrolls();
     }
 
     fn start_diff_refresh(&mut self, preserve_scroll: bool) -> Option<TaskFn<Msg>> {
@@ -1664,10 +1774,10 @@ impl Model {
                 self.diff_truncated = false;
 
                 let focus = self.focus;
-                let view_mode = self.view_mode.clone();
+                let diff_spec = self.view_mode.spec().map(String::from);
 
                 let future = async move {
-                    let result = unblock(move || diff_for(&entry, focus, &view_mode))
+                    let result = unblock(move || diff_for(&entry, focus, diff_spec.as_deref()))
                         .await
                         .map_err(|err| err.to_string());
                     Msg::DiffLoaded { request_id, result }
@@ -1699,8 +1809,9 @@ impl Model {
         self.active_diff_request = None;
 
         let selected_id = self.selected_id(self.focus);
+        let diff_spec = self.view_mode.spec();
         match (self.current_entry(), selected_id.as_ref()) {
-            (Some(entry), _) => match diff_for(entry, self.focus, &self.view_mode) {
+            (Some(entry), _) => match diff_for(entry, self.focus, diff_spec) {
                 Ok(preview) => self.apply_diff_preview(preview, preserve_scroll),
                 Err(err) => {
                     self.diff_lines = vec![DiffLine::plain("Failed to load diff")];
@@ -1777,7 +1888,7 @@ impl Model {
 
     fn current_entry(&self) -> Option<&FileEntry> {
         let focus = self.focus;
-        let selected = self.tree_state(focus).selected()?;
+        let selected = self.tree_state(focus)?.selected()?;
         let path = match selected {
             FileNodeId::File(path) => path,
             FileNodeId::Dir(_) => return None,
@@ -1788,122 +1899,133 @@ impl Model {
     }
 
     fn entries_for_focus(&self, focus: Focus) -> &[FileEntry] {
-        match focus {
-            Focus::Unstaged => &self.unstaged,
-            Focus::Staged => &self.staged,
-            Focus::Changed => &self.changed,
+        match (&self.view_mode, focus) {
+            (ViewMode::WorkingTree(state), Focus::Unstaged) => &state.unstaged,
+            (ViewMode::WorkingTree(state), Focus::Staged) => &state.staged,
+            (ViewMode::Diff(state), Focus::Changed) => &state.changed,
+            _ => &[],
         }
     }
 
-    fn scroll_state_mut(&mut self, focus: Focus) -> &mut ScrollState {
-        match focus {
-            Focus::Unstaged => &mut self.unstaged_scroll,
-            Focus::Staged => &mut self.staged_scroll,
-            Focus::Changed => &mut self.changed_scroll,
+    fn scroll_state_mut(&mut self, focus: Focus) -> Option<&mut ScrollState> {
+        match (&mut self.view_mode, focus) {
+            (ViewMode::WorkingTree(state), Focus::Unstaged) => Some(&mut state.unstaged_scroll),
+            (ViewMode::WorkingTree(state), Focus::Staged) => Some(&mut state.staged_scroll),
+            (ViewMode::Diff(state), Focus::Changed) => Some(&mut state.changed_scroll),
+            _ => None,
         }
     }
 
     fn move_selection_up(&mut self) {
-        match self.focus {
-            Focus::Unstaged => {
-                if self.unstaged_tree.visible().is_empty() {
+        let focus = self.focus;
+        let is_first = self.is_first_selected(focus);
+
+        match (&mut self.view_mode, focus) {
+            (ViewMode::WorkingTree(wt), Focus::Unstaged) => {
+                if wt.unstaged_tree.visible().is_empty() {
                     return;
                 }
-                if self.is_first_selected(Focus::Unstaged) {
-                    if !self.staged_tree.visible().is_empty() {
+                if is_first {
+                    if !wt.staged_tree.visible().is_empty() {
                         self.focus = Focus::Staged;
-                        let state = self.tree_state_mut(Focus::Staged);
-                        state.select_last();
-                        state.ensure_selected();
+                        wt.staged_tree.select_last();
+                        wt.staged_tree.ensure_selected();
                         self.queue_scroll_for_staged();
                     }
                 } else {
-                    self.tree_state_mut(Focus::Unstaged).select_prev();
+                    wt.unstaged_tree.select_prev();
                     self.queue_scroll_for_unstaged();
                 }
             }
-            Focus::Staged => {
-                if self.staged_tree.visible().is_empty() {
+            (ViewMode::WorkingTree(wt), Focus::Staged) => {
+                if wt.staged_tree.visible().is_empty() {
                     return;
                 }
-                if self.is_first_selected(Focus::Staged) {
-                    if !self.unstaged_tree.visible().is_empty() {
+                if is_first {
+                    if !wt.unstaged_tree.visible().is_empty() {
                         self.focus = Focus::Unstaged;
-                        let state = self.tree_state_mut(Focus::Unstaged);
-                        state.select_last();
-                        state.ensure_selected();
+                        wt.unstaged_tree.select_last();
+                        wt.unstaged_tree.ensure_selected();
                         self.queue_scroll_for_unstaged();
                     }
                 } else {
-                    self.tree_state_mut(Focus::Staged).select_prev();
+                    wt.staged_tree.select_prev();
                     self.queue_scroll_for_staged();
                 }
             }
-            Focus::Changed => {
-                if self.changed_tree.visible().is_empty() {
+            (ViewMode::Diff(diff), Focus::Changed) => {
+                if diff.changed_tree.visible().is_empty() {
                     return;
                 }
-                if !self.is_first_selected(Focus::Changed) {
-                    self.tree_state_mut(Focus::Changed).select_prev();
+                if !is_first {
+                    diff.changed_tree.select_prev();
                     self.queue_scroll_for_changed();
                 }
             }
+            _ => {}
         }
     }
 
     fn move_selection_down(&mut self) {
-        match self.focus {
-            Focus::Unstaged => {
-                if self.unstaged_tree.visible().is_empty() {
+        let focus = self.focus;
+        let is_last = self.is_last_selected(focus);
+
+        match (&mut self.view_mode, focus) {
+            (ViewMode::WorkingTree(wt), Focus::Unstaged) => {
+                if wt.unstaged_tree.visible().is_empty() {
                     return;
                 }
-                if self.is_last_selected(Focus::Unstaged) {
-                    if !self.staged_tree.visible().is_empty() {
+                if is_last {
+                    if !wt.staged_tree.visible().is_empty() {
                         self.focus = Focus::Staged;
-                        let state = self.tree_state_mut(Focus::Staged);
-                        state.select_first();
-                        state.ensure_selected();
+                        wt.staged_tree.select_first();
+                        wt.staged_tree.ensure_selected();
                         self.queue_scroll_for_staged();
                     }
                 } else {
-                    self.tree_state_mut(Focus::Unstaged).select_next();
+                    wt.unstaged_tree.select_next();
                     self.queue_scroll_for_unstaged();
                 }
             }
-            Focus::Staged => {
-                if self.staged_tree.visible().is_empty() {
+            (ViewMode::WorkingTree(wt), Focus::Staged) => {
+                if wt.staged_tree.visible().is_empty() {
                     return;
                 }
-                if self.is_last_selected(Focus::Staged) {
+                if is_last {
                     return;
                 }
-                self.tree_state_mut(Focus::Staged).select_next();
+                wt.staged_tree.select_next();
                 self.queue_scroll_for_staged();
             }
-            Focus::Changed => {
-                if self.changed_tree.visible().is_empty() {
+            (ViewMode::Diff(diff), Focus::Changed) => {
+                if diff.changed_tree.visible().is_empty() {
                     return;
                 }
-                if !self.is_last_selected(Focus::Changed) {
-                    self.tree_state_mut(Focus::Changed).select_next();
+                if !is_last {
+                    diff.changed_tree.select_next();
                     self.queue_scroll_for_changed();
                 }
             }
+            _ => {}
         }
     }
 
     fn focus_unstaged(&mut self) {
-        if !self.unstaged_tree.visible().is_empty() {
+        if let Some(wt) = self.view_mode.working_tree_mut()
+            && !wt.unstaged_tree.visible().is_empty()
+        {
             self.focus = Focus::Unstaged;
-            self.ensure_tree_selection(Focus::Unstaged);
+            wt.unstaged_tree.ensure_selected();
             self.queue_scroll_for_unstaged();
         }
     }
 
     fn focus_staged(&mut self) {
-        if !self.staged_tree.visible().is_empty() {
+        if let Some(wt) = self.view_mode.working_tree_mut()
+            && !wt.staged_tree.visible().is_empty()
+        {
             self.focus = Focus::Staged;
-            self.ensure_tree_selection(Focus::Staged);
+            wt.staged_tree.ensure_selected();
             self.queue_scroll_for_staged();
         }
     }
@@ -1957,7 +2079,9 @@ impl Model {
                 self.focus = focus;
                 self.select_tree_id(focus, &id);
                 if id.is_dir() {
-                    self.tree_state_mut(focus).toggle_expanded(&id);
+                    if let Some(state) = self.tree_state_mut(focus) {
+                        state.toggle_expanded(&id);
+                    }
                     self.queue_scroll_for_focus(focus);
                     match self.start_diff_refresh(false) {
                         Some(task) => Transition::Task(task),
@@ -2017,55 +2141,81 @@ impl Model {
     }
 
     fn queue_scroll_for_unstaged(&mut self) {
-        if let Some(id) = self.selected_id(Focus::Unstaged) {
+        if let Some(id) = self.selected_id(Focus::Unstaged)
+            && let Some(wt) = self.view_mode.working_tree_mut()
+        {
             let target = ScrollTarget::with_mixin(Self::UNSTAGED_ITEM_ID, id.mixin());
-            self.unstaged_scroll
+            wt.unstaged_scroll
                 .ensure_visible(Self::UNSTAGED_CONTAINER_ID, target);
         }
     }
 
     fn queue_scroll_for_staged(&mut self) {
-        if let Some(id) = self.selected_id(Focus::Staged) {
+        if let Some(id) = self.selected_id(Focus::Staged)
+            && let Some(wt) = self.view_mode.working_tree_mut()
+        {
             let target = ScrollTarget::with_mixin(Self::STAGED_ITEM_ID, id.mixin());
-            self.staged_scroll
+            wt.staged_scroll
                 .ensure_visible(Self::STAGED_CONTAINER_ID, target);
         }
     }
 
     fn queue_scroll_for_changed(&mut self) {
-        if let Some(id) = self.selected_id(Focus::Changed) {
+        if let Some(id) = self.selected_id(Focus::Changed)
+            && let Some(diff) = self.view_mode.diff_state_mut()
+        {
             let target = ScrollTarget::with_mixin(Self::CHANGED_ITEM_ID, id.mixin());
-            self.changed_scroll
+            diff.changed_scroll
                 .ensure_visible(Self::CHANGED_CONTAINER_ID, target);
         }
     }
 
     fn update_section_scroll(&mut self, focus: Focus, msg: ScrollMsg) {
-        if matches!(msg, ScrollMsg::AxisDelta { .. }) && self.tree_state(focus).visible().is_empty()
+        if matches!(msg, ScrollMsg::AxisDelta { .. })
+            && self
+                .tree_state(focus)
+                .map(|s| s.visible().is_empty())
+                .unwrap_or(true)
         {
             return;
         }
-        self.scroll_state_mut(focus).update(msg);
-        // if focus == self.focus {
-        //     self.ensure_selected_visible();
-        // }
+        if let Some(scroll) = self.scroll_state_mut(focus) {
+            scroll.update(msg);
+        }
     }
 
     fn clamp_file_scrolls(&mut self) {
-        if self.unstaged_tree.visible().is_empty() {
-            self.unstaged_scroll.reset();
-        } else {
-            let max_offset = (self.unstaged_tree.visible().len().saturating_sub(1)) as f32;
-            if self.unstaged_scroll.offset() > max_offset {
-                self.unstaged_scroll.set_offset(max_offset);
+        match &mut self.view_mode {
+            ViewMode::WorkingTree(wt) => {
+                if wt.unstaged_tree.visible().is_empty() {
+                    wt.unstaged_scroll.reset();
+                } else {
+                    let max_offset =
+                        (wt.unstaged_tree.visible().len().saturating_sub(1)) as f32;
+                    if wt.unstaged_scroll.offset() > max_offset {
+                        wt.unstaged_scroll.set_offset(max_offset);
+                    }
+                }
+                if wt.staged_tree.visible().is_empty() {
+                    wt.staged_scroll.reset();
+                } else {
+                    let max_offset =
+                        (wt.staged_tree.visible().len().saturating_sub(1)) as f32;
+                    if wt.staged_scroll.offset() > max_offset {
+                        wt.staged_scroll.set_offset(max_offset);
+                    }
+                }
             }
-        }
-        if self.staged_tree.visible().is_empty() {
-            self.staged_scroll.reset();
-        } else {
-            let max_offset = (self.staged_tree.visible().len().saturating_sub(1)) as f32;
-            if self.staged_scroll.offset() > max_offset {
-                self.staged_scroll.set_offset(max_offset);
+            ViewMode::Diff(diff) => {
+                if diff.changed_tree.visible().is_empty() {
+                    diff.changed_scroll.reset();
+                } else {
+                    let max_offset =
+                        (diff.changed_tree.visible().len().saturating_sub(1)) as f32;
+                    if diff.changed_scroll.offset() > max_offset {
+                        diff.changed_scroll.set_offset(max_offset);
+                    }
+                }
             }
         }
     }
@@ -2194,8 +2344,8 @@ struct DiffPreview {
     truncated: bool,
 }
 
-fn diff_for(entry: &FileEntry, focus: Focus, view_mode: &ViewMode) -> Result<DiffPreview> {
-    let versions = load_file_versions(entry, focus, view_mode)?;
+fn diff_for(entry: &FileEntry, focus: Focus, diff_spec: Option<&str>) -> Result<DiffPreview> {
+    let versions = load_file_versions(entry, focus, diff_spec)?;
     if versions.old.is_none() && versions.new.is_none() {
         return Ok(DiffPreview {
             lines: Vec::new(),
@@ -2311,17 +2461,17 @@ impl FileContent {
 fn load_file_versions(
     entry: &FileEntry,
     focus: Focus,
-    view_mode: &ViewMode,
+    diff_spec: Option<&str>,
 ) -> Result<FileVersions> {
-    let (old_source, new_source) = match view_mode {
-        ViewMode::Diff { spec } => {
+    let (old_source, new_source) = match diff_spec {
+        Some(spec) => {
             let base_ref = git::diff_base_ref(spec);
             let target_ref = git::diff_target_ref(spec);
             let old = git::read_ref_file(&base_ref, &entry.path)?;
             let new = git::read_ref_file(&target_ref, &entry.path)?;
             (old, new)
         }
-        ViewMode::WorkingTree => {
+        None => {
             let old_source = match focus {
                 Focus::Unstaged => {
                     if entry.code == '?' {

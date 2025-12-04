@@ -100,7 +100,7 @@ pub(super) fn display_shortcuts(model: &Model) -> Vec<ShortcutDisplay> {
 }
 
 fn context_shortcuts(model: &Model) -> &'static [Shortcut] {
-    if model.commit_modal.is_some() {
+    if model.commit_modal().is_some() {
         COMMIT_MODAL_SHORTCUTS
     } else if model.view_mode.is_diff() {
         DIFF_VIEW_SHORTCUTS
