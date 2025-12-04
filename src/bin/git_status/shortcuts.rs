@@ -169,7 +169,7 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
             KeyCode::Enter,
             ModifierRequirement::Disabled,
             ModifierRequirement::Disabled,
-            ModifierRequirement::Any,
+            ModifierRequirement::Disabled,
         )),
         msg: Some(Msg::Navigation(NavigationMsg::ToggleStage)),
     },
@@ -703,11 +703,11 @@ const DIFF_VIEW_SHORTCUTS: &[Shortcut] = &[
 
 const COMMIT_MODAL_SHORTCUTS: &[Shortcut] = &[
     Shortcut {
-        label: "Ctrl-Enter",
+        label: "Ctrl-Space",
         description: "Commit",
         show_in_bar: true,
         binding: Some(Binding::new(
-            KeyCode::Enter,
+            KeyCode::Char(' '),
             ModifierRequirement::Enabled,
             ModifierRequirement::Disabled,
             ModifierRequirement::Disabled,
