@@ -1,4 +1,7 @@
-use super::{CommitMsg, DeleteMsg, DiffMsg, GlobalMsg, Key, KeyCode, Model, Msg, NavigationMsg};
+use super::{
+    CommitMsg, DeleteMsg, DiffMsg, GlobalMsg, Key, KeyCode, Model, Msg, NavigationMsg, ScrollAxis,
+    ScrollMsg,
+};
 
 #[derive(Clone)]
 struct Shortcut {
@@ -99,6 +102,8 @@ pub(super) fn display_shortcuts(model: &Model) -> Vec<ShortcutDisplay> {
 fn context_shortcuts(model: &Model) -> &'static [Shortcut] {
     if model.commit_modal.is_some() {
         COMMIT_MODAL_SHORTCUTS
+    } else if model.view_mode.is_diff() {
+        DIFF_VIEW_SHORTCUTS
     } else {
         NORMAL_SHORTCUTS
     }
@@ -284,6 +289,96 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
         msg: Some(Msg::Diff(DiffMsg::ScrollVertical(-1))),
     },
     Shortcut {
+        label: "Ctrl-F",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('f'),
+            ModifierRequirement::Enabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::Scroll(ScrollMsg::AxisDeltaPercent {
+            axis: ScrollAxis::Vertical,
+            ratio: 1.0,
+        }))),
+    },
+    Shortcut {
+        label: "Ctrl-B",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('b'),
+            ModifierRequirement::Enabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::Scroll(ScrollMsg::AxisDeltaPercent {
+            axis: ScrollAxis::Vertical,
+            ratio: -1.0,
+        }))),
+    },
+    Shortcut {
+        label: "g",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('g'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::Scroll(ScrollMsg::AxisJumpTo {
+            axis: ScrollAxis::Vertical,
+            offset: 0.0,
+        }))),
+    },
+    Shortcut {
+        label: "G",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('G'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::Scroll(ScrollMsg::AxisJumpTo {
+            axis: ScrollAxis::Vertical,
+            offset: f32::MAX,
+        }))),
+    },
+    Shortcut {
+        label: "Ctrl-D",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('d'),
+            ModifierRequirement::Enabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::Scroll(ScrollMsg::AxisDeltaPercent {
+            axis: ScrollAxis::Vertical,
+            ratio: 0.5,
+        }))),
+    },
+    Shortcut {
+        label: "Ctrl-U",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('u'),
+            ModifierRequirement::Enabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::Scroll(ScrollMsg::AxisDeltaPercent {
+            axis: ScrollAxis::Vertical,
+            ratio: -0.5,
+        }))),
+    },
+    Shortcut {
         label: "l",
         description: "Scroll diff right",
         show_in_bar: true,
@@ -344,29 +439,278 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
         msg: Some(Msg::Commit(CommitMsg::Open)),
     },
     Shortcut {
-        label: "Ctrl-D",
+        label: "Shift-D",
         description: "Delete changes",
         show_in_bar: true,
         binding: Some(Binding::new(
-            KeyCode::Char('d'),
-            ModifierRequirement::Enabled,
+            KeyCode::Char('D'),
             ModifierRequirement::Disabled,
-            ModifierRequirement::Any,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Enabled,
         )),
         msg: Some(Msg::Delete(DeleteMsg::Open)),
     },
 ];
 
-const COMMIT_MODAL_SHORTCUTS: &[Shortcut] = &[
+const DIFF_VIEW_SHORTCUTS: &[Shortcut] = &[
+    Shortcut {
+        label: "Esc",
+        description: "Quit",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Esc,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Global(GlobalMsg::Quit)),
+    },
+    Shortcut {
+        label: "q",
+        description: "Quit",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('q'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Global(GlobalMsg::Quit)),
+    },
+    Shortcut {
+        label: "Up",
+        description: "Move selection up",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Up,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Navigation(NavigationMsg::MoveSelectionUp)),
+    },
+    Shortcut {
+        label: "Down",
+        description: "Move selection down",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Down,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Navigation(NavigationMsg::MoveSelectionDown)),
+    },
+    Shortcut {
+        label: "⇠",
+        description: "Collapse directory",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Left,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Navigation(NavigationMsg::CollapseNode)),
+    },
+    Shortcut {
+        label: "",
+        description: "Expand directory",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Right,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Navigation(NavigationMsg::ExpandNode)),
+    },
+    Shortcut {
+        label: "j",
+        description: "Scroll files",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('j'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Navigation(NavigationMsg::ScrollFiles(1))),
+    },
+    Shortcut {
+        label: "k",
+        description: "Scroll files",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('k'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Navigation(NavigationMsg::ScrollFiles(-1))),
+    },
+    Shortcut {
+        label: "J",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('J'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::ScrollVertical(1))),
+    },
+    Shortcut {
+        label: "K",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('K'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::ScrollVertical(-1))),
+    },
+    Shortcut {
+        label: "Ctrl-F",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('f'),
+            ModifierRequirement::Enabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::Scroll(ScrollMsg::AxisDeltaPercent {
+            axis: ScrollAxis::Vertical,
+            ratio: 1.0,
+        }))),
+    },
+    Shortcut {
+        label: "Ctrl-B",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('b'),
+            ModifierRequirement::Enabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::Scroll(ScrollMsg::AxisDeltaPercent {
+            axis: ScrollAxis::Vertical,
+            ratio: -1.0,
+        }))),
+    },
+    Shortcut {
+        label: "g",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('g'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::Scroll(ScrollMsg::AxisJumpTo {
+            axis: ScrollAxis::Vertical,
+            offset: 0.0,
+        }))),
+    },
+    Shortcut {
+        label: "G",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('G'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::Scroll(ScrollMsg::AxisJumpTo {
+            axis: ScrollAxis::Vertical,
+            offset: f32::MAX,
+        }))),
+    },
     Shortcut {
         label: "Ctrl-D",
-        description: "Commit",
+        description: "Scroll diff",
         show_in_bar: true,
         binding: Some(Binding::new(
             KeyCode::Char('d'),
             ModifierRequirement::Enabled,
             ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::Scroll(ScrollMsg::AxisDeltaPercent {
+            axis: ScrollAxis::Vertical,
+            ratio: 0.5,
+        }))),
+    },
+    Shortcut {
+        label: "Ctrl-U",
+        description: "Scroll diff",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('u'),
+            ModifierRequirement::Enabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::Scroll(ScrollMsg::AxisDeltaPercent {
+            axis: ScrollAxis::Vertical,
+            ratio: -0.5,
+        }))),
+    },
+    Shortcut {
+        label: "l",
+        description: "Scroll diff right",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('l'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
             ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::ScrollHorizontal(4))),
+    },
+    Shortcut {
+        label: "h",
+        description: "Scroll diff left",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('h'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::ScrollHorizontal(-4))),
+    },
+    Shortcut {
+        label: "n",
+        description: "Toggle line numbers",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('n'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Diff(DiffMsg::ToggleLineNumbers)),
+    },
+];
+
+const COMMIT_MODAL_SHORTCUTS: &[Shortcut] = &[
+    Shortcut {
+        label: "Shift-D",
+        description: "Commit",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('D'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Enabled,
         )),
         msg: Some(Msg::Commit(CommitMsg::Submit)),
     },
