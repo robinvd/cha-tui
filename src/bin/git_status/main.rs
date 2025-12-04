@@ -24,7 +24,9 @@ use chatui::{
     column, default_input_keybindings, input, modal, rich_text, row, text,
 };
 use chatui::{TreeMsg, TreeNode, TreeState, TreeStyle, tree_view};
-use color_eyre::eyre::{Context, Result, eyre};
+use miette::{Context, IntoDiagnostic, Result, miette};
+use facet::Facet;
+use facet_args as args;
 use similar::{Algorithm, ChangeTag, DiffOp, DiffTag, InlineChange, TextDiff};
 use taffy::Dimension;
 use taffy::prelude::{FromLength, TaffyZero};
@@ -33,30 +35,34 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::git::{FileEntry, GitStatus, LoadedContent};
-use clap::{Parser, Subcommand};
 use smol::unblock;
 mod shortcuts;
 
-#[derive(Parser)]
-#[command(name = "gs")]
+#[derive(Facet)]
 struct Args {
-    #[command(subcommand)]
+    #[facet(args::subcommand)]
     command: Option<Command>,
 }
 
-#[derive(Subcommand)]
+#[derive(Facet)]
+#[repr(u8)]
 enum Command {
     /// Show changes from a commit (like git show)
     Show {
         /// Commit to show (default: HEAD)
-        #[arg(default_value = "HEAD")]
+        #[facet(args::positional, default = default_commit())]
         commit: String,
     },
     /// Show diff between commits (like git diff)
     Diff {
         /// Diff spec (commit, range, HEAD~N, etc.)
+        #[facet(args::positional)]
         spec: String,
     },
+}
+
+fn default_commit() -> String {
+    "HEAD".to_string()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -82,9 +88,9 @@ impl ViewMode {
 }
 
 fn main() -> Result<()> {
-    color_eyre::install()?;
+    miette::set_panic_hook();
 
-    let args = Args::parse();
+    let args: Args = facet_args::from_std_args()?;
     let view_mode = match args.command {
         Some(Command::Show { commit }) => ViewMode::Diff { spec: commit },
         Some(Command::Diff { spec }) => ViewMode::Diff { spec },
@@ -1372,7 +1378,7 @@ impl Model {
         }
     }
 
-    fn set_error(&mut self, err: color_eyre::eyre::Report) {
+    fn set_error(&mut self, err: miette::Report) {
         self.error = Some(err.to_string());
     }
 
@@ -1415,7 +1421,7 @@ impl Model {
         };
 
         if message.trim().is_empty() {
-            self.set_error(eyre!("Commit message cannot be empty"));
+            self.set_error(miette!("Commit message cannot be empty"));
             return Transition::Continue;
         }
 
@@ -1493,7 +1499,7 @@ impl Model {
                 }
             }
             Err(err) => {
-                self.set_error(eyre!("{}", err));
+                self.set_error(miette!("{}", err));
                 Transition::Continue
             }
         }
@@ -1743,7 +1749,7 @@ impl Model {
                 if !preserve_scroll {
                     self.diff_scroll.reset();
                 }
-                self.set_error(eyre!("{}", err));
+                self.set_error(miette!("{}", err));
             }
         }
 
@@ -2356,7 +2362,9 @@ fn read_worktree_file(path: &str) -> Result<Option<LoadedContent>> {
             .map(Some)
             .wrap_err_with(|| format!("failed to read {}", path)),
         Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
-        Err(err) => Err(err).wrap_err_with(|| format!("failed to read {}", path)),
+        Err(err) => Err(err)
+            .into_diagnostic()
+            .wrap_err_with(|| format!("failed to read {}", path)),
     }
 }
 
@@ -2367,6 +2375,7 @@ fn load_limited_from_file(file: File) -> Result<LoadedContent> {
         .by_ref()
         .take(git::PREVIEW_BYTE_LIMIT as u64)
         .read_to_end(&mut buffer)
+        .into_diagnostic()
         .wrap_err("failed to read file prefix")?;
 
     let truncated = if buffer.len() == git::PREVIEW_BYTE_LIMIT {
@@ -2376,7 +2385,11 @@ fn load_limited_from_file(file: File) -> Result<LoadedContent> {
                 Ok(0) => break false,
                 Ok(_) => break true,
                 Err(err) if err.kind() == ErrorKind::Interrupted => continue,
-                Err(err) => return Err(err).wrap_err("failed to read file tail"),
+                Err(err) => {
+                    return Err(err)
+                        .into_diagnostic()
+                        .wrap_err("failed to read file tail")
+                }
             }
         }
     } else {
@@ -3310,7 +3323,7 @@ mod tests {
     }
 }
 
-fn init_tracing() -> color_eyre::Result<()> {
+fn init_tracing() -> miette::Result<()> {
     use std::fs::File;
     use std::path::PathBuf;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -3336,7 +3349,7 @@ fn init_tracing() -> color_eyre::Result<()> {
         )
         .with(EnvFilter::from_default_env())
         .try_init()
-        .map_err(|error| color_eyre::eyre::eyre!(error))?;
+        .map_err(|error| miette::miette!("{}", error))?;
 
     Ok(())
 }

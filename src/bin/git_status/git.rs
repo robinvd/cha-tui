@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::process::Command;
 
-use color_eyre::eyre::{Context, Result, eyre};
+use miette::{Context, IntoDiagnostic, Result, miette};
 
 pub const PREVIEW_BYTE_LIMIT: usize = 1_048_576;
 
@@ -177,6 +177,7 @@ fn git_show(spec: &str) -> Result<Option<LoadedContent>> {
         .arg(spec)
         .env("GIT_PAGER", "cat")
         .output()
+        .into_diagnostic()
         .wrap_err_with(|| format!("git show {}", spec))?;
 
     if output.status.success() {
@@ -200,7 +201,7 @@ fn git_show(spec: &str) -> Result<Option<LoadedContent>> {
         return Ok(None);
     }
 
-    Err(eyre!(
+    Err(miette!(
         "git show {} failed: {}",
         spec,
         String::from_utf8_lossy(&output.stderr)
@@ -306,12 +307,13 @@ where
         .args(&args_vec)
         .env("GIT_PAGER", "cat")
         .output()
+        .into_diagnostic()
         .wrap_err_with(|| format!("failed to execute git {}", args_vec.join(" ")))?;
 
     let status = output.status;
     if !status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(eyre!(
+        return Err(miette!(
             "git {} failed: {}",
             args_vec.join(" "),
             stderr.trim()

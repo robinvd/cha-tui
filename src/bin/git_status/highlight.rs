@@ -15,7 +15,7 @@ use tree_house::{
 
 use chatui::dom::{Color, Style, TextSpan};
 
-use color_eyre::eyre::{Result, WrapErr, eyre};
+use miette::{Context, IntoDiagnostic, Result, miette};
 
 use super::runtime;
 
@@ -560,7 +560,7 @@ impl HighlightRegistry {
         let slice = rope.slice(..);
         let timeout = Duration::from_millis(SYNTAX_TIMEOUT_MILLIS);
         let syntax = Syntax::new(slice, language, timeout, &self.loader)
-            .map_err(|err| eyre!("failed to parse syntax for '{language_name}': {err}"))?;
+            .map_err(|err| miette!("failed to parse syntax for '{language_name}': {err}"))?;
 
         let byte_len = u32::try_from(source.len()).unwrap_or(u32::MAX);
         let mut highlighter = TreeHouseHighlighter::new(&syntax, slice, &self.loader, 0..byte_len);
@@ -934,6 +934,7 @@ impl TreeHouseLoader {
             injections.as_str(),
             locals.as_str(),
         )
+        .into_diagnostic()
         .wrap_err_with(|| format!("failed to compile language config for '{name}'"))?;
 
         config.configure(|capture| self.palette.highlight_for(capture));

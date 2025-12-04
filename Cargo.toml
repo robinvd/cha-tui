@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 color-eyre = "0.6.5"
+miette = { version = "7", features = ["fancy"] }
 once_cell = "1.19"
 taffy = "0.9.1"
 termina = { version = "0.1.1", features = ["event-stream"] }
@@ -18,8 +19,7 @@ time = { version = "0.3", features = ["formatting"] }
 smallvec = "1.13"
 similar = { version = "2.5", default-features = false, features = ["text", "inline"] }
 facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
-facet-args = { git = "https://github.com/facet-rs/facet-args", branch = "main" }
-clap = { version = "4", features = ["derive"] }
+facet-args = { git = "https://github.com/facet-rs/facet", branch = "main", package = "facet-args" }
 
 [dev-dependencies]
 tempfile = "3.10"

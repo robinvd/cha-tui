@@ -3,7 +3,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-use color_eyre::eyre::{Context, Result, eyre};
+use miette::{Context, IntoDiagnostic, Result, miette};
 use once_cell::sync::OnceCell;
 use tree_house::tree_sitter::Grammar as TreeHouseGrammar;
 
@@ -25,11 +25,12 @@ pub struct TreeSitterRuntime {
 impl TreeSitterRuntime {
     fn new() -> Result<Self> {
         let root = env::var(HELIX_RUNTIME_ENV)
+            .into_diagnostic()
             .wrap_err_with(|| format!("{} environment variable is not set", HELIX_RUNTIME_ENV))
             .map(PathBuf::from)?;
 
         if !root.is_dir() {
-            return Err(eyre!(
+            return Err(miette!(
                 "Helix runtime directory '{}' does not exist or is not a directory",
                 root.display()
             ));
@@ -42,6 +43,7 @@ impl TreeSitterRuntime {
         let path = self.grammar_path(name);
         unsafe {
             TreeHouseGrammar::new(name, &path)
+                .into_diagnostic()
                 .wrap_err_with(|| format!("failed to load grammar '{}'", path.display()))
         }
     }
@@ -49,6 +51,7 @@ impl TreeSitterRuntime {
     pub fn load_query(&self, language: &str, filename: &str) -> Result<String> {
         let path = self.query_path(language, filename);
         fs::read_to_string(&path)
+            .into_diagnostic()
             .wrap_err_with(|| format!("failed to read query '{}'", path.display()))
     }
 
@@ -57,9 +60,9 @@ impl TreeSitterRuntime {
         match fs::read_to_string(&path) {
             Ok(contents) => Ok(contents),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(String::new()),
-            Err(error) => {
-                Err(error).wrap_err_with(|| format!("failed to read query '{}'", path.display()))
-            }
+            Err(error) => Err(error)
+                .into_diagnostic()
+                .wrap_err_with(|| format!("failed to read query '{}'", path.display())),
         }
     }
 
