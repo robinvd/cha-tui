@@ -1,6 +1,5 @@
 use ropey::Rope;
 use smallvec::{SmallVec, smallvec};
-use std::collections::HashSet;
 use std::ops::Range;
 use termwiz::cell::unicode_column_width;
 use zed_sum_tree::TreeMap;
@@ -3106,9 +3105,9 @@ struct HighlightRun {
 struct InputRenderable {
     rope: Rope,
     primary_cursor: usize,
-    cursor_positions: HashSet<usize>,
+    cursor_positions: Vec<usize>,
     selection: Option<(usize, usize)>,
-    selection_ranges: Vec<(usize, usize)>, // all caret selections
+    selection_ranges: Vec<(usize, usize)>,
     base_style: Style,
     selection_style: Style,
     cursor_style: Style,
@@ -3118,7 +3117,7 @@ struct InputRenderable {
     cursor_line: usize,
     cursor_visual_line: usize,
     len_chars: usize,
-    highlight_store: HighlightStore,
+    highlight_runs: Vec<HighlightRun>,
     gutter_metrics: GutterMetrics,
     gutter_style: Style,
     hint_layout: InlineHintLayout,
@@ -3144,17 +3143,19 @@ impl InputRenderable {
         let len_chars = rope.len_chars();
         let cursor = state.cursor().min(len_chars);
         let selection = state.selection();
-        let cursor_positions: HashSet<usize> = state
+
+        let mut cursor_positions: Vec<usize> = state
             .carets()
             .into_iter()
             .map(|c| c.head.min(len_chars))
             .collect();
+        cursor_positions.sort_unstable();
 
         let base_style = style.text.clone();
         let selection_style = style.selection.clone();
         let cursor_style = style.cursor.clone();
 
-        let selection_ranges: Vec<(usize, usize)> = state
+        let mut selection_ranges: Vec<(usize, usize)> = state
             .carets()
             .into_iter()
             .filter_map(|c| {
@@ -3170,6 +3171,9 @@ impl InputRenderable {
                 }
             })
             .collect();
+        selection_ranges.sort_unstable_by_key(|(start, _)| *start);
+
+        let highlight_runs = Self::build_highlight_runs(state, &base_style, len_chars);
 
         let hint_layout = InlineHintLayout::build(&state.inline_hints, &rope);
         let content_line_count = hint_layout.content_line_count();
@@ -3224,11 +3228,26 @@ impl InputRenderable {
             cursor_line,
             cursor_visual_line,
             len_chars,
-            highlight_store: state.highlights.clone(),
+            highlight_runs,
             gutter_metrics,
             gutter_style,
             hint_layout,
         }
+    }
+
+    fn build_highlight_runs(state: &InputState, base_style: &Style, len_chars: usize) -> Vec<HighlightRun> {
+        let mut runs: Vec<HighlightRun> = Vec::new();
+        for run in state.highlights.resolved_runs(base_style, 0..len_chars) {
+            if let Some(last) = runs.last_mut()
+                && last.range.end == run.range.start
+                && last.style == run.style
+            {
+                last.range.end = run.range.end;
+                continue;
+            }
+            runs.push(run);
+        }
+        runs
     }
 
     fn line_display_width(
@@ -3244,46 +3263,6 @@ impl InputRenderable {
             .sum::<usize>();
         let hint_width = inline_hints.iter().map(|hint| hint.width).sum::<usize>();
         text_width + hint_width
-    }
-
-    fn highlight_runs(&self) -> Vec<HighlightRun> {
-        let mut runs: Vec<HighlightRun> = Vec::new();
-        for run in self
-            .highlight_store
-            .resolved_runs(&self.base_style, 0..self.len_chars)
-        {
-            if let Some(last) = runs.last_mut()
-                && last.range.end == run.range.start
-                && last.style == run.style
-            {
-                last.range.end = run.range.end;
-                continue;
-            }
-            runs.push(run);
-        }
-        runs
-    }
-
-    fn highlight_style_at(runs: &[HighlightRun], idx: usize) -> Option<&Style> {
-        if runs.is_empty() {
-            return None;
-        }
-
-        let mut left = 0;
-        let mut right = runs.len();
-        while left < right {
-            let mid = (left + right) / 2;
-            let run = &runs[mid];
-            if idx < run.range.start {
-                right = mid;
-            } else if idx >= run.range.end {
-                left = mid + 1;
-            } else {
-                return Some(&run.style);
-            }
-        }
-
-        None
     }
 
     fn gutter_text(&self, line_idx: usize) -> Option<String> {
@@ -3302,24 +3281,108 @@ impl InputRenderable {
             }
         }
     }
+}
 
-    fn run_style_for_index(&self, idx: usize, highlight_runs: &[HighlightRun]) -> RunStyle {
-        for (start, end) in &self.selection_ranges {
-            if idx >= *start && idx < *end {
+/// Cursor-based style resolver for O(1) per-character style lookups.
+///
+/// This struct maintains sorted indices into selection ranges, cursor positions,
+/// and highlight runs, enabling efficient iteration through characters without
+/// repeated linear scans or binary searches.
+struct LineStyleCursor<'a> {
+    selection_ranges: &'a [(usize, usize)],
+    cursor_positions: &'a [usize],
+    highlight_runs: &'a [HighlightRun],
+    primary_cursor: usize,
+    len_chars: usize,
+    sel_idx: usize,
+    cursor_idx: usize,
+    highlight_idx: usize,
+    in_selection: bool,
+}
+
+impl<'a> LineStyleCursor<'a> {
+    fn new(
+        renderable: &'a InputRenderable,
+        line_start: usize,
+    ) -> Self {
+        let sel_idx = renderable
+            .selection_ranges
+            .partition_point(|(_, end)| *end <= line_start);
+
+        let cursor_idx = renderable
+            .cursor_positions
+            .partition_point(|&pos| pos < line_start);
+
+        let highlight_idx = renderable
+            .highlight_runs
+            .partition_point(|run| run.range.end <= line_start);
+
+        let in_selection = sel_idx < renderable.selection_ranges.len()
+            && renderable.selection_ranges[sel_idx].0 <= line_start
+            && line_start < renderable.selection_ranges[sel_idx].1;
+
+        Self {
+            selection_ranges: &renderable.selection_ranges,
+            cursor_positions: &renderable.cursor_positions,
+            highlight_runs: &renderable.highlight_runs,
+            primary_cursor: renderable.primary_cursor,
+            len_chars: renderable.len_chars,
+            sel_idx,
+            cursor_idx,
+            highlight_idx,
+            in_selection,
+        }
+    }
+
+    fn style_at(&mut self, idx: usize) -> RunStyle {
+        while self.sel_idx < self.selection_ranges.len()
+            && self.selection_ranges[self.sel_idx].1 <= idx
+        {
+            self.sel_idx += 1;
+            self.in_selection = false;
+        }
+
+        if self.sel_idx < self.selection_ranges.len() {
+            let (start, end) = self.selection_ranges[self.sel_idx];
+            if idx >= start && idx < end {
+                self.in_selection = true;
                 return RunStyle::Selection;
             }
+            self.in_selection = false;
         }
-        if self.cursor_positions.contains(&idx)
+
+        while self.cursor_idx < self.cursor_positions.len()
+            && self.cursor_positions[self.cursor_idx] < idx
+        {
+            self.cursor_idx += 1;
+        }
+
+        if self.cursor_idx < self.cursor_positions.len()
+            && self.cursor_positions[self.cursor_idx] == idx
             && idx < self.len_chars
             && idx != self.primary_cursor
         {
             return RunStyle::Cursor;
         }
-        if let Some(style) = Self::highlight_style_at(highlight_runs, idx) {
-            return RunStyle::Highlight(style.clone());
+
+        while self.highlight_idx < self.highlight_runs.len()
+            && self.highlight_runs[self.highlight_idx].range.end <= idx
+        {
+            self.highlight_idx += 1;
         }
+
+        if self.highlight_idx < self.highlight_runs.len() {
+            let run = &self.highlight_runs[self.highlight_idx];
+            if idx >= run.range.start && idx < run.range.end {
+                return RunStyle::Highlight(run.style.clone());
+            }
+        }
+
         RunStyle::Base
     }
+}
+
+impl InputRenderable {
 
     fn capture_cursor_position(
         &self,
@@ -3584,7 +3647,6 @@ impl InputRenderable {
         area_width: usize,
         gutter_width: usize,
         skip_cols: usize,
-        highlight_runs: &[HighlightRun],
         base_attrs: &CellAttributes,
         selection_attrs: &CellAttributes,
         cursor_attrs: &CellAttributes,
@@ -3625,6 +3687,7 @@ impl InputRenderable {
         let mut inline_hint_idx = 0usize;
         let mut idx = line_start;
         let mut row_full = false;
+        let mut style_cursor = LineStyleCursor::new(self, line_start);
 
         while idx < line_end && !row_full {
             while inline_hint_idx < inline_hints.len()
@@ -3662,7 +3725,7 @@ impl InputRenderable {
             }
 
             let ch = self.rope.char(idx);
-            let style = self.run_style_for_index(idx, highlight_runs);
+            let style = style_cursor.style_at(idx);
 
             if ch == '\n' {
                 if idx == self.primary_cursor
@@ -3865,13 +3928,12 @@ impl Renderable for InputRenderable {
             || o.gutter_metrics != self.gutter_metrics
             || o.gutter_style != self.gutter_style
             || o.hint_layout != self.hint_layout
+            || o.highlight_runs != self.highlight_runs
         {
             return false;
         }
 
-        let self_runs = self.highlight_runs();
-        let other_runs = o.highlight_runs();
-        self_runs.iter().eq(other_runs.iter())
+        true
     }
 
     fn measure(
@@ -3905,8 +3967,6 @@ impl Renderable for InputRenderable {
         let base_attrs = ctx.style_to_attributes(&self.base_style);
         let selection_attrs = ctx.style_to_attributes(&self.selection_style);
         let cursor_attrs = ctx.style_to_attributes(&self.cursor_style);
-        let highlight_runs_ref = self.highlight_runs();
-        let highlight_runs: &[HighlightRun] = &highlight_runs_ref;
         let gutter_attrs = ctx.style_to_attributes(&self.gutter_style);
         let gutter_width = self.gutter_metrics.width.min(area.width);
         let visual_rows = self.hint_layout.visual_rows();
@@ -3944,7 +4004,6 @@ impl Renderable for InputRenderable {
                         area.width,
                         gutter_width,
                         skip_cols,
-                        highlight_runs,
                         &base_attrs,
                         &selection_attrs,
                         &cursor_attrs,
@@ -4660,7 +4719,7 @@ mod tests {
         let renderable = InputRenderable::new(&state, &style);
         let expected_style = style.text.clone().merged(&Style::fg(Color::BrightRed));
 
-        let runs = renderable.highlight_runs();
+        let runs = &renderable.highlight_runs;
         assert_eq!(
             &runs[..],
             &[HighlightRun {
@@ -4698,7 +4757,7 @@ mod tests {
             .merged(&base_layer_style)
             .merged(&overlay_style);
 
-        let runs = renderable.highlight_runs();
+        let runs = &renderable.highlight_runs;
         assert_eq!(
             &runs[..],
             &[HighlightRun {
@@ -4726,7 +4785,7 @@ mod tests {
 
         let renderable = InputRenderable::new(&state, &style);
 
-        let runs = renderable.highlight_runs();
+        let runs = &renderable.highlight_runs;
         assert_eq!(
             &runs[..],
             &[HighlightRun {
@@ -4756,7 +4815,7 @@ mod tests {
 
         let renderable = InputRenderable::new(&state, &style);
 
-        let runs = renderable.highlight_runs();
+        let runs = &renderable.highlight_runs;
         assert_eq!(
             &runs[..],
             &[HighlightRun {
@@ -4786,7 +4845,7 @@ mod tests {
 
         let renderable = InputRenderable::new(&state, &style);
 
-        let runs = renderable.highlight_runs();
+        let runs = &renderable.highlight_runs;
         assert_eq!(
             &runs[..],
             &[HighlightRun {
@@ -4811,7 +4870,7 @@ mod tests {
         let style = InputStyle::default();
         let renderable = InputRenderable::new(&state, &style);
 
-        assert!(renderable.highlight_runs().is_empty());
+        assert!(&renderable.highlight_runs.is_empty());
     }
 
     #[test]
@@ -4826,7 +4885,7 @@ mod tests {
 
         let style = InputStyle::default();
         let renderable = InputRenderable::new(&state, &style);
-        assert!(renderable.highlight_runs().is_empty());
+        assert!(&renderable.highlight_runs.is_empty());
     }
 
     #[test]
