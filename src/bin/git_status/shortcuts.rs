@@ -707,7 +707,7 @@ const COMMIT_MODAL_SHORTCUTS: &[Shortcut] = &[
         description: "Commit",
         show_in_bar: true,
         binding: Some(Binding::new(
-            KeyCode::Char(' '),
+            KeyCode::Enter,
             ModifierRequirement::Enabled,
             ModifierRequirement::Disabled,
             ModifierRequirement::Disabled,

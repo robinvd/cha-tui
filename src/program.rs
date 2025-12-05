@@ -97,9 +97,10 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
             .map_err(|e| ProgramError::terminal(format!("Failed to enter raw mode: {}", e)))?;
 
         // Enter alternate screen and enable mouse tracking
+        // Also enable kitty keyboard protocol with DISAMBIGUATE_ESCAPE_CODES flag
         write!(
             terminal,
-            "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h", // Enable SGR mouse mode and focus tracking
+            "\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h\x1b[>1u",
         )
         .map_err(|e| ProgramError::terminal(format!("Failed to setup terminal: {}", e)))?;
         terminal
@@ -109,10 +110,10 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
         let result = self.event_loop_async(&mut terminal).await;
 
         // Always attempt to restore terminal state.
-        // Show cursor again and disable mouse tracking + exit alternate screen.
+        // Pop kitty keyboard flags, show cursor, disable mouse tracking, exit alternate screen.
         let _ = write!(
             terminal,
-            "\x1b[?25h\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l",
+            "\x1b[<1u\x1b[?25h\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l",
         );
         let _ = terminal.flush();
         let _ = terminal.enter_cooked_mode();
@@ -670,13 +671,15 @@ fn map_mouse_event(mouse: termina::event::MouseEvent) -> Option<Event> {
 
 fn map_key_event(key: termina::event::KeyEvent) -> Option<Event> {
     let code = map_key_code(key.code)?;
-    let event_key = Key {
+    let event_key = Key::with_all_modifiers(
         code,
-        ctrl: key.modifiers.contains(termina::event::Modifiers::CONTROL),
-        alt: key.modifiers.contains(termina::event::Modifiers::ALT),
-        shift: key.modifiers.contains(termina::event::Modifiers::SHIFT),
-        super_key: key.modifiers.contains(termina::event::Modifiers::SUPER),
-    };
+        key.modifiers.contains(termina::event::Modifiers::CONTROL),
+        key.modifiers.contains(termina::event::Modifiers::ALT),
+        key.modifiers.contains(termina::event::Modifiers::SHIFT),
+        key.modifiers.contains(termina::event::Modifiers::SUPER),
+        key.modifiers.contains(termina::event::Modifiers::HYPER),
+        key.modifiers.contains(termina::event::Modifiers::META),
+    );
     Some(Event::Key(event_key))
 }
 

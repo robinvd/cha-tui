@@ -13,6 +13,8 @@ pub struct Key {
     pub alt: bool,
     pub shift: bool,
     pub super_key: bool,
+    pub hyper: bool,
+    pub meta: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -88,6 +90,8 @@ impl Key {
             alt: false,
             shift: false,
             super_key: false,
+            hyper: false,
+            meta: false,
         }
     }
 
@@ -104,6 +108,28 @@ impl Key {
             alt,
             shift,
             super_key,
+            hyper: false,
+            meta: false,
+        }
+    }
+
+    pub fn with_all_modifiers(
+        code: KeyCode,
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+        super_key: bool,
+        hyper: bool,
+        meta: bool,
+    ) -> Self {
+        Self {
+            code,
+            ctrl,
+            alt,
+            shift,
+            super_key,
+            hyper,
+            meta,
         }
     }
 }
@@ -201,6 +227,8 @@ mod tests {
                 assert!(!key.ctrl);
                 assert!(!key.alt);
                 assert!(!key.shift);
+                assert!(!key.hyper);
+                assert!(!key.meta);
             }
             other => panic!("expected key event, got {:?}", other),
         }
@@ -214,6 +242,8 @@ mod tests {
         assert!(!key.ctrl);
         assert!(!key.alt);
         assert!(!key.shift);
+        assert!(!key.hyper);
+        assert!(!key.meta);
     }
 
     #[test]
