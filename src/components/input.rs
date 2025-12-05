@@ -1,8 +1,9 @@
 use ropey::Rope;
 use smallvec::{SmallVec, smallvec};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::ops::Range;
 use termwiz::cell::unicode_column_width;
+use zed_sum_tree::TreeMap;
 
 use crate::Style;
 use crate::buffer::{CellAttributes, CursorShape};
@@ -505,7 +506,7 @@ impl GutterState {
 /// Highlight layers keyed by [`HighlightLayerId`].
 #[derive(Clone, Debug, Default)]
 struct HighlightStore {
-    layers: BTreeMap<HighlightLayerId, HighlightLayer>,
+    layers: TreeMap<HighlightLayerId, HighlightLayer>,
     layer_order: Vec<HighlightLayerId>,
 }
 
@@ -643,11 +644,11 @@ impl HighlightStore {
 
     fn sync_layer_order(&mut self) {
         self.layer_order
-            .retain(|layer_id| self.layers.contains_key(layer_id));
+            .retain(|layer_id| self.layers.get(layer_id).is_some());
 
-        for id in self.layers.keys().copied() {
-            if !self.layer_order.contains(&id) {
-                self.layer_order.push(id);
+        for (id, _) in self.layers.iter() {
+            if !self.layer_order.contains(id) {
+                self.layer_order.push(*id);
             }
         }
 
@@ -668,10 +669,15 @@ impl HighlightStore {
             self.apply_text_edit(edit);
         }
 
-        self.layers.retain(|_, layer| {
+        let mut retained: Vec<(HighlightLayerId, HighlightLayer)> = Vec::new();
+        for (id, layer) in self.layers.iter() {
+            let mut layer = layer.clone();
             layer.normalize();
-            !layer.spans.is_empty()
-        });
+            if !layer.spans.is_empty() {
+                retained.push((*id, layer));
+            }
+        }
+        self.layers = TreeMap::from_ordered_entries(retained);
         self.sync_layer_order();
     }
 
@@ -682,7 +688,9 @@ impl HighlightStore {
             return;
         }
 
-        for layer in self.layers.values_mut() {
+        let mut updated: Vec<(HighlightLayerId, HighlightLayer)> = Vec::new();
+        for (id, layer) in self.layers.iter() {
+            let mut layer = layer.clone();
             let mut idx = 0;
             while idx < layer.spans.len() {
                 let span = &mut layer.spans[idx];
@@ -710,7 +718,9 @@ impl HighlightStore {
                 span.range.end = new_end;
                 idx += 1;
             }
+            updated.push((*id, layer));
         }
+        self.layers = TreeMap::from_ordered_entries(updated);
     }
 }
 
@@ -868,7 +878,7 @@ impl<'a> LayerCursor<'a> {
 /// Storage for inline hints (LSP-style inlay text).
 #[derive(Clone, Debug, Default)]
 struct InlineHintStore {
-    hints: BTreeMap<InlineHintId, InlineHint>,
+    hints: TreeMap<InlineHintId, InlineHint>,
 }
 
 /// Immutable inline hint injected by tooling.
@@ -1102,7 +1112,8 @@ impl InlineHintStore {
 
         let mut prepared: Vec<PreparedInlineHint> = self
             .hints
-            .values()
+            .iter()
+            .map(|(_, hint)| hint)
             .filter(|hint| matches!(hint.placement, InlineHintPlacement::Inline))
             .filter_map(|hint| {
                 let anchor = hint.range.start.min(len_chars);
@@ -1133,12 +1144,16 @@ impl InlineHintStore {
             return;
         }
 
-        for hint in self.hints.values_mut() {
+        let mut updated: Vec<(InlineHintId, InlineHint)> = Vec::new();
+        for (id, hint) in self.hints.iter() {
+            let mut hint = hint.clone();
             let new_start = geometry.map_index(hint.range.start);
             let new_end = geometry.map_index(hint.range.end);
             hint.range.start = new_start.min(new_end);
             hint.range.end = new_start.max(new_end);
+            updated.push((*id, hint));
         }
+        self.hints = TreeMap::from_ordered_entries(updated);
     }
 
     fn prepare_hint(hint: &InlineHint, rope: &Rope, len_chars: usize) -> PreparedInlineHint {
