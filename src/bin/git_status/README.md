@@ -14,3 +14,10 @@ Supports the basic git workflow: review, stage and commit.
 
 The project works well and I'm using it as a daily driver for my git usage
 together with command line git where it's lacking.
+
+## Running the project
+
+For correct highlighting a directory with tree sitter grammars is required. The
+app reads the same directory layout as the runtime from the helix editor. And
+reads this at the location specified by the `HELIX_RUNTIME` env. usually this
+is `~/.config/helix/runtime`
