@@ -157,8 +157,8 @@ impl Model {
         use chatui::components::scroll::ScrollTarget;
 
         // Use cursor row/column to create a scroll target
-        let row = self.input.cursor_row();
-        let col = self.input.cursor_column();
+        let row = self.input.primary_cursor_row();
+        let col = self.input.primary_cursor_column();
 
         // Create a unique target ID based on cursor position
         // The scroll system will ensure this target is visible
@@ -174,7 +174,7 @@ impl Model {
             return;
         }
 
-        let cursor = self.input.cursor().min(len_chars);
+        let cursor = self.input.primary_cursor().min(len_chars);
         let line_idx = self.input.rope().char_to_line(cursor);
         let revision = self.input.revision();
 
@@ -794,7 +794,7 @@ mod tests {
 
         let model = Model::load(path).expect("load model");
         assert_eq!(
-            model.input.cursor(),
+            model.input.primary_cursor(),
             0,
             "cursor should start at the beginning of the file"
         );

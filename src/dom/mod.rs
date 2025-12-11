@@ -431,6 +431,16 @@ impl<Msg> Node<Msg> {
         self
     }
 
+    pub fn with_max_height(mut self, val: taffy::Dimension) -> Self {
+        self.layout_state.style.max_size.height = val;
+        self
+    }
+
+    pub fn with_max_width(mut self, val: taffy::Dimension) -> Self {
+        self.layout_state.style.max_size.width = val;
+        self
+    }
+
     pub fn with_width(mut self, val: taffy::Dimension) -> Self {
         self.layout_state.style.size.width = val;
         self

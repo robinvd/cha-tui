@@ -67,11 +67,12 @@ pub struct InputState {
     document: DocumentState,
     history: EditHistory,
     highlights: HighlightStore,
-    last_change: Option<TextChangeSet>,
     inline_hints: InlineHintStore,
     #[allow(dead_code)]
     autocomplete: AutocompleteState,
     views: Vec<ViewState>,
+
+    last_change: Option<TextChangeSet>,
 }
 
 impl Default for InputState {
@@ -118,6 +119,7 @@ struct ViewState {
     selection_mode: SelectionMode,
     #[allow(dead_code)]
     gutter: GutterState,
+    ensure_visible: Option<(usize, usize)>,
 }
 
 impl ViewState {
@@ -127,6 +129,7 @@ impl ViewState {
             cursor_set: CursorSet::default(),
             selection_mode: SelectionMode::Character,
             gutter: GutterState::default(),
+            ensure_visible: None,
         }
     }
 
@@ -1702,7 +1705,7 @@ impl InputState {
         self.inline_hints.ordered()
     }
 
-    pub fn cursor(&self) -> usize {
+    pub fn primary_cursor(&self) -> usize {
         self.primary_caret().head
     }
 
@@ -1728,13 +1731,13 @@ impl InputState {
         self.cursor_set().primary_index()
     }
 
-    pub fn cursor_row(&self) -> usize {
-        self.cursor_line()
+    pub fn primary_cursor_row(&self) -> usize {
+        self.primary_cursor_line()
     }
 
-    pub fn cursor_column(&self) -> usize {
-        let cursor_line = self.cursor_line();
-        self.column_in_line(cursor_line, self.cursor())
+    pub fn primary_cursor_column(&self) -> usize {
+        let cursor_line = self.primary_cursor_line();
+        self.column_in_line(cursor_line, self.primary_cursor())
     }
 
     pub fn set_carets<I>(&mut self, carets: I, primary_index: usize)
@@ -1931,8 +1934,8 @@ impl InputState {
             .reset_primary_preferred_column();
     }
 
-    fn cursor_line(&self) -> usize {
-        let idx = self.cursor().min(self.len_chars());
+    fn primary_cursor_line(&self) -> usize {
+        let idx = self.primary_cursor().min(self.len_chars());
         self.document.rope.char_to_line(idx)
     }
 
@@ -3141,7 +3144,7 @@ impl InputRenderable {
     fn new(state: &InputState, style: &InputStyle) -> Self {
         let rope = state.document.rope.clone();
         let len_chars = rope.len_chars();
-        let cursor = state.cursor().min(len_chars);
+        let cursor = state.primary_cursor().min(len_chars);
         let selection = state.selection();
 
         let mut cursor_positions: Vec<usize> = state
@@ -3235,7 +3238,11 @@ impl InputRenderable {
         }
     }
 
-    fn build_highlight_runs(state: &InputState, base_style: &Style, len_chars: usize) -> Vec<HighlightRun> {
+    fn build_highlight_runs(
+        state: &InputState,
+        base_style: &Style,
+        len_chars: usize,
+    ) -> Vec<HighlightRun> {
         let mut runs: Vec<HighlightRun> = Vec::new();
         for run in state.highlights.resolved_runs(base_style, 0..len_chars) {
             if let Some(last) = runs.last_mut()
@@ -3301,10 +3308,7 @@ struct LineStyleCursor<'a> {
 }
 
 impl<'a> LineStyleCursor<'a> {
-    fn new(
-        renderable: &'a InputRenderable,
-        line_start: usize,
-    ) -> Self {
+    fn new(renderable: &'a InputRenderable, line_start: usize) -> Self {
         let sel_idx = renderable
             .selection_ranges
             .partition_point(|(_, end)| *end <= line_start);
@@ -3383,7 +3387,6 @@ impl<'a> LineStyleCursor<'a> {
 }
 
 impl InputRenderable {
-
     fn capture_cursor_position(
         &self,
         target_idx: usize,
@@ -4127,7 +4130,7 @@ mod tests {
         state.update(InputMsg::MoveLeft { extend: false });
         state.update(InputMsg::DeleteBackward);
         assert_eq!(state.value(), "ac");
-        assert_eq!(state.cursor(), 1);
+        assert_eq!(state.primary_cursor(), 1);
     }
 
     #[test]
@@ -4337,13 +4340,13 @@ mod tests {
         state.update(InputMsg::MoveToStart { extend: false });
         state.update(InputMsg::MoveRight { extend: false });
         state.update(InputMsg::MoveRight { extend: false });
-        assert_eq!(state.cursor(), 2);
+        assert_eq!(state.primary_cursor(), 2);
 
         state.update(InputMsg::MoveDown { extend: false });
-        assert_eq!(state.cursor(), 7);
+        assert_eq!(state.primary_cursor(), 7);
 
         state.update(InputMsg::MoveUp { extend: false });
-        assert_eq!(state.cursor(), 2);
+        assert_eq!(state.primary_cursor(), 2);
     }
 
     #[test]
@@ -4356,7 +4359,7 @@ mod tests {
             modifiers: PointerModifiers::default(),
             scroll_y: 0,
         });
-        assert_eq!(state.cursor(), 6);
+        assert_eq!(state.primary_cursor(), 6);
     }
 
     #[test]
@@ -4375,7 +4378,7 @@ mod tests {
             scroll_y: 0,
         });
         assert_eq!(
-            state.cursor(),
+            state.primary_cursor(),
             0,
             "click at gutter edge should place cursor at start of line"
         );
@@ -4388,7 +4391,7 @@ mod tests {
             scroll_y: 0,
         });
         assert_eq!(
-            state.cursor(),
+            state.primary_cursor(),
             2,
             "click at gutter+2 should place cursor at index 2"
         );
@@ -4405,7 +4408,7 @@ mod tests {
             modifiers: PointerModifiers::default(),
             scroll_y: 0,
         });
-        assert_eq!(state.cursor(), 0);
+        assert_eq!(state.primary_cursor(), 0);
 
         state.update(InputMsg::Pointer {
             column: 2,
@@ -4414,7 +4417,7 @@ mod tests {
             modifiers: PointerModifiers::default(),
             scroll_y: 0,
         });
-        assert_eq!(state.cursor(), 2);
+        assert_eq!(state.primary_cursor(), 2);
     }
 
     #[test]
@@ -4463,7 +4466,7 @@ mod tests {
         state.update(InputMsg::MoveRight { extend: false });
         state.update(InputMsg::MoveRight { extend: false });
         state.update(InputMsg::MoveRight { extend: false });
-        assert_eq!(state.cursor(), 3);
+        assert_eq!(state.primary_cursor(), 3);
 
         let style = InputStyle::default();
 
@@ -4526,25 +4529,25 @@ mod tests {
     fn multiline_move_line_boundaries() {
         let mut state = InputState::with_value_multiline("one\ntwo");
         state.update(InputMsg::MoveToStart { extend: false });
-        assert_eq!(state.cursor(), 0);
+        assert_eq!(state.primary_cursor(), 0);
 
         state.update(InputMsg::MoveDown { extend: false });
-        assert_eq!(state.cursor(), 4);
+        assert_eq!(state.primary_cursor(), 4);
 
         state.update(InputMsg::MoveRight { extend: false });
         state.update(InputMsg::MoveRight { extend: false });
-        assert_eq!(state.cursor(), 6);
+        assert_eq!(state.primary_cursor(), 6);
 
         state.update(InputMsg::MoveLineStart { extend: false });
-        assert_eq!(state.cursor(), 4);
+        assert_eq!(state.primary_cursor(), 4);
         assert_eq!(state.selection(), None);
 
         state.update(InputMsg::MoveLineEnd { extend: false });
-        assert_eq!(state.cursor(), 7);
+        assert_eq!(state.primary_cursor(), 7);
 
         state.update(InputMsg::MoveLineStart { extend: false });
         state.update(InputMsg::MoveLineEnd { extend: true });
-        assert_eq!(state.cursor(), 7);
+        assert_eq!(state.primary_cursor(), 7);
         assert_eq!(state.selection(), Some((4, 7)));
     }
 
@@ -4662,7 +4665,7 @@ mod tests {
         use crate::buffer::{CursorShape, CursorState, DoubleBuffer};
         use crate::dom::rounding::round_layout;
         use crate::event::Size;
-        use crate::palette::{Palette, Rgba};
+        use crate::palette::Palette;
         use crate::render::Renderer;
         use taffy::{AvailableSpace, compute_root_layout};
 

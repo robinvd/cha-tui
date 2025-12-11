@@ -49,11 +49,12 @@ fn view(model: &Model) -> Node<Msg> {
         })
         .collect();
 
-    block(vec![column(vec![
+    column(vec![block(vec![column(vec![
         header,
         render_input(model),
         column(items),
-    ])])
+    ])])])
+    .with_fill()
 }
 
 fn render_input(model: &Model) -> Node<Msg> {
@@ -220,19 +221,19 @@ fn seed_model() -> Model {
     Model {
         items: vec![
             Item {
-                title: "Ship Elm TUI scaffold".into(),
+                title: "Push lib".into(),
                 completed: true,
             },
             Item {
-                title: "Wire rendering into runtime".into(),
+                title: "Add widgets".into(),
                 completed: true,
             },
             Item {
-                title: "Polish TODO example".into(),
+                title: "Make logo".into(),
                 completed: false,
             },
             Item {
-                title: "Add focus styles".into(),
+                title: "Profit?".into(),
                 completed: false,
             },
         ],
