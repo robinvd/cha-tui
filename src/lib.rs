@@ -29,5 +29,8 @@ pub use components::input::{
     default_keybindings as default_input_keybindings, input,
 };
 pub use components::scroll::{ScrollMsg, ScrollState, scrollable_content};
+pub use components::terminal::{
+    TerminalMsg, TerminalState, default_terminal_keybindings, terminal,
+};
 pub use components::tree::{TreeMsg, TreeNode, TreeNodeKind, TreeState, TreeStyle, tree_view};
 pub use scroll::ScrollAlignment;

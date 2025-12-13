@@ -29,6 +29,27 @@ pub enum Transition<Msg> {
     Continue,
     Quit,
     Task(TaskFn<Msg>),
+    Multiple(Vec<Transition<Msg>>),
+}
+
+impl<Msg> Transition<Msg> {
+    pub fn combine(self, other: Self) -> Self {
+        match (self, other) {
+            (Transition::Multiple(mut xs), Transition::Multiple(ys)) => {
+                xs.extend(ys);
+                Transition::Multiple(xs)
+            }
+            (Transition::Multiple(mut ts), other) => {
+                ts.push(other);
+                Transition::Multiple(ts)
+            }
+            (s, Transition::Multiple(mut ts)) => {
+                ts.push(s);
+                Transition::Multiple(ts)
+            }
+            (x, y) => Transition::Multiple(vec![x, y]),
+        }
+    }
 }
 
 struct ScrollEffect<Msg> {
@@ -74,6 +95,10 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
             task_queue_recv: recv,
             task_queue_send: snd,
         }
+    }
+
+    pub fn set_palette(&mut self, new: Palette) {
+        self.palette = new;
     }
 
     pub fn map_event(mut self, event_mapper: impl Fn(Event) -> Option<Msg> + 'static) -> Self {
@@ -270,6 +295,7 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
 
     fn handle_event(&mut self, event: Event) -> (Transition<Msg>, bool) {
         let mut needs_render = matches!(event, Event::Resize(_));
+        let mut needs_quit = false;
 
         if let Event::Resize(size) = &event {
             self.current_size = *size;
@@ -284,17 +310,14 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
             }
         }
 
-        let transition = if let Some(message) = msg {
+        if let Some(message) = msg {
             let transition = (self.update)(&mut self.model, message);
-            if matches!(&transition, Transition::Continue | Transition::Task(_)) {
-                needs_render = true;
-            }
-            transition
-        } else {
-            Transition::Continue
-        };
+            let (t_needs_quit, t_needs_render) = self.resolve_transition(transition);
+            needs_render |= t_needs_render;
+            needs_quit |= t_needs_quit;
+        }
 
-        if matches!(&transition, Transition::Quit) {
+        if needs_quit {
             return (Transition::Quit, needs_render);
         }
 
@@ -303,28 +326,54 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
             return (Transition::Quit, needs_render);
         }
 
-        (transition, needs_render)
+        (Transition::Continue, needs_render)
     }
 
     fn resolve_transition(&mut self, transition: Transition<Msg>) -> (bool, bool) {
+        let mut needs_render = false;
+        let mut needs_quit = false;
+        tracing::info!("Transition");
         match transition {
             Transition::Task(task) => {
+                tracing::info!("task spawning");
                 let send = self.task_queue_send.clone();
                 self.executor
                     .spawn(async move {
+                        tracing::info!("task spawned");
                         let msg = task.await;
+                        tracing::info!("task finished");
 
                         // ignore the err if the ch is closed.
                         //
                         // there is nothing to do with a closed ch.
-                        let _ = send.send(msg).await;
+                        let err = send.send(msg).await;
+                        if err.is_err() {
+                            tracing::info!("could not send task result");
+                        }
                     })
                     .detach();
-                (false, false)
+                needs_render = true;
             }
-            Transition::Continue => (false, true),
-            Transition::Quit => (true, true),
+            Transition::Continue => {
+                tracing::info!("cont");
+                needs_render = true;
+            }
+            Transition::Quit => {
+                tracing::info!("quit");
+                needs_quit = true;
+                needs_render = true;
+            }
+            Transition::Multiple(ts) => {
+                tracing::info!("mult");
+                for t in ts {
+                    let (t_quit, t_render) = self.resolve_transition(t);
+                    needs_quit |= t_quit;
+                    needs_render |= t_render;
+                }
+            }
         }
+
+        (needs_quit, needs_render)
     }
 
     fn pump_pending_tasks(&mut self) -> (bool, bool) {

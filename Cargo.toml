@@ -21,6 +21,8 @@ similar = { version = "2.5", default-features = false, features = ["text", "inli
 facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-args = { git = "https://github.com/facet-rs/facet", branch = "main", package = "facet-args" }
 zed-sum-tree = "0.2.0"
+alacritty_terminal = "0.25.1"
+vte = "*"
 
 [dev-dependencies]
 tempfile = "3.10"
