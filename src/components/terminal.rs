@@ -248,6 +248,7 @@ impl Default for TerminalState {
 pub fn terminal<Msg>(
     id: &'static str,
     state: &TerminalState,
+    focused: bool,
     on_event: impl Fn(TerminalMsg) -> Msg + 'static,
 ) -> Node<Msg>
 where
@@ -255,7 +256,7 @@ where
 {
     use std::rc::Rc;
 
-    let renderable_widget = TerminalRenderable::new(state);
+    let renderable_widget = TerminalRenderable::new(state, focused);
     let mut node = renderable::<Msg>(renderable_widget).with_id(id);
 
     let handler = Rc::new(on_event);
@@ -401,6 +402,8 @@ struct TerminalRenderable {
     scroll_offset: i32,
     /// Content version at the time this renderable was created.
     version: u64,
+    /// Whether the terminal is currently focused.
+    focused: bool,
 }
 
 impl std::fmt::Debug for TerminalRenderable {
@@ -410,18 +413,20 @@ impl std::fmt::Debug for TerminalRenderable {
             .field("rows", &self.rows)
             .field("scroll_offset", &self.scroll_offset)
             .field("version", &self.version)
+            .field("focused", &self.focused)
             .finish_non_exhaustive()
     }
 }
 
 impl TerminalRenderable {
-    fn new(state: &TerminalState) -> Self {
+    fn new(state: &TerminalState, focused: bool) -> Self {
         Self {
             term: state.term.clone(),
             cols: state.cols,
             rows: state.rows,
             scroll_offset: state.scroll_offset,
             version: state.version(),
+            focused,
         }
     }
 
@@ -460,6 +465,7 @@ impl Renderable for TerminalRenderable {
             && self.rows == o.rows
             && self.scroll_offset == o.scroll_offset
             && self.version == o.version
+            && self.focused == o.focused
     }
 
     fn measure(
@@ -506,6 +512,22 @@ impl Renderable for TerminalRenderable {
                 },
             );
         }
+        term.set_color(
+            NamedColor::Foreground as usize,
+            vte::ansi::Rgb {
+                r: ctx.palette().foreground.r,
+                g: ctx.palette().foreground.g,
+                b: ctx.palette().foreground.b,
+            },
+        );
+        term.set_color(
+            NamedColor::Background as usize,
+            vte::ansi::Rgb {
+                r: ctx.palette().background.r,
+                g: ctx.palette().background.g,
+                b: ctx.palette().background.b,
+            },
+        );
         let content = term.renderable_content();
         let colors = content.colors;
         let cursor = content.cursor;
@@ -573,20 +595,27 @@ impl Renderable for TerminalRenderable {
             ctx.write_char(area.x + x, area.y + y as usize, ch, &attrs);
         }
 
-        // Render cursor
-        let cursor_x = cursor.point.column.0;
-        let cursor_y = cursor.point.line.0 - self.scroll_offset;
+        // Render cursor only if focused
+        if self.focused {
+            let cursor_x = cursor.point.column.0;
+            let cursor_y = cursor.point.line.0 - self.scroll_offset;
 
-        if cursor_y >= 0
-            && cursor_y < area.height as i32
-            && cursor_x < area.width
-            && cursor.shape != AlacCursorShape::Hidden
-        {
-            ctx.set_cursor(
-                area.x + cursor_x,
-                area.y + cursor_y as usize,
-                Self::convert_cursor_shape(cursor.shape),
-            );
+            if cursor_y >= 0
+                && cursor_y < area.height as i32
+                && cursor_x < area.width
+                && cursor.shape != AlacCursorShape::Hidden
+            {
+                tracing::info!(
+                    "cursor {}:{}",
+                    area.x + cursor_x,
+                    area.y + cursor_y as usize
+                );
+                ctx.set_cursor(
+                    area.x + cursor_x,
+                    area.y + cursor_y as usize,
+                    Self::convert_cursor_shape(cursor.shape),
+                );
+            }
         }
     }
 
@@ -710,7 +739,7 @@ mod tests {
         let receiver = state.wakeup_receiver();
 
         // Create renderable before any output
-        let renderable1 = TerminalRenderable::new(&state);
+        let renderable1 = TerminalRenderable::new(&state, true);
 
         // Wait for output
         smol::block_on(async {
@@ -728,7 +757,7 @@ mod tests {
         });
 
         // Create renderable after output
-        let renderable2 = TerminalRenderable::new(&state);
+        let renderable2 = TerminalRenderable::new(&state, true);
 
         // The renderables should not be equal due to version difference
         assert!(
@@ -756,6 +785,28 @@ mod tests {
         assert_eq!(
             version_after_update, initial_version,
             "version should not change immediately after update"
+        );
+    }
+
+    #[test]
+    fn renderable_focused_field_affects_equality() {
+        let state = TerminalState::spawn("echo", &["test"]).expect("failed to spawn terminal");
+
+        // Create two renderables with same state but different focus
+        let focused_renderable = TerminalRenderable::new(&state, true);
+        let unfocused_renderable = TerminalRenderable::new(&state, false);
+
+        // They should not be equal due to different focus state
+        assert!(
+            !focused_renderable.eq(&unfocused_renderable),
+            "renderables with different focus should not be equal"
+        );
+
+        // Two focused renderables should be equal (same state and focus)
+        let another_focused_renderable = TerminalRenderable::new(&state, true);
+        assert!(
+            focused_renderable.eq(&another_focused_renderable),
+            "renderables with same focus should be equal"
         );
     }
 }

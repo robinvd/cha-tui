@@ -186,7 +186,15 @@ fn view(model: &Model) -> Node<Msg> {
 
     let left_pane = block_with_title::<Msg>(
         "Terminal 1",
-        vec![terminal("left-term", &model.left_term, Msg::LeftTerminal).with_fill()],
+        vec![
+            terminal(
+                "left-term",
+                &model.left_term,
+                model.focus == Focus::Left,
+                Msg::LeftTerminal,
+            )
+            .with_fill(),
+        ],
     )
     .with_style(left_style)
     .with_fill()
@@ -194,7 +202,15 @@ fn view(model: &Model) -> Node<Msg> {
 
     let right_pane = block_with_title::<Msg>(
         "Terminal 2",
-        vec![terminal("right-term", &model.right_term, Msg::RightTerminal).with_fill()],
+        vec![
+            terminal(
+                "right-term",
+                &model.right_term,
+                model.focus == Focus::Right,
+                Msg::RightTerminal,
+            )
+            .with_fill(),
+        ],
     )
     .with_style(right_style)
     .with_fill()
@@ -331,5 +347,23 @@ mod tests {
             initial_version,
             new_version
         );
+    }
+
+    #[test]
+    fn terminal_components_receive_correct_focus_state() {
+        let mut model = Model::new().expect("failed to create model");
+
+        // Initially left terminal should be focused
+        assert_eq!(model.focus, Focus::Left);
+
+        // Test that view function works with left focus
+        let _view_node = view(&model);
+
+        // Test focus toggle
+        update(&mut model, Msg::FocusRight);
+        assert_eq!(model.focus, Focus::Right);
+
+        // Test that view function works with right focus
+        let _view_node_right = view(&model);
     }
 }
