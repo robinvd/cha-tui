@@ -427,9 +427,13 @@ impl DoubleBuffer {
         // Only if we wrote something
         if wrote_anything {
             write!(buffer, "\x1b[0m")?;
+        }
 
-            // Always update the cursor if we wrote anything, as writing text
-            // changes the cursor pos
+        // Update cursor if either:
+        // 1. We wrote anything (writing text changes cursor position)
+        // 2. The cursor changed even if we didn't write anything
+        let should_update_cursor = wrote_anything || cursor_changed;
+        if should_update_cursor {
             match self.back_cursor {
                 CursorState::Hidden => {
                     buffer.push_str("\x1b[?25l");
@@ -977,6 +981,52 @@ mod tests {
             output_str.contains("\x1b[2;2H"),
             "Expected cursor to move to requested position"
         );
+    }
+
+    #[test]
+    fn flush_updates_cursor_when_text_written_even_if_cursor_unchanged() {
+        // This test verifies the fix for cursor rendering issue
+        // When text is written, the cursor should be updated even if the cursor
+        // position hasn't changed, because writing text changes the cursor position
+
+        let mut buffer = DoubleBuffer::new(10, 3);
+        let attrs = CellAttributes::default();
+
+        // Set cursor position
+        buffer.set_cursor(2, 1, CursorShape::SteadyBlock);
+
+        // First flush - establishes the cursor position
+        let mut output1 = Vec::new();
+        buffer
+            .flush(&mut output1)
+            .expect("first flush should succeed");
+        let output1_str = String::from_utf8(output1).expect("first output must be valid UTF-8");
+
+        // Should contain cursor positioning
+        assert!(
+            output1_str.contains("\x1b[2;3H"),
+            "Expected cursor to be positioned at 2,1 (1-indexed: 2;3H)"
+        );
+
+        // Now write some text without changing the cursor position
+        buffer.write_text(0, 0, "hello", &attrs);
+
+        // Second flush - should update cursor even though we didn't explicitly
+        // change the cursor position, because writing text changes cursor pos
+        let mut output2 = Vec::new();
+        buffer
+            .flush(&mut output2)
+            .expect("second flush should succeed");
+        let output2_str = String::from_utf8(output2).expect("second output must be valid UTF-8");
+
+        // Should contain cursor positioning again because text was written
+        assert!(
+            output2_str.contains("\x1b[2;3H"),
+            "Expected cursor to be repositioned after text was written"
+        );
+
+        // Should also contain the text
+        assert!(output2_str.contains("hello"), "Expected text to be written");
     }
 
     #[test]
