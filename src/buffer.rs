@@ -427,9 +427,9 @@ impl DoubleBuffer {
         // Only if we wrote something
         if wrote_anything {
             write!(buffer, "\x1b[0m")?;
-        }
 
-        if cursor_changed {
+            // Always update the cursor if we wrote anything, as writing text
+            // changes the cursor pos
             match self.back_cursor {
                 CursorState::Hidden => {
                     buffer.push_str("\x1b[?25l");
