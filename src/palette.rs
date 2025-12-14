@@ -83,6 +83,24 @@ impl Default for Palette {
 }
 
 impl Palette {
+    /// Query the terminal palette directly from `/dev/tty` using OSC requests.
+    ///
+    /// This is Unix-only; other platforms fall back to the default palette.
+    #[cfg(unix)]
+    pub fn query_from_tty() -> Result<Self, ProgramError> {
+        use std::fs::OpenOptions;
+        use std::os::unix::fs::OpenOptionsExt;
+
+        let mut tty = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open("/dev/tty")
+            .map_err(|e| ProgramError::terminal(format!("Failed to open /dev/tty: {}", e)))?;
+
+        Self::query_from_terminal(&mut tty)
+    }
+
     /// Query the terminal for its actual color palette
     ///
     /// This sends OSC queries to the terminal to fetch the actual colors.

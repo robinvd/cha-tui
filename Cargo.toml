@@ -23,6 +23,7 @@ facet-args = { git = "https://github.com/facet-rs/facet", branch = "main", packa
 zed-sum-tree = "0.2.0"
 alacritty_terminal = "0.25.1"
 vte = "*"
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.10"

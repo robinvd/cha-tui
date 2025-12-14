@@ -18,7 +18,7 @@ use smol::stream::StreamExt;
 use taffy::compute_root_layout;
 use termina::EventStream;
 use termina::{PlatformTerminal, Terminal};
-use tracing::info;
+use tracing::{info, warn};
 
 pub type UpdateFn<Model, Msg> = Box<dyn FnMut(&mut Model, Msg) -> Transition<Msg>>;
 pub type ViewFn<Model, Msg> = Box<dyn Fn(&Model) -> Node<Msg>>;
@@ -121,6 +121,8 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
             .enter_raw_mode()
             .map_err(|e| ProgramError::terminal(format!("Failed to enter raw mode: {}", e)))?;
 
+        self.detect_palette();
+
         // Enter alternate screen and enable mouse tracking
         // Also enable kitty keyboard protocol with DISAMBIGUATE_ESCAPE_CODES flag
         write!(
@@ -145,6 +147,20 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
 
         result
     }
+
+    #[cfg(unix)]
+    fn detect_palette(&mut self) {
+        match Palette::query_from_tty() {
+            Ok(palette) => {
+                info!("Detected terminal palette from host");
+                self.palette = palette;
+            }
+            Err(err) => warn!("Falling back to default palette: {:?}", err),
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn detect_palette(&mut self) {}
 
     async fn event_loop_async(
         &mut self,

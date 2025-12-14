@@ -339,6 +339,7 @@ dependencies = [
  "color-eyre",
  "facet",
  "facet-args",
+ "libc",
  "miette",
  "once_cell",
  "ropey",
