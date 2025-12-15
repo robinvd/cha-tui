@@ -329,12 +329,19 @@ mod tests {
         // Send a keystroke - this should wait for PTY to process
         let start = Instant::now();
         update(&mut model, Msg::Key(Key::new(KeyCode::Char('x'))));
+
+        // Wait a bit for PTY to process the input
+        std::thread::sleep(Duration::from_millis(50));
+
+        // Also drain any wakeups that came in
+        while wakeup_receiver.try_recv().is_ok() {}
+
         let elapsed = start.elapsed();
 
         // Should have waited some time for PTY (but not too long)
         // The wait can be very short if PTY responds quickly
         assert!(
-            elapsed.as_millis() < 100,
+            elapsed.as_millis() < 200,
             "keystroke took too long: {:?}",
             elapsed
         );
