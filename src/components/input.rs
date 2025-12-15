@@ -119,7 +119,6 @@ struct ViewState {
     selection_mode: SelectionMode,
     #[allow(dead_code)]
     gutter: GutterState,
-    ensure_visible: Option<(usize, usize)>,
 }
 
 impl ViewState {
@@ -129,7 +128,6 @@ impl ViewState {
             cursor_set: CursorSet::default(),
             selection_mode: SelectionMode::Character,
             gutter: GutterState::default(),
-            ensure_visible: None,
         }
     }
 

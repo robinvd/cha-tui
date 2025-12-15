@@ -546,17 +546,22 @@ mod tests {
         };
 
         let root = view(&model);
-        let block = root.into_element().expect("expected block element");
-        let content_column = block
-            .children
-            .into_iter()
+        let column = root.into_element().expect("expected column element");
+        let mut column_children = column.children.into_iter();
+        let block = column_children
             .next()
-            .expect("expected outer column")
+            .expect("expected block")
+            .into_element()
+            .expect("expected block element");
+        let mut block_children = block.children.into_iter();
+        let content_column = block_children
+            .next()
+            .expect("expected content column")
             .into_element()
             .expect("expected column element");
         let mut content_children = content_column.children.into_iter();
-        let _ = content_children.next();
-        let _ = content_children.next();
+        let _header = content_children.next();
+        let _input_block = content_children.next();
         let items_column = content_children
             .next()
             .expect("expected items column")
@@ -593,17 +598,22 @@ mod tests {
         };
 
         let root = view(&model);
-        let block = root.into_element().expect("expected block element");
-        let content_column = block
-            .children
-            .into_iter()
+        let column = root.into_element().expect("expected column element");
+        let mut column_children = column.children.into_iter();
+        let block = column_children
             .next()
-            .expect("expected outer column")
+            .expect("expected block")
+            .into_element()
+            .expect("expected block element");
+        let mut block_children = block.children.into_iter();
+        let content_column = block_children
+            .next()
+            .expect("expected content column")
             .into_element()
             .expect("expected column element");
         let mut content_children = content_column.children.into_iter();
-        let _ = content_children.next();
-        let _ = content_children.next();
+        let _header = content_children.next();
+        let _input_block = content_children.next();
         let items_column = content_children
             .next()
             .expect("expected items column")
