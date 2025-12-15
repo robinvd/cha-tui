@@ -2,11 +2,15 @@
 //!
 //! This module provides a terminal widget that can be embedded in the TUI.
 //! It uses alacritty_terminal for the actual terminal emulation.
+//!
+//! TODOs
+//! - Dont use 2 channels for EventListener
+//! - Add kitty keyboard support
 
 use std::any::Any;
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -44,23 +48,37 @@ struct TerminalEventListener {
     version: Arc<AtomicU64>,
     /// Channel to notify when terminal content changes.
     wakeup_sender: Sender<()>,
+    /// Channel carrying terminal events to the state.
+    event_sender: Sender<TermEvent>,
 }
 
 impl TerminalEventListener {
-    fn new(version: Arc<AtomicU64>, wakeup_sender: Sender<()>) -> Self {
+    fn new(
+        version: Arc<AtomicU64>,
+        wakeup_sender: Sender<()>,
+        event_sender: Sender<TermEvent>,
+    ) -> Self {
         Self {
             version,
             wakeup_sender,
+            event_sender,
         }
     }
 }
 
 impl EventListener for TerminalEventListener {
     fn send_event(&self, event: TermEvent) {
-        if matches!(event, TermEvent::Wakeup) {
+        if matches!(&event, TermEvent::Wakeup) {
             self.version.fetch_add(1, Ordering::Relaxed);
             let result = self.wakeup_sender.try_send(());
             tracing::info!("Wakeup event sent: {:?}", result);
+            return;
+        }
+
+        if let Err(err) = self.event_sender.try_send(event) {
+            tracing::warn!(?err, "Failed to forward terminal event");
+        } else {
+            let _ = self.wakeup_sender.try_send(());
         }
     }
 }
@@ -73,10 +91,18 @@ pub struct TerminalState {
     version: Arc<AtomicU64>,
     /// Receiver for wakeup notifications from the terminal.
     wakeup_receiver: Receiver<()>,
+    #[allow(dead_code)]
+    /// Sender for detailed terminal events (primarily for tests).
+    event_sender: Sender<TermEvent>,
+    /// Shared terminal width in columns.
+    cols_shared: Arc<AtomicU16>,
+    /// Shared terminal height in rows.
+    rows_shared: Arc<AtomicU16>,
+    /// Shared exited flag.
+    exited_shared: Arc<AtomicBool>,
     cols: u16,
     rows: u16,
     scroll_offset: i32,
-    exited: bool,
 }
 
 impl std::fmt::Debug for TerminalState {
@@ -85,12 +111,39 @@ impl std::fmt::Debug for TerminalState {
             .field("cols", &self.cols)
             .field("rows", &self.rows)
             .field("scroll_offset", &self.scroll_offset)
-            .field("exited", &self.exited)
             .finish_non_exhaustive()
     }
 }
 
 impl TerminalState {
+    fn handle_event_now(
+        event: TermEvent,
+        sender: &EventLoopSender,
+        cols_shared: &Arc<AtomicU16>,
+        rows_shared: &Arc<AtomicU16>,
+        exited_shared: &Arc<AtomicBool>,
+    ) {
+        match event {
+            TermEvent::TextAreaSizeRequest(formatter) => {
+                let size = WindowSize {
+                    num_cols: cols_shared.load(Ordering::Relaxed),
+                    num_lines: rows_shared.load(Ordering::Relaxed),
+                    cell_width: 1,
+                    cell_height: 1,
+                };
+                let payload = formatter(size);
+                let _ = sender.send(Msg::Input(Cow::Owned(payload.into_bytes())));
+            }
+            TermEvent::PtyWrite(text) => {
+                let _ = sender.send(Msg::Input(Cow::Owned(text.into_bytes())));
+            }
+            TermEvent::Exit | TermEvent::ChildExit(_) => {
+                exited_shared.store(true, Ordering::Relaxed);
+            }
+            _ => {}
+        }
+    }
+
     /// Create a new terminal state with the default shell.
     pub fn new() -> std::io::Result<Self> {
         Self::with_shell(None)
@@ -130,12 +183,17 @@ impl TerminalState {
         let pty = tty::new(&pty_config, window_size, 0)?;
 
         let version = Arc::new(AtomicU64::new(0));
+        let cols_shared = Arc::new(AtomicU16::new(cols));
+        let rows_shared = Arc::new(AtomicU16::new(rows));
+        let exited_shared = Arc::new(AtomicBool::new(false));
         let (wakeup_sender, wakeup_receiver) = channel::unbounded();
-        let event_listener = TerminalEventListener::new(version.clone(), wakeup_sender);
-        let term_size = TermSize::new(cols as usize, rows as usize);
+        let (event_sender, event_receiver) = channel::unbounded();
+        let event_listener =
+            TerminalEventListener::new(version.clone(), wakeup_sender, event_sender.clone());
         let config = TermConfig {
             ..Default::default()
         };
+        let term_size = TermSize::new(cols as usize, rows as usize);
         let term = Term::new(config, &term_size, event_listener.clone());
         let term = Arc::new(FairMutex::new(term));
 
@@ -145,15 +203,37 @@ impl TerminalState {
         let sender = event_loop.channel();
         let _join_handle = event_loop.spawn();
 
+        {
+            let cols_shared = cols_shared.clone();
+            let rows_shared = rows_shared.clone();
+            let exited_shared = exited_shared.clone();
+            let sender = sender.clone();
+            smol::spawn(async move {
+                while let Ok(event) = event_receiver.recv().await {
+                    Self::handle_event_now(
+                        event,
+                        &sender,
+                        &cols_shared,
+                        &rows_shared,
+                        &exited_shared,
+                    );
+                }
+            })
+            .detach();
+        }
+
         Ok(Self {
             term,
             sender,
             version,
             wakeup_receiver,
+            event_sender,
+            cols_shared,
+            rows_shared,
+            exited_shared,
             cols,
             rows,
             scroll_offset: 0,
-            exited: false,
         })
     }
 
@@ -203,6 +283,8 @@ impl TerminalState {
 
         self.cols = cols;
         self.rows = rows;
+        self.cols_shared.store(cols, Ordering::Relaxed);
+        self.rows_shared.store(rows, Ordering::Relaxed);
 
         let size = WindowSize {
             num_cols: cols,
@@ -219,7 +301,18 @@ impl TerminalState {
 
     /// Check if the terminal process has exited.
     pub fn is_running(&self) -> bool {
-        !self.exited
+        !self.exited_shared.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    fn handle_event_direct(&mut self, event: TermEvent) {
+        Self::handle_event_now(
+            event,
+            &self.sender,
+            &self.cols_shared,
+            &self.rows_shared,
+            &self.exited_shared,
+        );
     }
 
     /// Get the current terminal dimensions.
@@ -809,6 +902,35 @@ mod tests {
         assert!(
             focused_renderable.eq(&another_focused_renderable),
             "renderables with same focus should be equal"
+        );
+    }
+
+    #[test]
+    fn child_exit_event_marks_state_not_running() {
+        let mut state = TerminalState::new().expect("failed to create terminal");
+
+        state.handle_event_direct(TermEvent::ChildExit(0));
+
+        assert!(!state.is_running(), "state should be marked exited");
+    }
+
+    #[test]
+    fn size_request_event_is_processed() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut state = TerminalState::new().expect("failed to create terminal");
+        let called = Arc::new(AtomicBool::new(false));
+        let called_flag = called.clone();
+
+        state.handle_event_direct(TermEvent::TextAreaSizeRequest(Arc::new(move |size| {
+            called_flag.store(true, Ordering::Relaxed);
+            format!("{}x{}", size.num_cols, size.num_lines)
+        })));
+
+        assert!(
+            called.load(Ordering::Relaxed),
+            "formatter should be invoked when handling size request"
         );
     }
 }
