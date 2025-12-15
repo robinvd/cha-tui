@@ -17,6 +17,7 @@ use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, Config as TermConfig, Term};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
 use alacritty_terminal::vte::ansi::{self, CursorShape as AlacCursorShape, Handler, NamedColor};
+
 use smol::channel::{self, Receiver, Sender};
 
 use crate::buffer::{CellAttributes, CursorShape};
@@ -132,7 +133,10 @@ impl TerminalState {
         let (wakeup_sender, wakeup_receiver) = channel::unbounded();
         let event_listener = TerminalEventListener::new(version.clone(), wakeup_sender);
         let term_size = TermSize::new(cols as usize, rows as usize);
-        let term = Term::new(TermConfig::default(), &term_size, event_listener.clone());
+        let config = TermConfig {
+            ..Default::default()
+        };
+        let term = Term::new(config, &term_size, event_listener.clone());
         let term = Arc::new(FairMutex::new(term));
 
         let event_loop = EventLoop::new(term.clone(), event_listener, pty, false, false)
@@ -478,18 +482,16 @@ impl Renderable for TerminalRenderable {
             .width
             .unwrap_or(match available_space.width {
                 taffy::AvailableSpace::Definite(w) => w,
-                taffy::AvailableSpace::MinContent | taffy::AvailableSpace::MaxContent => {
-                    self.cols as f32
-                }
+                taffy::AvailableSpace::MinContent => 1.,
+                taffy::AvailableSpace::MaxContent => 100.,
             });
 
         let height = known_dimensions
             .height
             .unwrap_or(match available_space.height {
                 taffy::AvailableSpace::Definite(h) => h,
-                taffy::AvailableSpace::MinContent | taffy::AvailableSpace::MaxContent => {
-                    self.rows as f32
-                }
+                taffy::AvailableSpace::MinContent => 1.,
+                taffy::AvailableSpace::MaxContent => 100.,
             });
 
         taffy::Size { width, height }

@@ -197,7 +197,7 @@ fn view(model: &Model) -> Node<Msg> {
         ],
     )
     .with_style(left_style)
-    .with_fill()
+    .with_flex_grow(1.)
     .on_click(|| Msg::FocusLeft);
 
     let right_pane = block_with_title::<Msg>(
@@ -213,12 +213,12 @@ fn view(model: &Model) -> Node<Msg> {
         ],
     )
     .with_style(right_style)
-    .with_fill()
+    .with_flex_grow(1.)
     .on_click(|| Msg::FocusRight);
 
     let terminals = row(vec![left_pane, right_pane])
-        .with_fill()
-        .with_flex_grow(1.0);
+        .with_flex_grow(1.0)
+        .with_flex_shrink(1.);
 
     let status_bar = row(vec![
         text::<Msg>(format!(
