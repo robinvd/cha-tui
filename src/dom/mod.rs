@@ -199,6 +199,7 @@ pub struct Style {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Color {
     Reset,
+    Palette(u16),
     Rgba { r: u8, g: u8, b: u8, a: u8 },
 }
 
@@ -336,7 +337,7 @@ impl<Msg> Node<Msg> {
         }
     }
 
-    fn get_debug_label(&self) -> &'static str {
+    pub fn get_debug_label(&self) -> &'static str {
         if !self.classname.is_empty() {
             return self.classname;
         }
@@ -487,11 +488,26 @@ impl<Msg> Node<Msg> {
         self
     }
 
+    pub fn with_padding_bottom(mut self, count: u32) -> Self {
+        self.layout_state.style.padding.bottom = LengthPercentage::length(count as f32);
+        self
+    }
+
     pub fn with_gap(mut self, column: u16, row: u16) -> Self {
         self.layout_state.style.gap = TaffySize {
             width: LengthPercentage::length(column as f32),
             height: LengthPercentage::length(row as f32),
         };
+        self
+    }
+
+    pub fn with_align_items(mut self, val: taffy::AlignItems) -> Self {
+        self.layout_state.style.align_items = Some(val);
+        self
+    }
+
+    pub fn with_justify_content(mut self, val: taffy::AlignContent) -> Self {
+        self.layout_state.style.justify_content = Some(val);
         self
     }
 
@@ -711,6 +727,11 @@ impl Style {
         }
     }
 
+    pub fn with_bg(mut self, color: Color) -> Self {
+        self.bg = Some(color);
+        self
+    }
+
     pub fn bg(color: Color) -> Self {
         Self {
             bg: Some(color),
@@ -756,6 +777,9 @@ impl Style {
     }
 
     /// Return a new style with the overlay applied on top of `self`.
+    /// TODO this works weird?
+    ///         text::<Msg>("> ").with_style(Style::fg(Color::Green).merged(&Style::bg(Color::Palette(8))));
+    /// doesnt give what i think
     pub fn merged(mut self, overlay: &Self) -> Self {
         self.apply_overlay(overlay);
         self

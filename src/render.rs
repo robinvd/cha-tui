@@ -13,6 +13,7 @@ fn color_to_rgba(palette: &Palette, color: Color) -> Rgba {
     match color {
         Color::Reset => palette.foreground,
         Color::Rgba { r, g, b, a } => Rgba::new(r, g, b, a),
+        Color::Palette(n) => palette.colors[n.min(15) as usize],
     }
 }
 
@@ -162,6 +163,10 @@ impl<'a> Renderer<'a> {
         clear: bool,
     ) {
         let layout = node.layout_state.layout;
+        let is_scroll_y = node.layout_state.style.overflow.y == taffy::Overflow::Scroll;
+        let is_scroll_x = node.layout_state.style.overflow.x == taffy::Overflow::Scroll;
+        let child_scroll_y = (inherited_scroll_y - layout.location.y).max(0.0);
+        let child_scroll_x = inherited_scroll_x.max(0.0);
         let node_origin = Point {
             x: parent_origin.x + layout.location.x as usize,
             y: parent_origin.y + (layout.location.y - inherited_scroll_y).max(0.0) as usize,
@@ -185,38 +190,40 @@ impl<'a> Renderer<'a> {
 
         match &node.content {
             NodeContent::Text(text) => {
+                if child_scroll_y >= 1.0 {
+                    return;
+                }
                 // Apply horizontal windowing if x-overflow is scroll
                 let skip_cols = {
-                    let local = if node.layout_state.style.overflow.x == taffy::Overflow::Scroll {
+                    let local = if is_scroll_x {
                         node.scroll_x.max(0.0)
                     } else {
                         0.0
                     };
-                    (local + inherited_scroll_x.max(0.0)).round() as usize
+                    (local + child_scroll_x).round() as usize
                 };
                 self.render_text(text, node_origin, area, skip_cols)
             }
             NodeContent::Element(element) => {
-                let is_scroll = node.layout_state.style.overflow.y == taffy::Overflow::Scroll;
-                let is_scroll_x = node.layout_state.style.overflow.x == taffy::Overflow::Scroll;
                 let border_style =
                     if matches!(element.kind, ElementKind::Block) && element.attrs.style.border {
                         Some(&element.attrs.style)
                     } else {
                         None
                     };
-                let next_scroll = if is_scroll {
-                    inherited_scroll_y + node.scroll_y
+                self.apply_overlay_style(area, &element.attrs.style);
+                let next_scroll = if is_scroll_y {
+                    child_scroll_y + node.scroll_y
                 } else {
-                    inherited_scroll_y
+                    child_scroll_y
                 };
                 let next_scroll_x = if is_scroll_x {
-                    inherited_scroll_x + node.scroll_x
+                    child_scroll_x + node.scroll_x
                 } else {
-                    inherited_scroll_x
+                    child_scroll_x
                 };
                 self.render_element(element, node_origin, area, next_scroll, next_scroll_x);
-                if is_scroll {
+                if is_scroll_y {
                     self.render_scrollbar(node_origin, area, &layout, node.scroll_y, border_style);
                 }
                 if is_scroll_x {
@@ -224,12 +231,7 @@ impl<'a> Renderer<'a> {
                 }
             }
             NodeContent::Renderable(leaf) => {
-                let leaf_scroll_y = if node.layout_state.style.overflow.y == taffy::Overflow::Scroll
-                {
-                    inherited_scroll_y + node.scroll_y
-                } else {
-                    inherited_scroll_y
-                };
+                let leaf_scroll_y = child_scroll_y + node.scroll_y;
                 let mut ctx = RenderContext::new(
                     self.buffer,
                     self.palette,
@@ -239,12 +241,11 @@ impl<'a> Renderer<'a> {
                     leaf_scroll_y,
                 );
                 // Override horizontal scroll into the leaf context if this node scrolls horizontally
-                ctx.inherited_scroll_x =
-                    if node.layout_state.style.overflow.x == taffy::Overflow::Scroll {
-                        inherited_scroll_x + node.scroll_x
-                    } else {
-                        inherited_scroll_x
-                    };
+                ctx.inherited_scroll_x = if is_scroll_x {
+                    child_scroll_x + node.scroll_x
+                } else {
+                    child_scroll_x
+                };
                 leaf.render(&mut ctx);
             }
         }
@@ -749,12 +750,15 @@ fn rect_from_layout(layout: &TaffyLayout, origin: Point) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::components::scroll::{ScrollBehavior, ScrollMsg, ScrollState, scrollable_content};
     use crate::dom::rounding::round_layout;
     use crate::dom::{
         Color, Style, TableColumn, TableColumnWidth, TableRow, TextSpan, block, block_with_title,
         column, modal, rich_text, row, table, text,
     };
     use crate::palette::Palette;
+    use crate::paragraph;
+    use taffy::prelude::TaffyZero;
     use taffy::{AvailableSpace, Dimension, compute_root_layout};
 
     fn prepare_layout<Msg>(node: &mut Node<Msg>, size: Size) {
@@ -841,6 +845,76 @@ mod tests {
             .lines()
             .map(|line| line.to_string())
             .collect()
+    }
+
+    fn render_paragraph_with_scroll(scroll_offset: f32) -> Vec<String> {
+        let mut node = paragraph::<()>("L0\nL1\nL2\nL3\nL4\nL5")
+            .with_scroll(scroll_offset)
+            .with_width(Dimension::percent(1.0))
+            .with_height(Dimension::percent(1.0));
+
+        render_to_lines(&mut node, 8, 3)
+    }
+
+    fn render_scrollable_paragraph(scroll_offset: f32) -> Vec<String> {
+        let mut scroll_state = ScrollState::new(ScrollBehavior::Vertical);
+        let content_lines: Vec<String> = (0..8).map(|idx| format!("Line {idx}")).collect();
+        let content = content_lines.join("\n");
+        let line_count = content_lines.len() as u16;
+        scroll_state.update(ScrollMsg::Resize {
+            viewport: Size {
+                width: 32,
+                height: 4,
+            },
+            content: Size {
+                width: 32,
+                height: line_count,
+            },
+        });
+        scroll_state.set_offset(scroll_offset);
+
+        let mut node = scrollable_content(
+            "chat",
+            &scroll_state,
+            3,
+            |_: ScrollMsg| (),
+            block(vec![paragraph::<()>(content)])
+                .with_width(Dimension::percent(1.0))
+                .with_height(Dimension::percent(1.0)),
+        )
+        .with_width(Dimension::percent(1.0))
+        .with_height(Dimension::percent(1.0));
+
+        render_to_lines(&mut node, 32, 6)
+    }
+
+    fn render_scrollable_multi_paragraph(scroll_offset: f32) -> Vec<String> {
+        let mut scroll_state = ScrollState::new(ScrollBehavior::Vertical);
+        let paragraphs = vec![paragraph::<()>("A0\nA1\nA2"), paragraph::<()>("B0\nB1\nB2")];
+        let total_lines: u16 = 6;
+        scroll_state.update(ScrollMsg::Resize {
+            viewport: Size {
+                width: 16,
+                height: 4,
+            },
+            content: Size {
+                width: 16,
+                height: total_lines,
+            },
+        });
+        scroll_state.set_offset(scroll_offset);
+
+        let mut node = scrollable_content(
+            "multi",
+            &scroll_state,
+            3,
+            |_: ScrollMsg| (),
+            column(paragraphs).with_min_height(Dimension::ZERO),
+        )
+        .with_width(Dimension::percent(1.0))
+        .with_height(Dimension::percent(1.0));
+
+        render_to_lines(&mut node, 16, 4)
     }
 
     fn thumb_rows(lines: &[String]) -> Vec<usize> {
@@ -1546,6 +1620,92 @@ mod tests {
             screen.lines().next().unwrap().contains("L3"),
             "screen=\n{}",
             screen
+        );
+    }
+
+    #[test]
+    fn paragraph_respects_vertical_scroll() {
+        let top_lines = render_paragraph_with_scroll(0.0);
+        let scrolled_lines = render_paragraph_with_scroll(2.0);
+
+        assert!(
+            matches!(top_lines.first(), Some(line) if line.contains("L0")),
+            "expected top render to start at L0: {:?}",
+            top_lines
+        );
+        assert!(
+            matches!(scrolled_lines.first(), Some(line) if line.contains("L2")),
+            "expected scrolled render to start at L2: {:?}",
+            scrolled_lines
+        );
+        assert!(
+            scrolled_lines.iter().any(|line| line.contains("L4")),
+            "expected scrolled render to include L4: {:?}",
+            scrolled_lines
+        );
+        assert!(
+            !scrolled_lines.iter().any(|line| line.contains("L0")),
+            "scrolled render still shows initial line: {:?}",
+            scrolled_lines
+        );
+    }
+
+    #[test]
+    fn scrollable_content_scrolls_paragraph_lines() {
+        let top_lines = render_scrollable_paragraph(0.0);
+        let scrolled_lines = render_scrollable_paragraph(2.0);
+
+        assert!(top_lines.len() > 2 && scrolled_lines.len() > 2);
+
+        let top_content = &top_lines[1..top_lines.len().saturating_sub(1)];
+        let scrolled_content = &scrolled_lines[1..scrolled_lines.len().saturating_sub(1)];
+
+        assert!(
+            matches!(top_content.first(), Some(line) if line.contains("Line 0")),
+            "expected unscrolled render to start at Line 0: {:?}",
+            top_lines
+        );
+        assert!(
+            matches!(scrolled_content.first(), Some(line) if line.contains("Line 1")),
+            "expected scrolled render to start at Line 1: {:?}",
+            scrolled_lines
+        );
+        assert!(
+            scrolled_content.iter().any(|line| line.contains("Line 3")),
+            "expected scrolled render to include later lines: {:?}",
+            scrolled_lines
+        );
+        assert!(
+            !scrolled_content.iter().any(|line| line.contains("Line 0")),
+            "expected earlier lines to scroll out of view: {:?}",
+            scrolled_lines
+        );
+    }
+
+    #[test]
+    fn scrollable_content_with_multiple_paragraphs_respects_scroll() {
+        let top_lines = render_scrollable_multi_paragraph(0.0);
+        let scrolled_lines = render_scrollable_multi_paragraph(2.0);
+
+        assert!(
+            matches!(top_lines.first(), Some(line) if line.contains("A0")),
+            "expected first paragraph to start content: {:?}",
+            top_lines
+        );
+        assert!(
+            matches!(scrolled_lines.first(), Some(line) if line.contains("A2")),
+            "expected scroll to advance into first paragraph tail: {:?}",
+            scrolled_lines
+        );
+        assert!(
+            scrolled_lines.iter().any(|line| line.contains("B0")),
+            "expected scrolled view to include following paragraphs: {:?}",
+            scrolled_lines
+        );
+        assert!(
+            !scrolled_lines.iter().any(|line| line.contains("A0")),
+            "expected earliest lines to be scrolled away: {:?}",
+            scrolled_lines
         );
     }
 
