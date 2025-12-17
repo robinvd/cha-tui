@@ -20,7 +20,7 @@ use super::process;
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
-use alacritty_terminal::grid::Dimensions;
+use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::test::TermSize;
@@ -115,7 +115,6 @@ pub struct TerminalState {
     pty_fd: OwnedFd,
     cols: u16,
     rows: u16,
-    scroll_offset: i32,
 }
 
 impl std::fmt::Debug for TerminalState {
@@ -123,7 +122,6 @@ impl std::fmt::Debug for TerminalState {
         f.debug_struct("TerminalState")
             .field("cols", &self.cols)
             .field("rows", &self.rows)
-            .field("scroll_offset", &self.scroll_offset)
             .finish_non_exhaustive()
     }
 }
@@ -283,7 +281,6 @@ impl TerminalState {
             pty_fd: pty_fd.into(),
             cols,
             rows,
-            scroll_offset: 0,
         })
     }
 
@@ -298,17 +295,14 @@ impl TerminalState {
                 false
             }
             TerminalMsg::Scroll(delta) => {
-                let term = self.term.lock();
-                let history_size = term.history_size() as i32;
+                let mut term = self.term.lock();
+                let old_offset = term.grid().display_offset();
+                // Negate delta: TerminalMsg convention is positive=down, negative=up
+                // but alacritty's scroll_display uses positive=up (into history)
+                term.scroll_display(Scroll::Delta(-delta));
+                let new_offset = term.grid().display_offset();
                 drop(term);
-
-                let new_offset = (self.scroll_offset + delta).clamp(-history_size, 0);
-                if new_offset != self.scroll_offset {
-                    self.scroll_offset = new_offset;
-                    true
-                } else {
-                    false
-                }
+                old_offset != new_offset
             }
             TerminalMsg::Resize { cols, rows } => {
                 self.resize(cols, rows);
@@ -573,7 +567,6 @@ struct TerminalRenderable {
     term: Arc<FairMutex<Term<TerminalEventListener>>>,
     cols: u16,
     rows: u16,
-    scroll_offset: i32,
     /// Content version at the time this renderable was created.
     version: u64,
     /// Whether the terminal is currently focused.
@@ -585,7 +578,6 @@ impl std::fmt::Debug for TerminalRenderable {
         f.debug_struct("TerminalRenderable")
             .field("cols", &self.cols)
             .field("rows", &self.rows)
-            .field("scroll_offset", &self.scroll_offset)
             .field("version", &self.version)
             .field("focused", &self.focused)
             .finish_non_exhaustive()
@@ -598,7 +590,6 @@ impl TerminalRenderable {
             term: state.term.clone(),
             cols: state.cols,
             rows: state.rows,
-            scroll_offset: state.scroll_offset,
             version: state.version(),
             focused,
         }
@@ -637,7 +628,6 @@ impl Renderable for TerminalRenderable {
         Arc::ptr_eq(&self.term, &o.term)
             && self.cols == o.cols
             && self.rows == o.rows
-            && self.scroll_offset == o.scroll_offset
             && self.version == o.version
             && self.focused == o.focused
     }
@@ -703,6 +693,7 @@ impl Renderable for TerminalRenderable {
         let content = term.renderable_content();
         let colors = content.colors;
         let cursor = content.cursor;
+        let display_offset = content.display_offset as i32;
 
         let default_fg = colors[NamedColor::Foreground]
             .map(|c| Rgba::opaque(c.r, c.g, c.b))
@@ -723,12 +714,15 @@ impl Renderable for TerminalRenderable {
         }
 
         // Render each cell from the terminal
+        // Grid line numbers are relative to the visible viewport (can be negative when scrolled)
+        // We need to convert to screen coordinates by adding display_offset
         for cell in content.display_iter {
             let point = cell.point;
             let x = point.column.0;
-            let y = point.line.0 - self.scroll_offset;
+            // Convert grid line to screen coordinate
+            let screen_y = point.line.0 + display_offset;
 
-            if y < 0 || y >= area.height as i32 {
+            if screen_y < 0 || screen_y >= area.height as i32 {
                 continue;
             }
             if x >= area.width {
@@ -764,27 +758,28 @@ impl Renderable for TerminalRenderable {
             }
 
             let ch = cell.c;
-            ctx.write_char(area.x + x, area.y + y as usize, ch, &attrs);
+            ctx.write_char(area.x + x, area.y + screen_y as usize, ch, &attrs);
         }
 
         // Render cursor only if focused
         if self.focused {
             let cursor_x = cursor.point.column.0;
-            let cursor_y = cursor.point.line.0 - self.scroll_offset;
+            // Convert cursor line to screen coordinate
+            let cursor_screen_y = cursor.point.line.0 + display_offset;
 
-            if cursor_y >= 0
-                && cursor_y < area.height as i32
+            if cursor_screen_y >= 0
+                && cursor_screen_y < area.height as i32
                 && cursor_x < area.width
                 && cursor.shape != AlacCursorShape::Hidden
             {
                 tracing::info!(
                     "cursor {}:{}",
                     area.x + cursor_x,
-                    area.y + cursor_y as usize
+                    area.y + cursor_screen_y as usize
                 );
                 ctx.set_cursor(
                     area.x + cursor_x,
-                    area.y + cursor_y as usize,
+                    area.y + cursor_screen_y as usize,
                     Self::convert_cursor_shape(cursor.shape),
                 );
             }
