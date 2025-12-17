@@ -28,6 +28,7 @@ pub use components::input::{
     HighlightLayerId, HighlightSpan, InputMode, InputMsg, InputState, InputStyle,
     default_keybindings as default_input_keybindings, input,
 };
+pub use components::paragraph::{Paragraph, paragraph, rich_paragraph};
 pub use components::scroll::{ScrollMsg, ScrollState, scrollable_content};
 pub use components::terminal::{
     TerminalMsg, TerminalState, default_terminal_keybindings, terminal,

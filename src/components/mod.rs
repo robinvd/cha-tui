@@ -1,5 +1,6 @@
 pub mod data_table;
 pub mod input;
+pub mod paragraph;
 pub mod scroll;
 pub mod terminal;
 pub mod tree;
