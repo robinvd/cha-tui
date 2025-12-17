@@ -1,7 +1,7 @@
 //! Session manager demo with a sidebar tree and a single terminal pane.
 
-use std::io;
 use std::path::PathBuf;
+use std::{fs, io};
 
 use chatui::dom::Color;
 use chatui::event::{Event, Key, KeyCode};
@@ -10,6 +10,7 @@ use chatui::{
     Transition, TreeMsg, TreeNode, TreeState, TreeStyle, block_with_title, column,
     default_input_keybindings, default_terminal_keybindings, modal, row, terminal, text, tree_view,
 };
+use serde::{Deserialize, Serialize};
 use smol::channel::Receiver;
 use tracing::warn;
 
@@ -41,6 +42,17 @@ enum TreeId {
     Session(ProjectId, SessionId),
 }
 
+#[derive(Serialize, Deserialize)]
+struct PersistedProject {
+    name: String,
+    path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize, Default)]
+struct PersistedState {
+    projects: Vec<PersistedProject>,
+}
+
 struct Session {
     id: SessionId,
     number: usize,
@@ -49,6 +61,8 @@ struct Session {
     exited: bool,
     terminal: TerminalState,
     wakeup: Receiver<()>,
+    /// Cached display name to detect changes from foreground process
+    cached_display_name: String,
 }
 
 impl Session {
@@ -56,6 +70,7 @@ impl Session {
         let base = self
             .title
             .clone()
+            .or_else(|| self.terminal.foreground_process_name())
             .unwrap_or_else(|| format!("session{}", self.number));
         if self.exited {
             format!("{base} [exited]")
@@ -63,6 +78,16 @@ impl Session {
             format!("{base} 🔔")
         } else {
             base
+        }
+    }
+
+    fn sync_display_name(&mut self) -> bool {
+        let new_name = self.display_name();
+        if new_name != self.cached_display_name {
+            self.cached_display_name = new_name;
+            true
+        } else {
+            false
         }
     }
 }
@@ -115,15 +140,42 @@ impl Model {
             next_session_id: 1,
         };
 
-        let cwd = std::env::current_dir()?;
-        let name = cwd
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or("project")
-            .to_string();
-        model
-            .add_project(cwd, name)
-            .expect("failed to create initial project");
+        let persisted = match Self::load_projects() {
+            Ok(data) => data,
+            Err(err) => {
+                warn!(?err, "failed to load saved projects");
+                Vec::new()
+            }
+        };
+
+        if persisted.is_empty() {
+            let cwd = std::env::current_dir()?;
+            let name = cwd
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("project")
+                .to_string();
+            model
+                .add_project(cwd, name)
+                .expect("failed to create initial project");
+        } else {
+            for project in persisted {
+                if let Err(err) = model.add_project(project.path, project.name) {
+                    warn!(?err, "failed to restore project");
+                }
+            }
+            if model.projects.is_empty() {
+                let cwd = std::env::current_dir()?;
+                let name = cwd
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("project")
+                    .to_string();
+                model
+                    .add_project(cwd, name)
+                    .expect("failed to create initial project");
+            }
+        }
         Ok(model)
     }
 
@@ -150,6 +202,10 @@ impl Model {
         self.projects.push(project);
         self.rebuild_tree();
         self.focus = Focus::Sidebar;
+
+        if let Err(err) = self.save_projects() {
+            warn!(?err, "failed to save projects");
+        }
         Ok(())
     }
 
@@ -164,7 +220,7 @@ impl Model {
         let wakeup = terminal.wakeup_receiver();
         let id = SessionId(self.next_session_id);
         self.next_session_id += 1;
-        Ok(Session {
+        let mut session = Session {
             id,
             number,
             title: None,
@@ -172,7 +228,10 @@ impl Model {
             exited: false,
             terminal,
             wakeup,
-        })
+            cached_display_name: String::new(),
+        };
+        session.cached_display_name = session.display_name();
+        Ok(session)
     }
 
     fn active_session(&self) -> Option<(&Project, &Session)> {
@@ -333,12 +392,14 @@ impl Model {
             return false;
         };
 
+        // Sync the OSC title from the terminal
         let new_title = session.terminal.title();
         if new_title != session.title {
             session.title = new_title;
-            return true;
         }
-        false
+
+        // Check if display name changed (includes foreground process)
+        session.sync_display_name()
     }
 
     fn sync_session_bell(&mut self, id: &TreeId) -> bool {
@@ -419,6 +480,48 @@ impl Model {
             Ok(None)
         }
     }
+
+    fn config_path() -> io::Result<PathBuf> {
+        if let Some(dir) = std::env::var_os("CHATUI_CONFIG_DIR") {
+            return Ok(PathBuf::from(dir).join("term_projects.json"));
+        }
+
+        directories::ProjectDirs::from("", "", "chatui")
+            .map(|dirs| dirs.config_dir().join("term_projects.json"))
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "config directory unavailable"))
+    }
+
+    fn load_projects() -> io::Result<Vec<PersistedProject>> {
+        let path = Self::config_path()?;
+        if !path.exists() {
+            return Ok(Vec::new());
+        }
+
+        let data = fs::read_to_string(&path)?;
+        let state: PersistedState =
+            serde_json::from_str(&data).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        Ok(state.projects)
+    }
+
+    fn save_projects(&self) -> io::Result<()> {
+        let path = Self::config_path()?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let projects = self
+            .projects
+            .iter()
+            .map(|project| PersistedProject {
+                name: project.name.clone(),
+                path: project.path.clone(),
+            })
+            .collect();
+        let state = PersistedState { projects };
+        let data = serde_json::to_string_pretty(&state).map_err(io::Error::other)?;
+        fs::write(path, data)?;
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -470,10 +573,6 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             model.focus = Focus::Terminal;
         }
         Msg::Key(key) => {
-            if key.ctrl && key.code == KeyCode::Char('q') {
-                return Transition::Quit;
-            }
-
             if key.ctrl && key.code == KeyCode::Char('o') {
                 model.focus = model.focus.toggle();
                 transitions.push(Transition::Continue);
@@ -497,6 +596,9 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
 
             match model.focus {
                 Focus::Sidebar => match key.code {
+                    KeyCode::Char('q') if key.ctrl => {
+                        return Transition::Quit;
+                    }
                     KeyCode::Up | KeyCode::Char('k') => {
                         model.tree.ensure_selected();
                         model.tree.select_prev();
@@ -708,6 +810,9 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                     }
                     model.rebuild_tree();
                     model.focus = Focus::Sidebar;
+                    if let Err(err) = model.save_projects() {
+                        warn!(?err, "failed to save projects");
+                    }
                 }
                 TreeId::Session(pid, sid) => {
                     if let Some(project_idx) = model.projects.iter().position(|p| p.id == pid) {
@@ -805,13 +910,21 @@ fn terminal_pane(model: &Model) -> Node<Msg> {
 }
 
 fn status_bar(model: &Model) -> Node<Msg> {
-    let instructions = [
-        "Ctrl-O switch focus",
-        "Ctrl-Q quit",
-        "p new project",
-        "n new session",
-        "d delete",
-    ];
+    let instructions: &[&str] = match model.focus {
+        Focus::Sidebar => &[
+            "Ctrl-O switch focus",
+            "Ctrl-Q quit",
+            "p new project",
+            "n new session",
+            "d delete",
+            "j/k navigate",
+            "Enter select",
+        ],
+        Focus::Terminal => &[
+            "Ctrl-O switch focus",
+            "Ctrl-↑/↓ prev/next session",
+        ],
+    };
     let label = format!(" Focus: {:?} │ {} ", model.focus, instructions.join(" │ "));
 
     row(vec![text::<Msg>(label).with_style(

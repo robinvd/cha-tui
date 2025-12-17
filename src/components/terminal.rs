@@ -9,10 +9,14 @@
 
 use std::any::Any;
 use std::borrow::Cow;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+
+use super::process;
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
@@ -106,6 +110,9 @@ pub struct TerminalState {
     title: Arc<Mutex<Option<String>>>,
     /// Whether a bell has been emitted since the last check.
     bell: Arc<AtomicBool>,
+    /// Cloned PTY master fd for querying foreground process.
+    #[cfg(unix)]
+    pty_fd: OwnedFd,
     cols: u16,
     rows: u16,
     scroll_offset: i32,
@@ -211,6 +218,10 @@ impl TerminalState {
 
         let pty = tty::new(&pty_config, window_size, 0)?;
 
+        // Clone the PTY fd before moving it into EventLoop
+        #[cfg(unix)]
+        let pty_fd = pty.file().try_clone()?;
+
         let version = Arc::new(AtomicU64::new(0));
         let cols_shared = Arc::new(AtomicU16::new(cols));
         let rows_shared = Arc::new(AtomicU16::new(rows));
@@ -268,6 +279,8 @@ impl TerminalState {
             exited_shared,
             title: title_shared,
             bell: bell_shared,
+            #[cfg(unix)]
+            pty_fd: pty_fd.into(),
             cols,
             rows,
             scroll_offset: 0,
@@ -376,6 +389,21 @@ impl TerminalState {
     /// Get the current title reported by the terminal, if any.
     pub fn title(&self) -> Option<String> {
         self.title.lock().ok().and_then(|current| current.clone())
+    }
+
+    /// Get the name of the foreground process running in this terminal.
+    ///
+    /// This queries the PTY to determine which process is currently in the
+    /// foreground (e.g., "vim", "cargo", "python").
+    #[cfg(unix)]
+    pub fn foreground_process_name(&self) -> Option<String> {
+        process::foreground_process_name(self.pty_fd.as_raw_fd())
+    }
+
+    /// Get the name of the foreground process running in this terminal.
+    #[cfg(not(unix))]
+    pub fn foreground_process_name(&self) -> Option<String> {
+        None
     }
 
     /// Returns true if the terminal has emitted a bell since the last check.
