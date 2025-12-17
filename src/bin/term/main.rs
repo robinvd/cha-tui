@@ -125,6 +125,8 @@ struct Model {
     initial_update: bool,
     next_project_id: u64,
     next_session_id: u64,
+    /// When true, skip writing to the config file (used in tests).
+    skip_persist: bool,
 }
 
 impl Model {
@@ -138,6 +140,7 @@ impl Model {
             initial_update: true,
             next_project_id: 1,
             next_session_id: 1,
+            skip_persist: false,
         };
 
         let persisted = match Self::load_projects() {
@@ -504,6 +507,9 @@ impl Model {
     }
 
     fn save_projects(&self) -> io::Result<()> {
+        if self.skip_persist {
+            return Ok(());
+        }
         let path = Self::config_path()?;
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
@@ -521,6 +527,56 @@ impl Model {
         let data = serde_json::to_string_pretty(&state).map_err(io::Error::other)?;
         fs::write(path, data)?;
         Ok(())
+    }
+
+    fn move_session_up(&mut self, pid: ProjectId, sid: SessionId) -> bool {
+        let Some(project) = self.projects.iter_mut().find(|p| p.id == pid) else {
+            return false;
+        };
+        let Some(idx) = project.sessions.iter().position(|s| s.id == sid) else {
+            return false;
+        };
+        if idx == 0 {
+            return false;
+        }
+        project.sessions.swap(idx, idx - 1);
+        true
+    }
+
+    fn move_session_down(&mut self, pid: ProjectId, sid: SessionId) -> bool {
+        let Some(project) = self.projects.iter_mut().find(|p| p.id == pid) else {
+            return false;
+        };
+        let Some(idx) = project.sessions.iter().position(|s| s.id == sid) else {
+            return false;
+        };
+        if idx + 1 >= project.sessions.len() {
+            return false;
+        }
+        project.sessions.swap(idx, idx + 1);
+        true
+    }
+
+    fn move_project_up(&mut self, pid: ProjectId) -> bool {
+        let Some(idx) = self.projects.iter().position(|p| p.id == pid) else {
+            return false;
+        };
+        if idx == 0 {
+            return false;
+        }
+        self.projects.swap(idx, idx - 1);
+        true
+    }
+
+    fn move_project_down(&mut self, pid: ProjectId) -> bool {
+        let Some(idx) = self.projects.iter().position(|p| p.id == pid) else {
+            return false;
+        };
+        if idx + 1 >= self.projects.len() {
+            return false;
+        }
+        self.projects.swap(idx, idx + 1);
+        true
     }
 }
 
@@ -598,6 +654,32 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 Focus::Sidebar => match key.code {
                     KeyCode::Char('q') if key.ctrl => {
                         return Transition::Quit;
+                    }
+                    KeyCode::Up if key.shift => {
+                        if let Some(selected) = model.tree.selected().cloned() {
+                            let moved = match selected {
+                                TreeId::Project(pid) => model.move_project_up(pid),
+                                TreeId::Session(pid, sid) => model.move_session_up(pid, sid),
+                            };
+                            if moved {
+                                model.rebuild_tree();
+                                model.tree.select(selected);
+                            }
+                        }
+                        return Transition::Continue;
+                    }
+                    KeyCode::Down if key.shift => {
+                        if let Some(selected) = model.tree.selected().cloned() {
+                            let moved = match selected {
+                                TreeId::Project(pid) => model.move_project_down(pid),
+                                TreeId::Session(pid, sid) => model.move_session_down(pid, sid),
+                            };
+                            if moved {
+                                model.rebuild_tree();
+                                model.tree.select(selected);
+                            }
+                        }
+                        return Transition::Continue;
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         model.tree.ensure_selected();
