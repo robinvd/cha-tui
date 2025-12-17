@@ -69,6 +69,7 @@ pub fn patch<Msg>(mut existing: Node<Msg>, new_node: Node<Msg>) -> PatchResult<M
 
     if layout_changed {
         existing.layout_state.cache.clear();
+        existing.layout_state.size_dirty = true;
     }
 
     PatchResult::Patched {
