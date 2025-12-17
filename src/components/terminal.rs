@@ -9,7 +9,9 @@
 
 use std::any::Any;
 use std::borrow::Cow;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
@@ -100,6 +102,10 @@ pub struct TerminalState {
     rows_shared: Arc<AtomicU16>,
     /// Shared exited flag.
     exited_shared: Arc<AtomicBool>,
+    /// Shared window title reported by the shell/app.
+    title: Arc<Mutex<Option<String>>>,
+    /// Whether a bell has been emitted since the last check.
+    bell: Arc<AtomicBool>,
     cols: u16,
     rows: u16,
     scroll_offset: i32,
@@ -122,6 +128,8 @@ impl TerminalState {
         cols_shared: &Arc<AtomicU16>,
         rows_shared: &Arc<AtomicU16>,
         exited_shared: &Arc<AtomicBool>,
+        title_shared: &Arc<Mutex<Option<String>>>,
+        bell_shared: &Arc<AtomicBool>,
     ) {
         match event {
             TermEvent::TextAreaSizeRequest(formatter) => {
@@ -140,6 +148,19 @@ impl TerminalState {
             TermEvent::Exit | TermEvent::ChildExit(_) => {
                 exited_shared.store(true, Ordering::Relaxed);
             }
+            TermEvent::Title(title) => {
+                if let Ok(mut current) = title_shared.lock() {
+                    *current = Some(title);
+                }
+            }
+            TermEvent::ResetTitle => {
+                if let Ok(mut current) = title_shared.lock() {
+                    *current = None;
+                }
+            }
+            TermEvent::Bell => {
+                bell_shared.store(true, Ordering::Relaxed);
+            }
             _ => {}
         }
     }
@@ -152,23 +173,31 @@ impl TerminalState {
     /// Create a new terminal with a specific shell.
     pub fn with_shell(shell: Option<&str>) -> std::io::Result<Self> {
         let shell = shell.map(|s| Shell::new(s.to_string(), Vec::new()));
-        Self::spawn_internal(shell)
+        Self::spawn_internal(shell, None)
+    }
+
+    /// Create a new terminal state starting in a specific working directory.
+    pub fn with_working_dir(path: impl AsRef<Path>) -> std::io::Result<Self> {
+        Self::spawn_internal(None, Some(path.as_ref().to_path_buf()))
     }
 
     /// Spawn a command in the terminal.
     pub fn spawn(command: &str, args: &[&str]) -> std::io::Result<Self> {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let shell = Shell::new(command.to_string(), args);
-        Self::spawn_internal(Some(shell))
+        Self::spawn_internal(Some(shell), None)
     }
 
-    fn spawn_internal(shell: Option<Shell>) -> std::io::Result<Self> {
+    fn spawn_internal(
+        shell: Option<Shell>,
+        working_directory: Option<PathBuf>,
+    ) -> std::io::Result<Self> {
         let cols = 80u16;
         let rows = 24u16;
 
         let pty_config = PtyOptions {
             shell,
-            working_directory: None,
+            working_directory,
             drain_on_exit: false,
             env: Default::default(),
         };
@@ -186,6 +215,8 @@ impl TerminalState {
         let cols_shared = Arc::new(AtomicU16::new(cols));
         let rows_shared = Arc::new(AtomicU16::new(rows));
         let exited_shared = Arc::new(AtomicBool::new(false));
+        let title_shared = Arc::new(Mutex::new(None));
+        let bell_shared = Arc::new(AtomicBool::new(false));
         let (wakeup_sender, wakeup_receiver) = channel::unbounded();
         let (event_sender, event_receiver) = channel::unbounded();
         let event_listener =
@@ -207,6 +238,8 @@ impl TerminalState {
             let cols_shared = cols_shared.clone();
             let rows_shared = rows_shared.clone();
             let exited_shared = exited_shared.clone();
+            let title_shared = title_shared.clone();
+            let bell_shared = bell_shared.clone();
             let sender = sender.clone();
             smol::spawn(async move {
                 while let Ok(event) = event_receiver.recv().await {
@@ -216,6 +249,8 @@ impl TerminalState {
                         &cols_shared,
                         &rows_shared,
                         &exited_shared,
+                        &title_shared,
+                        &bell_shared,
                     );
                 }
             })
@@ -231,6 +266,8 @@ impl TerminalState {
             cols_shared,
             rows_shared,
             exited_shared,
+            title: title_shared,
+            bell: bell_shared,
             cols,
             rows,
             scroll_offset: 0,
@@ -312,6 +349,8 @@ impl TerminalState {
             &self.cols_shared,
             &self.rows_shared,
             &self.exited_shared,
+            &self.title,
+            &self.bell,
         );
     }
 
@@ -332,6 +371,16 @@ impl TerminalState {
     /// Use this to trigger re-renders when the terminal updates asynchronously.
     pub fn wakeup_receiver(&self) -> Receiver<()> {
         self.wakeup_receiver.clone()
+    }
+
+    /// Get the current title reported by the terminal, if any.
+    pub fn title(&self) -> Option<String> {
+        self.title.lock().ok().and_then(|current| current.clone())
+    }
+
+    /// Returns true if the terminal has emitted a bell since the last check.
+    pub fn take_bell(&self) -> bool {
+        self.bell.swap(false, Ordering::Relaxed)
     }
 }
 
@@ -823,6 +872,18 @@ mod tests {
         assert!(
             state.version() > initial_version,
             "version should increment after terminal output"
+        );
+    }
+
+    #[test]
+    fn bell_events_are_captured() {
+        let mut state = TerminalState::new().expect("create terminal");
+        state.handle_event_direct(TermEvent::Bell);
+
+        assert!(state.take_bell(), "bell flag should be set");
+        assert!(
+            !state.take_bell(),
+            "bell flag should be cleared after retrieval"
         );
     }
 
