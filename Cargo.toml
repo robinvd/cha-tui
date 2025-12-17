@@ -24,6 +24,8 @@ zed-sum-tree = "0.2.0"
 alacritty_terminal = "0.25.1"
 vte = "*"
 libc = "0.2"
+agent-client-protocol = "0.9.0"
+async-trait = "0.1"
 
 [dev-dependencies]
 tempfile = "3.10"

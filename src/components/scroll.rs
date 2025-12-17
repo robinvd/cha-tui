@@ -150,6 +150,12 @@ impl ScrollState {
         self.behavior
     }
 
+    pub fn is_at_end(&self, axis: ScrollAxis) -> bool {
+        let max_offset = self.max_offset_for(axis) as f32;
+        let offset = self.offset_for(axis);
+        max_offset <= 0.0 || (max_offset - offset).abs() <= SCROLL_END_TOLERANCE
+    }
+
     pub fn set_offset(&mut self, offset: f32) {
         let axis = self.primary_axis();
         self.set_offset_for(axis, offset);
@@ -337,6 +343,7 @@ impl ScrollState {
 }
 
 const AXIS_LOCK_DURATION: Duration = Duration::from_millis(200);
+const SCROLL_END_TOLERANCE: f32 = 0.5;
 
 #[derive(Clone, Copy, Debug)]
 struct AxisLock {
