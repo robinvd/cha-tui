@@ -10,6 +10,8 @@
 - Color is RGB/RGBA ONLY, no palette colors are used. The palette is queried on startup and then those RGB values are used when required.
 - Always run `cargo test` and `cargo clippy` after modifications.
 - Geometry utils (`Rect`/`Point`) in `src/geometry`
+- Only unix (macos/linux) has to be supported
+- Unless required dont use Color::Rgb, use the palette colors
 
 ## Running
 
@@ -42,3 +44,11 @@ Use `just test` for running the tests, this makes sure all envs etc are set corr
 ### LOGS
 
 Run the app with `RUST_LOG=debug cargo run ...` (again! using the `just session-*` or tmux) and it will put logs in todo.log or gs.log depending on the app.
+
+
+## binaries
+
+### term
+a terminal multiplexer, with a sidebar for different projects/sessions
+
+by default logs tracing::info! etc to ./term_debug.log
