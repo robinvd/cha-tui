@@ -7,24 +7,31 @@
 //! - Dont use 2 channels for EventListener
 //! - Add kitty keyboard support
 
+#[cfg(test)]
+use once_cell::sync::Lazy;
 use std::any::Any;
 use std::borrow::Cow;
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::io;
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, OwnedFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(test)]
+use std::sync::Condvar;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
+use std::thread::JoinHandle;
 
 use super::process;
 
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
-use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg};
+use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State as EventLoopState};
 use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{self, Config as TermConfig, Term};
+use alacritty_terminal::term::{self, Config as TermConfig, Term, TermMode};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
 use alacritty_terminal::vte::ansi::{self, CursorShape as AlacCursorShape, Handler, NamedColor};
 
@@ -32,9 +39,63 @@ use smol::channel::{self, Receiver, Sender};
 
 use crate::buffer::{CellAttributes, CursorShape};
 use crate::dom::{Node, Renderable, renderable};
-use crate::event::{Key, KeyCode, MouseEvent};
+use crate::event::{Key, KeyCode, MouseButtons, MouseEvent};
 use crate::palette::Rgba;
 use crate::render::RenderContext;
+
+#[cfg(unix)]
+fn set_cloexec(fd: RawFd) -> io::Result<()> {
+    // Prevent PTY master fds from leaking into newly spawned shells.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+    if flags == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    if flags & libc::FD_CLOEXEC != 0 {
+        return Ok(());
+    }
+
+    let result = unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) };
+    if result == -1 {
+        return Err(io::Error::last_os_error());
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+struct TerminalTestPermit {
+    lock: &'static Mutex<usize>,
+    cvar: &'static Condvar,
+}
+
+#[cfg(test)]
+impl TerminalTestPermit {
+    fn acquire() -> Self {
+        static PERMITS: Lazy<(Mutex<usize>, Condvar)> =
+            Lazy::new(|| (Mutex::new(3), Condvar::new()));
+
+        let (lock, cvar) = &*PERMITS;
+        let mut available = lock.lock().expect("terminal test semaphore poisoned");
+        while *available == 0 {
+            available = cvar
+                .wait(available)
+                .expect("terminal test semaphore wait poisoned");
+        }
+        *available -= 1;
+
+        Self { lock, cvar }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TerminalTestPermit {
+    fn drop(&mut self) {
+        let mut available = self.lock.lock().expect("terminal test semaphore poisoned");
+        *available += 1;
+        self.cvar.notify_one();
+    }
+}
 
 /// Messages for terminal state updates.
 #[derive(Clone, Debug)]
@@ -45,6 +106,10 @@ pub enum TerminalMsg {
     Scroll(i32),
     /// Resize the terminal to new dimensions
     Resize { cols: u16, rows: u16 },
+    /// Focus gained
+    FocusGained,
+    /// Focus lost
+    FocusLost,
 }
 
 /// Event listener that tracks terminal content changes.
@@ -89,12 +154,16 @@ impl EventListener for TerminalEventListener {
     }
 }
 
+type EventLoopHandle = JoinHandle<(EventLoop<tty::Pty, TerminalEventListener>, EventLoopState)>;
+
 /// State for the embedded terminal.
 pub struct TerminalState {
     term: Arc<FairMutex<Term<TerminalEventListener>>>,
     sender: EventLoopSender,
     /// Content version counter, incremented on each terminal wakeup.
     version: Arc<AtomicU64>,
+    /// Sender for wakeup notifications from the terminal.
+    wakeup_sender: Sender<()>,
     /// Receiver for wakeup notifications from the terminal.
     wakeup_receiver: Receiver<()>,
     #[allow(dead_code)]
@@ -115,6 +184,9 @@ pub struct TerminalState {
     pty_fd: OwnedFd,
     cols: u16,
     rows: u16,
+    join_handle: Option<EventLoopHandle>,
+    #[cfg(test)]
+    _test_permit: TerminalTestPermit,
 }
 
 impl std::fmt::Debug for TerminalState {
@@ -197,13 +269,16 @@ impl TerminalState {
         shell: Option<Shell>,
         working_directory: Option<PathBuf>,
     ) -> std::io::Result<Self> {
+        #[cfg(test)]
+        let test_permit = TerminalTestPermit::acquire();
+
         let cols = 80u16;
         let rows = 24u16;
 
         let pty_config = PtyOptions {
             shell,
             working_directory,
-            drain_on_exit: false,
+            drain_on_exit: true,
             env: Default::default(),
         };
 
@@ -214,7 +289,11 @@ impl TerminalState {
             cell_height: 1,
         };
 
+        // TODO? window_id not 0
         let pty = tty::new(&pty_config, window_size, 0)?;
+
+        #[cfg(unix)]
+        set_cloexec(pty.file().as_raw_fd())?;
 
         // Clone the PTY fd before moving it into EventLoop
         #[cfg(unix)]
@@ -229,7 +308,7 @@ impl TerminalState {
         let (wakeup_sender, wakeup_receiver) = channel::unbounded();
         let (event_sender, event_receiver) = channel::unbounded();
         let event_listener =
-            TerminalEventListener::new(version.clone(), wakeup_sender, event_sender.clone());
+            TerminalEventListener::new(version.clone(), wakeup_sender.clone(), event_sender.clone());
         let config = TermConfig {
             ..Default::default()
         };
@@ -241,7 +320,7 @@ impl TerminalState {
             .map_err(|e| std::io::Error::other(format!("EventLoop error: {e:?}")))?;
 
         let sender = event_loop.channel();
-        let _join_handle = event_loop.spawn();
+        let join_handle = event_loop.spawn();
 
         {
             let cols_shared = cols_shared.clone();
@@ -270,6 +349,7 @@ impl TerminalState {
             term,
             sender,
             version,
+            wakeup_sender,
             wakeup_receiver,
             event_sender,
             cols_shared,
@@ -281,6 +361,9 @@ impl TerminalState {
             pty_fd: pty_fd.into(),
             cols,
             rows,
+            join_handle: Some(join_handle),
+            #[cfg(test)]
+            _test_permit: test_permit,
         })
     }
 
@@ -307,6 +390,18 @@ impl TerminalState {
             TerminalMsg::Resize { cols, rows } => {
                 self.resize(cols, rows);
                 true
+            }
+            TerminalMsg::FocusGained => {
+                if self.mode().contains(TermMode::FOCUS_IN_OUT) {
+                    self.write(b"\x1b[I");
+                }
+                false
+            }
+            TerminalMsg::FocusLost => {
+                if self.mode().contains(TermMode::FOCUS_IN_OUT) {
+                    self.write(b"\x1b[O");
+                }
+                false
             }
         }
     }
@@ -380,6 +475,12 @@ impl TerminalState {
         self.wakeup_receiver.clone()
     }
 
+    #[doc(hidden)]
+    pub fn test_trigger_wakeup(&self) {
+        self.version.fetch_add(1, Ordering::Relaxed);
+        let _ = self.wakeup_sender.try_send(());
+    }
+
     /// Get the current title reported by the terminal, if any.
     pub fn title(&self) -> Option<String> {
         self.title.lock().ok().and_then(|current| current.clone())
@@ -404,6 +505,21 @@ impl TerminalState {
     pub fn take_bell(&self) -> bool {
         self.bell.swap(false, Ordering::Relaxed)
     }
+
+    /// Get the current terminal mode flags.
+    pub fn mode(&self) -> TermMode {
+        let term = self.term.lock();
+        *term.mode()
+    }
+}
+
+impl Drop for TerminalState {
+    fn drop(&mut self) {
+        let _ = self.sender.send(Msg::Shutdown);
+        if let Some(handle) = self.join_handle.take() {
+            let _ = handle.join();
+        }
+    }
 }
 
 impl Default for TerminalState {
@@ -422,6 +538,7 @@ pub fn terminal<Msg>(
 where
     Msg: 'static,
 {
+    use std::cell::RefCell;
     use std::rc::Rc;
 
     let renderable_widget = TerminalRenderable::new(state, focused);
@@ -431,14 +548,73 @@ where
     let mouse_handler = handler.clone();
     let resize_handler = handler.clone();
     let current_size = state.size();
+    let term = state.term.clone();
+    let last_buttons = Rc::new(RefCell::new(MouseButtons::default()));
 
     node = node.on_mouse(move |event: MouseEvent| {
+        let prev_buttons = *last_buttons.borrow();
+        *last_buttons.borrow_mut() = event.buttons;
+        // Get current mode dynamically - applications can enable/disable mouse mode
+        let current_mode = *term.lock().mode();
+
+        // Handle scroll wheel - always process for alternate scroll mode
         if event.buttons.vert_wheel {
+            // If terminal is in mouse mode, forward as mouse event
+            if current_mode.intersects(TermMode::MOUSE_MODE) {
+                let sgr = current_mode.contains(TermMode::SGR_MOUSE);
+                if let Some(bytes) = encode_mouse_event(&event, true, sgr, false) {
+                    return Some(mouse_handler(TerminalMsg::Input(bytes)));
+                }
+            }
+            // Otherwise use scroll behavior
             let delta = if event.buttons.wheel_positive { -3 } else { 3 };
-            Some(mouse_handler(TerminalMsg::Scroll(delta)))
-        } else {
-            None
+            return Some(mouse_handler(TerminalMsg::Scroll(delta)));
         }
+
+        // Handle horizontal scroll
+        if event.buttons.horz_wheel {
+            if current_mode.intersects(TermMode::MOUSE_MODE) {
+                let sgr = current_mode.contains(TermMode::SGR_MOUSE);
+                if let Some(bytes) = encode_mouse_event(&event, true, sgr, false) {
+                    return Some(mouse_handler(TerminalMsg::Input(bytes)));
+                }
+            }
+        }
+
+        // Handle click events when terminal is in mouse mode
+        if current_mode.intersects(TermMode::MOUSE_MODE) {
+            let is_press = event.buttons.left || event.buttons.middle || event.buttons.right;
+            let was_pressed = prev_buttons.left || prev_buttons.middle || prev_buttons.right;
+            let motion_event = current_mode.contains(TermMode::MOUSE_MOTION);
+            if is_press {
+                let is_drag = was_pressed;
+                let sgr = current_mode.contains(TermMode::SGR_MOUSE);
+                if let Some(bytes) = encode_mouse_event(&event, true, sgr, is_drag) {
+                    return Some(mouse_handler(TerminalMsg::Input(bytes)));
+                }
+            } else if was_pressed {
+                let mut release_event = event;
+                release_event.buttons = MouseButtons {
+                    left: prev_buttons.left,
+                    right: prev_buttons.right,
+                    middle: prev_buttons.middle,
+                    horz_wheel: false,
+                    vert_wheel: false,
+                    wheel_positive: true,
+                };
+                let sgr = current_mode.contains(TermMode::SGR_MOUSE);
+                if let Some(bytes) = encode_mouse_event(&release_event, false, sgr, false) {
+                    return Some(mouse_handler(TerminalMsg::Input(bytes)));
+                }
+            } else if motion_event {
+                let sgr = current_mode.contains(TermMode::SGR_MOUSE);
+                if let Some(bytes) = encode_mouse_event(&event, true, sgr, true) {
+                    return Some(mouse_handler(TerminalMsg::Input(bytes)));
+                }
+            }
+        }
+
+        None
     });
 
     node = node.on_resize(move |layout| {
@@ -456,6 +632,20 @@ where
 
 /// Translate a key event to terminal input bytes.
 pub fn key_to_input(key: Key) -> Option<Vec<u8>> {
+    let modifier_code = |key: &Key| {
+        let mut code = 1;
+        if key.shift {
+            code += 1;
+        }
+        if key.alt {
+            code += 2;
+        }
+        if key.ctrl {
+            code += 4;
+        }
+        (code != 1).then_some(code)
+    };
+
     let bytes = match key.code {
         KeyCode::Char(c) => {
             if key.ctrl {
@@ -549,9 +739,138 @@ pub fn key_to_input(key: Key) -> Option<Vec<u8>> {
         }
         KeyCode::PageUp => vec![0x1b, b'[', b'5', b'~'],
         KeyCode::PageDown => vec![0x1b, b'[', b'6', b'~'],
+        KeyCode::Function(n) => {
+            let modifier = modifier_code(&key);
+            match n {
+                1 => match modifier {
+                    Some(modifier) => vec![0x1b, b'[', b'1', b';', modifier + b'0', b'P'],
+                    None => vec![0x1b, b'O', b'P'],
+                },
+                2 => match modifier {
+                    Some(modifier) => vec![0x1b, b'[', b'1', b';', modifier + b'0', b'Q'],
+                    None => vec![0x1b, b'O', b'Q'],
+                },
+                3 => match modifier {
+                    Some(modifier) => vec![0x1b, b'[', b'1', b';', modifier + b'0', b'R'],
+                    None => vec![0x1b, b'O', b'R'],
+                },
+                4 => match modifier {
+                    Some(modifier) => vec![0x1b, b'[', b'1', b';', modifier + b'0', b'S'],
+                    None => vec![0x1b, b'O', b'S'],
+                },
+                5 => match modifier {
+                    Some(modifier) => vec![0x1b, b'[', b'1', b'5', b';', modifier + b'0', b'~'],
+                    None => vec![0x1b, b'[', b'1', b'5', b'~'],
+                },
+                6 => match modifier {
+                    Some(modifier) => vec![0x1b, b'[', b'1', b'7', b';', modifier + b'0', b'~'],
+                    None => vec![0x1b, b'[', b'1', b'7', b'~'],
+                },
+                7 => match modifier {
+                    Some(modifier) => vec![0x1b, b'[', b'1', b'8', b';', modifier + b'0', b'~'],
+                    None => vec![0x1b, b'[', b'1', b'8', b'~'],
+                },
+                8 => match modifier {
+                    Some(modifier) => vec![0x1b, b'[', b'1', b'9', b';', modifier + b'0', b'~'],
+                    None => vec![0x1b, b'[', b'1', b'9', b'~'],
+                },
+                9 => match modifier {
+                    Some(modifier) => vec![0x1b, b'[', b'2', b'0', b';', modifier + b'0', b'~'],
+                    None => vec![0x1b, b'[', b'2', b'0', b'~'],
+                },
+                10 => match modifier {
+                    Some(modifier) => vec![0x1b, b'[', b'2', b'1', b';', modifier + b'0', b'~'],
+                    None => vec![0x1b, b'[', b'2', b'1', b'~'],
+                },
+                11 => match modifier {
+                    Some(modifier) => vec![0x1b, b'[', b'2', b'3', b';', modifier + b'0', b'~'],
+                    None => vec![0x1b, b'[', b'2', b'3', b'~'],
+                },
+                12 => match modifier {
+                    Some(modifier) => vec![0x1b, b'[', b'2', b'4', b';', modifier + b'0', b'~'],
+                    None => vec![0x1b, b'[', b'2', b'4', b'~'],
+                },
+                _ => return None,
+            }
+        }
     };
 
     Some(bytes)
+}
+
+/// Encode a mouse event as terminal escape sequences.
+///
+/// Uses SGR mouse encoding format: `\x1b[<Cb;Cx;CyM` (press) or `\x1b[<Cb;Cx;Cym` (release)
+/// where Cb is the button code with modifiers, and Cx/Cy are 1-based coordinates.
+pub fn encode_mouse_event(
+    event: &MouseEvent,
+    pressed: bool,
+    sgr_mode: bool,
+    motion: bool,
+) -> Option<Vec<u8>> {
+    // Determine button code
+    let button = if event.buttons.left {
+        0
+    } else if event.buttons.middle {
+        1
+    } else if event.buttons.right {
+        2
+    } else if event.buttons.vert_wheel {
+        if event.buttons.wheel_positive {
+            64 // scroll up
+        } else {
+            65 // scroll down
+        }
+    } else if event.buttons.horz_wheel {
+        if event.buttons.wheel_positive {
+            67 // scroll right
+        } else {
+            66 // scroll left
+        }
+    } else if motion {
+        3
+    } else {
+        return None;
+    };
+
+    // Add modifier flags
+    let mut cb = button;
+    if event.shift {
+        cb |= 4;
+    }
+    if event.alt {
+        cb |= 8;
+    }
+    if event.ctrl {
+        cb |= 16;
+    }
+    if motion {
+        cb |= 32;
+    }
+
+    // Convert to 1-based coordinates
+    let cx = event.local_x.saturating_add(1);
+    let cy = event.local_y.saturating_add(1);
+
+    if sgr_mode {
+        // SGR format: \x1b[<Cb;Cx;CyM or \x1b[<Cb;Cx;Cym
+        let suffix = if pressed { 'M' } else { 'm' };
+        Some(format!("\x1b[<{};{};{}{}", cb, cx, cy, suffix).into_bytes())
+    } else {
+        // Legacy X10/normal format: \x1b[M CbCxCy (encoded as raw bytes + 32)
+        // Only supports press events and coordinates up to 223
+        if !pressed || cx > 223 || cy > 223 {
+            return None;
+        }
+        Some(vec![
+            0x1b,
+            b'[',
+            b'M',
+            (cb + 32) as u8,
+            (cx + 32) as u8,
+            (cy + 32) as u8,
+        ])
+    }
 }
 
 /// Default key bindings for terminal input.
@@ -868,6 +1187,256 @@ mod tests {
     }
 
     #[test]
+    fn key_to_input_handles_function_keys() {
+        let key = Key::new(KeyCode::Function(1));
+        let input = key_to_input(key);
+        assert_eq!(input, Some(vec![0x1b, b'O', b'P']));
+
+        let key = Key::new(KeyCode::Function(5));
+        let input = key_to_input(key);
+        assert_eq!(input, Some(vec![0x1b, b'[', b'1', b'5', b'~']));
+    }
+
+    #[test]
+    fn key_to_input_handles_function_key_modifiers() {
+        let key = Key::with_modifiers(KeyCode::Function(3), true, false, false, false);
+        let input = key_to_input(key);
+        assert_eq!(input, Some(vec![0x1b, b'[', b'1', b';', b'5', b'R']));
+    }
+
+    #[test]
+    fn encode_mouse_left_click_sgr() {
+        use crate::event::MouseButtons;
+        let event = MouseEvent {
+            x: 5,
+            y: 10,
+            local_x: 5,
+            local_y: 10,
+            buttons: MouseButtons {
+                left: true,
+                right: false,
+                middle: false,
+                horz_wheel: false,
+                vert_wheel: false,
+                wheel_positive: false,
+            },
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: false,
+            click_count: 1,
+        };
+        let bytes = encode_mouse_event(&event, true, true, false);
+        // SGR format: \x1b[<0;6;11M (button 0, 1-based coords)
+        assert_eq!(bytes, Some(b"\x1b[<0;6;11M".to_vec()));
+    }
+
+    #[test]
+    fn encode_mouse_right_click_sgr() {
+        use crate::event::MouseButtons;
+        let event = MouseEvent {
+            x: 0,
+            y: 0,
+            local_x: 0,
+            local_y: 0,
+            buttons: MouseButtons {
+                left: false,
+                right: true,
+                middle: false,
+                horz_wheel: false,
+                vert_wheel: false,
+                wheel_positive: false,
+            },
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: false,
+            click_count: 1,
+        };
+        let bytes = encode_mouse_event(&event, true, true, false);
+        // SGR format: \x1b[<2;1;1M (button 2 = right, 1-based coords)
+        assert_eq!(bytes, Some(b"\x1b[<2;1;1M".to_vec()));
+    }
+
+    #[test]
+    fn encode_mouse_release_sgr() {
+        use crate::event::MouseButtons;
+        let event = MouseEvent {
+            x: 10,
+            y: 20,
+            local_x: 10,
+            local_y: 20,
+            buttons: MouseButtons {
+                left: true,
+                right: false,
+                middle: false,
+                horz_wheel: false,
+                vert_wheel: false,
+                wheel_positive: false,
+            },
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: false,
+            click_count: 0,
+        };
+        let bytes = encode_mouse_event(&event, false, true, false);
+        // SGR release format: \x1b[<0;11;21m (lowercase 'm' for release)
+        assert_eq!(bytes, Some(b"\x1b[<0;11;21m".to_vec()));
+    }
+
+    #[test]
+    fn encode_mouse_with_modifiers_sgr() {
+        use crate::event::MouseButtons;
+        let event = MouseEvent {
+            x: 0,
+            y: 0,
+            local_x: 0,
+            local_y: 0,
+            buttons: MouseButtons {
+                left: true,
+                right: false,
+                middle: false,
+                horz_wheel: false,
+                vert_wheel: false,
+                wheel_positive: false,
+            },
+            ctrl: true,
+            alt: true,
+            shift: true,
+            super_key: false,
+            click_count: 1,
+        };
+        let bytes = encode_mouse_event(&event, true, true, false);
+        // Button 0 + shift(4) + alt(8) + ctrl(16) = 28
+        assert_eq!(bytes, Some(b"\x1b[<28;1;1M".to_vec()));
+    }
+
+    #[test]
+    fn encode_mouse_scroll_sgr() {
+        use crate::event::MouseButtons;
+        let event = MouseEvent {
+            x: 5,
+            y: 5,
+            local_x: 5,
+            local_y: 5,
+            buttons: MouseButtons {
+                left: false,
+                right: false,
+                middle: false,
+                horz_wheel: false,
+                vert_wheel: true,
+                wheel_positive: true,
+            },
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: false,
+            click_count: 0,
+        };
+        let bytes = encode_mouse_event(&event, true, true, false);
+        // Scroll up = button 64
+        assert_eq!(bytes, Some(b"\x1b[<64;6;6M".to_vec()));
+    }
+
+    #[test]
+    fn encode_mouse_horizontal_scroll_sgr() {
+        use crate::event::MouseButtons;
+        let event = MouseEvent {
+            x: 5,
+            y: 5,
+            local_x: 5,
+            local_y: 5,
+            buttons: MouseButtons {
+                left: false,
+                right: false,
+                middle: false,
+                horz_wheel: true,
+                vert_wheel: false,
+                wheel_positive: true,
+            },
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: false,
+            click_count: 0,
+        };
+        let bytes = encode_mouse_event(&event, true, true, false);
+        // Scroll right = button 67
+        assert_eq!(bytes, Some(b"\x1b[<67;6;6M".to_vec()));
+
+        let event = MouseEvent {
+            x: 5,
+            y: 5,
+            local_x: 5,
+            local_y: 5,
+            buttons: MouseButtons {
+                left: false,
+                right: false,
+                middle: false,
+                horz_wheel: true,
+                vert_wheel: false,
+                wheel_positive: false,
+            },
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: false,
+            click_count: 0,
+        };
+        let bytes = encode_mouse_event(&event, true, true, false);
+        // Scroll left = button 66
+        assert_eq!(bytes, Some(b"\x1b[<66;6;6M".to_vec()));
+    }
+
+    #[test]
+    fn encode_mouse_legacy_format() {
+        use crate::event::MouseButtons;
+        let event = MouseEvent {
+            x: 5,
+            y: 10,
+            local_x: 5,
+            local_y: 10,
+            buttons: MouseButtons {
+                left: true,
+                right: false,
+                middle: false,
+                horz_wheel: false,
+                vert_wheel: false,
+                wheel_positive: false,
+            },
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: false,
+            click_count: 1,
+        };
+        let bytes = encode_mouse_event(&event, true, false, false);
+        // Legacy format: \x1b[M followed by (button+32), (x+32+1), (y+32+1)
+        // button=0, x=5+1=6, y=10+1=11
+        assert_eq!(bytes, Some(vec![0x1b, b'[', b'M', 32, 38, 43]));
+    }
+
+    #[test]
+    fn encode_mouse_no_button_returns_none() {
+        use crate::event::MouseButtons;
+        let event = MouseEvent {
+            x: 0,
+            y: 0,
+            local_x: 0,
+            local_y: 0,
+            buttons: MouseButtons::default(),
+            ctrl: false,
+            alt: false,
+            shift: false,
+            super_key: false,
+            click_count: 0,
+        };
+        let bytes = encode_mouse_event(&event, true, true, false);
+        assert_eq!(bytes, None);
+    }
+
+    #[test]
     fn version_increments_on_terminal_output() {
         use std::time::Duration;
 
@@ -900,7 +1469,7 @@ mod tests {
 
     #[test]
     fn bell_events_are_captured() {
-        let mut state = TerminalState::new().expect("create terminal");
+        let mut state = TerminalState::new().expect("failed to create terminal");
         state.handle_event_direct(TermEvent::Bell);
 
         assert!(state.take_bell(), "bell flag should be set");
@@ -996,6 +1565,25 @@ mod tests {
         state.handle_event_direct(TermEvent::ChildExit(0));
 
         assert!(!state.is_running(), "state should be marked exited");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pty_fd_is_cloexec() {
+        let state = TerminalState::new().expect("failed to create terminal");
+
+        let fd = state.pty_fd.as_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_ne!(
+            flags,
+            -1,
+            "fcntl F_GETFD failed: {}",
+            std::io::Error::last_os_error()
+        );
+        assert!(
+            flags & libc::FD_CLOEXEC != 0,
+            "PTY fd should have FD_CLOEXEC set"
+        );
     }
 
     #[test]

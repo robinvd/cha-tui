@@ -25,7 +25,9 @@ use taffy::{
     },
     tree::{Cache as TaffyCache, Layout as TaffyLayout, NodeId, TraversePartialTree},
 };
-use termwiz::cell::unicode_column_width;
+use termwiz::cell::grapheme_column_width;
+
+const TAB_WIDTH: usize = 8;
 
 type ResizeHandler<Msg> = Rc<dyn Fn(&TaffyLayout) -> Option<Msg>>;
 
@@ -158,6 +160,23 @@ impl TextSpan {
     }
 }
 
+fn text_span_display_width(span: &TextSpan) -> usize {
+    span.content
+        .chars()
+        .map(|ch| {
+            if ch == '\n' {
+                return 0;
+            }
+            if ch == '\t' {
+                return TAB_WIDTH;
+            }
+            let mut buf = [0u8; 4];
+            let s = ch.encode_utf8(&mut buf);
+            grapheme_column_width(s, None).max(1)
+        })
+        .sum()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextNode {
     base_style: Style,
@@ -186,7 +205,7 @@ pub enum SizePolicy {
     Fill,
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct Style {
     pub fg: Option<Color>,
     pub bg: Option<Color>,
@@ -200,6 +219,8 @@ pub struct Style {
 pub enum Color {
     Reset,
     Palette(u16),
+    PaletteFg,
+    PaletteBg,
     Rgba { r: u8, g: u8, b: u8, a: u8 },
 }
 
@@ -214,37 +235,37 @@ impl Color {
 
     // ANSI color constants (using standard xterm colors)
     #[allow(non_upper_case_globals)]
-    pub const Black: Self = Self::rgb(0, 0, 0);
+    pub const Black: Self = Self::Palette(0);
     #[allow(non_upper_case_globals)]
-    pub const Red: Self = Self::rgb(205, 0, 0);
+    pub const Red: Self = Self::Palette(1);
     #[allow(non_upper_case_globals)]
-    pub const Green: Self = Self::rgb(0, 205, 0);
+    pub const Green: Self = Self::Palette(2);
     #[allow(non_upper_case_globals)]
-    pub const Yellow: Self = Self::rgb(205, 205, 0);
+    pub const Yellow: Self = Self::Palette(3);
     #[allow(non_upper_case_globals)]
-    pub const Blue: Self = Self::rgb(0, 0, 238);
+    pub const Blue: Self = Self::Palette(4);
     #[allow(non_upper_case_globals)]
-    pub const Magenta: Self = Self::rgb(205, 0, 205);
+    pub const Magenta: Self = Self::Palette(5);
     #[allow(non_upper_case_globals)]
-    pub const Cyan: Self = Self::rgb(0, 205, 205);
+    pub const Cyan: Self = Self::Palette(6);
     #[allow(non_upper_case_globals)]
-    pub const White: Self = Self::rgb(229, 229, 229);
+    pub const White: Self = Self::Palette(7);
     #[allow(non_upper_case_globals)]
-    pub const BrightBlack: Self = Self::rgb(127, 127, 127);
+    pub const BrightBlack: Self = Self::Palette(8);
     #[allow(non_upper_case_globals)]
-    pub const BrightRed: Self = Self::rgb(255, 0, 0);
+    pub const BrightRed: Self = Self::Palette(9);
     #[allow(non_upper_case_globals)]
-    pub const BrightGreen: Self = Self::rgb(0, 255, 0);
+    pub const BrightGreen: Self = Self::Palette(10);
     #[allow(non_upper_case_globals)]
-    pub const BrightYellow: Self = Self::rgb(255, 255, 0);
+    pub const BrightYellow: Self = Self::Palette(11);
     #[allow(non_upper_case_globals)]
-    pub const BrightBlue: Self = Self::rgb(92, 92, 255);
+    pub const BrightBlue: Self = Self::Palette(12);
     #[allow(non_upper_case_globals)]
-    pub const BrightMagenta: Self = Self::rgb(255, 0, 255);
+    pub const BrightMagenta: Self = Self::Palette(13);
     #[allow(non_upper_case_globals)]
-    pub const BrightCyan: Self = Self::rgb(0, 255, 255);
+    pub const BrightCyan: Self = Self::Palette(14);
     #[allow(non_upper_case_globals)]
-    pub const BrightWhite: Self = Self::rgb(255, 255, 255);
+    pub const BrightWhite: Self = Self::Palette(15);
 }
 
 pub fn text<Msg>(content: impl Into<String>) -> Node<Msg> {
@@ -753,6 +774,11 @@ impl Style {
         }
     }
 
+    pub fn with_fg(mut self, color: Color) -> Self {
+        self.fg = Some(color);
+        self
+    }
+
     /// Overlay another style on top of this one, with the overlay taking precedence
     /// whenever it specifies a foreground/background color or enables a flag.
     pub fn apply_overlay(&mut self, overlay: &Self) {
@@ -963,11 +989,7 @@ impl<Msg> LayoutPartialTree for Node<Msg> {
                     &node.layout_state.style,
                     |_val, _basis| 0.0,
                     |_known_dimensions, _available_space| {
-                        let width: usize = text
-                            .spans()
-                            .iter()
-                            .map(|span| unicode_column_width(&span.content, None))
-                            .sum();
+                        let width: usize = text.spans().iter().map(text_span_display_width).sum();
                         taffy::Size {
                             width: width as f32,
                             height: 1.,

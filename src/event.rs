@@ -4,6 +4,7 @@ pub enum Event {
     Resize(Size),
     Mouse(MouseEvent),
     FocusGained,
+    FocusLost,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,6 +57,7 @@ pub enum KeyCode {
     Home,
     End,
     Tab,
+    Function(u8),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -79,6 +81,10 @@ impl Event {
 
     pub fn focus_gained() -> Self {
         Self::FocusGained
+    }
+
+    pub fn focus_lost() -> Self {
+        Self::FocusLost
     }
 }
 

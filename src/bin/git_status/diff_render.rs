@@ -2,7 +2,7 @@ use chatui::Style;
 use chatui::dom::Renderable;
 use chatui::render::RenderContext;
 use taffy::{self, AvailableSpace};
-use termwiz::cell::unicode_column_width;
+use termwiz::cell::grapheme_column_width;
 use tracing::info;
 
 use super::{DiffLine, highlight};
@@ -36,7 +36,7 @@ impl DiffLeaf {
                 } else {
                     let mut buf = [0u8; 4];
                     let encoded = ch.encode_utf8(&mut buf);
-                    unicode_column_width(encoded, None).max(1)
+                    grapheme_column_width(encoded, None).max(1)
                 };
                 column += width;
             }
@@ -154,7 +154,7 @@ impl Renderable for DiffLeaf {
                     } else {
                         let mut buf = [0u8; 4];
                         let s = ch.encode_utf8(&mut buf);
-                        unicode_column_width(s, None).max(1)
+                        grapheme_column_width(s, None).max(1)
                     };
 
                     let skip_for_char = remaining_skip.min(width);

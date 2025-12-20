@@ -1,7 +1,7 @@
 use ropey::Rope;
 use smallvec::{SmallVec, smallvec};
 use std::ops::Range;
-use termwiz::cell::unicode_column_width;
+use termwiz::cell::grapheme_column_width;
 use zed_sum_tree::TreeMap;
 
 use crate::Style;
@@ -2937,7 +2937,7 @@ impl InputState {
         }
         let mut buf = [0u8; 4];
         let s = ch.encode_utf8(&mut buf);
-        unicode_column_width(s, None).max(1)
+        grapheme_column_width(s, None).max(1)
     }
 }
 
@@ -4109,7 +4109,12 @@ pub fn default_keybindings<UpdateMsg>(
         }
         KeyCode::Char(_) => None,
         KeyCode::PageUp | KeyCode::PageDown => None,
-        KeyCode::Enter | KeyCode::Esc | KeyCode::Tab | KeyCode::Up | KeyCode::Down => None,
+        KeyCode::Enter
+        | KeyCode::Esc
+        | KeyCode::Tab
+        | KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Function(_) => None,
     }?;
 
     Some(map(msg))

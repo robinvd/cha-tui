@@ -5,7 +5,7 @@ use crate::event::Size;
 use crate::geometry::{Point, Rect};
 use crate::palette::{Palette, Rgba};
 
-use termwiz::cell::unicode_column_width;
+use termwiz::cell::grapheme_column_width;
 
 use taffy::Layout as TaffyLayout;
 
@@ -14,6 +14,8 @@ fn color_to_rgba(palette: &Palette, color: Color) -> Rgba {
         Color::Reset => palette.foreground,
         Color::Rgba { r, g, b, a } => Rgba::new(r, g, b, a),
         Color::Palette(n) => palette.colors[n.min(15) as usize],
+        Color::PaletteFg => palette.foreground,
+        Color::PaletteBg => palette.background,
     }
 }
 
@@ -285,7 +287,7 @@ impl<'a> Renderer<'a> {
                 } else {
                     let mut buf = [0u8; 4];
                     let s = ch.encode_utf8(&mut buf);
-                    unicode_column_width(s, None).max(1)
+                    grapheme_column_width(s, None).max(1)
                 };
 
                 if skip_cols >= w {
@@ -652,7 +654,7 @@ impl<'a> Renderer<'a> {
         for ch in title.chars() {
             let mut buf = [0u8; 4];
             let ch_str = ch.encode_utf8(&mut buf);
-            let width = unicode_column_width(ch_str, None);
+            let width = grapheme_column_width(ch_str, None);
 
             if width > available_columns && width > 0 {
                 break;
@@ -791,6 +793,16 @@ mod tests {
             .lines()
             .map(|line| line.to_string())
             .collect()
+    }
+
+    fn grapheme_width(text: &str) -> usize {
+        text.chars()
+            .map(|ch| {
+                let mut buf = [0u8; 4];
+                let s = ch.encode_utf8(&mut buf);
+                grapheme_column_width(s, None).max(1)
+            })
+            .sum()
     }
 
     fn render_scrollable_lines(scroll_offset: f32) -> Vec<String> {
@@ -1389,6 +1401,50 @@ mod tests {
         let lines: Vec<&str> = screen.lines().collect();
         assert_eq!(lines[0].trim_end(), "top");
         assert_eq!(lines[1].trim_end(), "bottom");
+    }
+
+    #[test]
+    fn test_width_discrepancies() {
+        let text_content = "chatui on  main [$!?⇡] is 📦 v0.1.0 via 🦀 v1.89.0 took 5m34s";
+
+        // 1. Measure as TextNode::measure does
+        let measure_width: usize = grapheme_width(text_content);
+        println!("Measure width (entire string): {}", measure_width);
+
+        // 2. Measure as render_text does (char by char)
+        let mut render_width = 0;
+        for ch in text_content.chars() {
+            let mut buf = [0u8; 4];
+            let s = ch.encode_utf8(&mut buf);
+            render_width += grapheme_column_width(s, None).max(1);
+        }
+        println!("Render width (char by char .max(1)): {}", render_width);
+
+        // 3. Measure as write_text does
+        let mut write_width = 0;
+        for ch in text_content.chars() {
+            write_width += grapheme_column_width(&ch.to_string(), None);
+        }
+        println!("Write width (grapheme_column_width): {}", write_width);
+
+        assert_eq!(
+            measure_width, render_width,
+            "Measure and Render widths should match"
+        );
+        assert_eq!(
+            render_width, write_width,
+            "Render and Write widths should match"
+        );
+    }
+
+    #[test]
+    fn render_output_keeps_single_spaces_after_emoji() {
+        let text_content = "chatui on  main [$!?⇡] is 📦 v0.1.0 via 🦀 v1.89.0 took 2m23s";
+        let width = grapheme_width(text_content) + 2;
+        let mut node = text::<()>(text_content);
+
+        let lines = render_to_lines(&mut node, width, 1);
+        assert_eq!(lines[0].trim_end(), text_content);
     }
 
     #[test]

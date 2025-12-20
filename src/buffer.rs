@@ -1,5 +1,7 @@
 use std::fmt::Write as _;
 
+use termwiz::cell::grapheme_column_width;
+
 use crate::error::ProgramError;
 use crate::palette::Rgba;
 
@@ -65,18 +67,24 @@ impl CellAttributes {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cell {
     pub ch: char,
+    pub zero_width: bool,
     pub attrs: CellAttributes,
 }
 
 impl Cell {
     pub fn new(ch: char, attrs: CellAttributes) -> Self {
-        Self { ch, attrs }
+        Self {
+            ch,
+            attrs,
+            zero_width: false,
+        }
     }
 
     pub fn blank() -> Self {
         Self {
             ch: ' ',
             attrs: CellAttributes::default(),
+            zero_width: false,
         }
     }
 }
@@ -232,8 +240,29 @@ impl DoubleBuffer {
             if col >= self.width {
                 break;
             }
+
+            let width = grapheme_column_width(&ch.to_string(), None);
+
+            if width == 0 {
+                continue;
+            }
+
+            if col + width > self.width {
+                // Not enough space for this char, so we fill remaining space with blanks
+                for i in col..self.width {
+                    self.back[y][i] = Cell::blank();
+                }
+                break;
+            }
+
             self.back[y][col] = Cell::new(ch, attrs.clone());
-            col += 1;
+
+            for i in 1..width {
+                self.back[y][col + i] = Cell::blank();
+                self.back[y][col + i].zero_width = true;
+            }
+
+            col += width;
         }
     }
 
@@ -361,6 +390,10 @@ impl DoubleBuffer {
                 let back_cell = &self.back[y][x];
                 let front_cell = &self.front[y][x];
 
+                if back_cell.zero_width {
+                    continue;
+                }
+
                 // Skip if the cell hasn't changed
                 if back_cell == front_cell && !self.front_invalid {
                     // Flush any pending run
@@ -388,8 +421,7 @@ impl DoubleBuffer {
                             current_attrs = run_attrs.clone();
                         }
                         write!(
-                            buffer,
-                            "\x1b[{};{}H{}",
+                            buffer, "\x1b[{};{}H{}",
                             y + 1,
                             run_start.unwrap() + 1,
                             run_text
@@ -471,7 +503,7 @@ impl DoubleBuffer {
         if !has_any_attrs {
             // Just reset to defaults
             write!(buffer, "\x1b[0m")?;
-            return Ok(());
+            return Ok(())
         }
 
         // Always start with a reset to ensure clean state when transitioning
@@ -539,6 +571,9 @@ impl DoubleBuffer {
                 result.push('\n');
             }
             for cell in row {
+                if cell.zero_width {
+                    continue;
+                }
                 result.push(cell.ch);
             }
         }
@@ -1052,6 +1087,7 @@ mod tests {
     #[test]
     fn set_cursor_clamps_to_buffer_bounds() {
         let mut buffer = DoubleBuffer::new(2, 2);
+
         buffer.set_cursor(10, 5, CursorShape::BlinkingBar);
 
         match buffer.cursor_state() {

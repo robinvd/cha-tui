@@ -1,7 +1,7 @@
 use crate::dom::{Node, Renderable, Style, TextSpan, renderable};
 use crate::render::RenderContext;
 use taffy::style::AvailableSpace;
-use termwiz::cell::unicode_column_width;
+use termwiz::cell::grapheme_column_width;
 
 const TAB_WIDTH: usize = 8;
 
@@ -51,7 +51,7 @@ impl Paragraph {
         } else {
             let mut buf = [0u8; 4];
             let s = ch.encode_utf8(&mut buf);
-            unicode_column_width(s, None).max(1)
+            grapheme_column_width(s, None).max(1)
         }
     }
 
@@ -204,7 +204,7 @@ impl Paragraph {
                 } else {
                     let mut buf = [0u8; 4];
                     let s = ch.encode_utf8(&mut buf);
-                    unicode_column_width(s, None).max(1)
+                    grapheme_column_width(s, None).max(1)
                 };
 
                 if skip_cols >= w {

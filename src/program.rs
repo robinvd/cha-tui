@@ -663,6 +663,7 @@ fn convert_input_event(input: termina::Event) -> Option<Event> {
         termina::Event::Mouse(mouse) => map_mouse_event(mouse),
         termina::Event::WindowResized(size) => Some(Event::Resize(Size::new(size.cols, size.rows))),
         termina::Event::FocusIn => Some(Event::FocusGained),
+        termina::Event::FocusOut => Some(Event::FocusLost),
         _ => None,
     }
 }
@@ -765,6 +766,7 @@ fn map_key_code(code: termina::event::KeyCode) -> Option<KeyCode> {
         TnKeyCode::Home => Some(KeyCode::Home),
         TnKeyCode::End => Some(KeyCode::End),
         TnKeyCode::Tab => Some(KeyCode::Tab),
+        TnKeyCode::Function(n) => Some(KeyCode::Function(n)),
         _ => None,
     }
 }
