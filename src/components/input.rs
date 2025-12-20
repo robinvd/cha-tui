@@ -4114,7 +4114,17 @@ pub fn default_keybindings<UpdateMsg>(
         | KeyCode::Tab
         | KeyCode::Up
         | KeyCode::Down
-        | KeyCode::Function(_) => None,
+        | KeyCode::Function(_)
+        | KeyCode::Insert
+        | KeyCode::Delete
+        | KeyCode::CapsLock
+        | KeyCode::ScrollLock
+        | KeyCode::NumLock
+        | KeyCode::PrintScreen
+        | KeyCode::Pause
+        | KeyCode::Menu
+        | KeyCode::Modifier(_)
+        | KeyCode::Media(_) => None,
     }?;
 
     Some(map(msg))

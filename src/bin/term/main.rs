@@ -562,8 +562,9 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 },
                 Focus::Terminal => {
                     if let Some((pid, sid)) = model.active
+                        && let Some((_, session)) = model.active_session()
                         && let Some(msg) =
-                            default_terminal_keybindings(key, move |term_msg| Msg::Terminal {
+                            default_terminal_keybindings(key, session.terminal.mode(), move |term_msg| Msg::Terminal {
                                 project: pid,
                                 session: sid,
                                 msg: term_msg,

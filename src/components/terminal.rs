@@ -3,9 +3,17 @@
 //! This module provides a terminal widget that can be embedded in the TUI.
 //! It uses alacritty_terminal for the actual terminal emulation.
 //!
+//! # Kitty Keyboard Protocol
+//!
+//! This module supports the kitty keyboard protocol for unambiguous key encoding.
+//! Use [`key_to_input`] or [`default_terminal_keybindings`]
+//! with the terminal's mode flags to enable this feature.
+//!
 //! TODOs
 //! - Dont use 2 channels for EventListener
-//! - Add kitty keyboard support
+
+// Re-export TermMode for users of the kitty keyboard protocol functions
+pub use alacritty_terminal::term::TermMode;
 
 #[cfg(test)]
 use once_cell::sync::Lazy;
@@ -31,7 +39,7 @@ use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::sync::FairMutex;
 use alacritty_terminal::term::color::Colors;
 use alacritty_terminal::term::test::TermSize;
-use alacritty_terminal::term::{self, Config as TermConfig, Term, TermMode};
+use alacritty_terminal::term::{self, Config as TermConfig, Term};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
 use alacritty_terminal::vte::ansi::{self, CursorShape as AlacCursorShape, Handler, NamedColor};
 
@@ -39,7 +47,9 @@ use smol::channel::{self, Receiver, Sender};
 
 use crate::buffer::{CellAttributes, CursorShape};
 use crate::dom::{Node, Renderable, renderable};
-use crate::event::{Key, KeyCode, MouseButtons, MouseEvent};
+use crate::event::{
+    Key, KeyCode, KeyEventKind, MediaKeyCode, ModifierKeyCode, MouseButtons, MouseEvent,
+};
 use crate::palette::Rgba;
 use crate::render::RenderContext;
 
@@ -307,9 +317,13 @@ impl TerminalState {
         let bell_shared = Arc::new(AtomicBool::new(false));
         let (wakeup_sender, wakeup_receiver) = channel::unbounded();
         let (event_sender, event_receiver) = channel::unbounded();
-        let event_listener =
-            TerminalEventListener::new(version.clone(), wakeup_sender.clone(), event_sender.clone());
+        let event_listener = TerminalEventListener::new(
+            version.clone(),
+            wakeup_sender.clone(),
+            event_sender.clone(),
+        );
         let config = TermConfig {
+            kitty_keyboard: true,
             ..Default::default()
         };
         let term_size = TermSize::new(cols as usize, rows as usize);
@@ -630,8 +644,9 @@ where
     node
 }
 
-/// Translate a key event to terminal input bytes.
-pub fn key_to_input(key: Key) -> Option<Vec<u8>> {
+/// Legacy key to input encoding (internal use only).
+/// Used as fallback when kitty protocol is not enabled.
+fn legacy_key_to_input(key: Key) -> Option<Vec<u8>> {
     let modifier_code = |key: &Key| {
         let mut code = 1;
         if key.shift {
@@ -793,9 +808,478 @@ pub fn key_to_input(key: Key) -> Option<Vec<u8>> {
                 _ => return None,
             }
         }
+        KeyCode::Insert => {
+            let modifier = modifier_code(&key);
+            match modifier {
+                Some(m) => vec![0x1b, b'[', b'2', b';', m + b'0', b'~'],
+                None => vec![0x1b, b'[', b'2', b'~'],
+            }
+        }
+        KeyCode::Delete => {
+            let modifier = modifier_code(&key);
+            match modifier {
+                Some(m) => vec![0x1b, b'[', b'3', b';', m + b'0', b'~'],
+                None => vec![0x1b, b'[', b'3', b'~'],
+            }
+        }
+        // These keys don't produce output in legacy mode
+        KeyCode::CapsLock
+        | KeyCode::ScrollLock
+        | KeyCode::NumLock
+        | KeyCode::PrintScreen
+        | KeyCode::Pause
+        | KeyCode::Menu
+        | KeyCode::Modifier(_)
+        | KeyCode::Media(_) => return None,
     };
 
     Some(bytes)
+}
+
+// ============================================================================
+// Kitty Keyboard Protocol Encoding
+// ============================================================================
+//
+// The Kitty Keyboard Protocol provides unambiguous key encoding. See:
+// https://sw.kovidgoyal.net/kitty/keyboard-protocol/
+//
+// Key codes for special keys in the protocol:
+// - Control characters: Tab=9, Enter=13, Escape=27, Space=32, Backspace=127
+// - Numpad keys: 57399-57426
+// - Function keys F13-F35: 57376-57398
+// - Modifier keys: 57441-57452
+// - Media keys: 57428-57440
+// - Misc: ScrollLock=57359, PrintScreen=57361, Pause=57362, Menu=57363
+
+/// Kitty keyboard protocol key codes for numpad keys.
+mod kitty_codes {
+    // Numpad keys
+    pub const NUMPAD_0: u32 = 57399;
+    pub const NUMPAD_1: u32 = 57400;
+    pub const NUMPAD_2: u32 = 57401;
+    pub const NUMPAD_3: u32 = 57402;
+    pub const NUMPAD_4: u32 = 57403;
+    pub const NUMPAD_5: u32 = 57404;
+    pub const NUMPAD_6: u32 = 57405;
+    pub const NUMPAD_7: u32 = 57406;
+    pub const NUMPAD_8: u32 = 57407;
+    pub const NUMPAD_9: u32 = 57408;
+    pub const NUMPAD_DECIMAL: u32 = 57409;
+    pub const NUMPAD_DIVIDE: u32 = 57410;
+    pub const NUMPAD_MULTIPLY: u32 = 57411;
+    pub const NUMPAD_SUBTRACT: u32 = 57412;
+    pub const NUMPAD_ADD: u32 = 57413;
+    pub const NUMPAD_ENTER: u32 = 57414;
+    pub const NUMPAD_EQUAL: u32 = 57415;
+    // Numpad navigation (57417-57426) - mapped when keypad flag is set
+    pub const NUMPAD_LEFT: u32 = 57417;
+    pub const NUMPAD_RIGHT: u32 = 57418;
+    pub const NUMPAD_UP: u32 = 57419;
+    pub const NUMPAD_DOWN: u32 = 57420;
+    pub const NUMPAD_PAGE_UP: u32 = 57421;
+    pub const NUMPAD_PAGE_DOWN: u32 = 57422;
+    pub const NUMPAD_HOME: u32 = 57423;
+    pub const NUMPAD_END: u32 = 57424;
+    pub const NUMPAD_INSERT: u32 = 57425;
+    pub const NUMPAD_DELETE: u32 = 57426;
+
+    // Function keys F13-F35
+    pub const F13: u32 = 57376;
+    pub const F14: u32 = 57377;
+    pub const F15: u32 = 57378;
+    pub const F16: u32 = 57379;
+    pub const F17: u32 = 57380;
+    pub const F18: u32 = 57381;
+    pub const F19: u32 = 57382;
+    pub const F20: u32 = 57383;
+    pub const F21: u32 = 57384;
+    pub const F22: u32 = 57385;
+    pub const F23: u32 = 57386;
+    pub const F24: u32 = 57387;
+    pub const F25: u32 = 57388;
+    pub const F26: u32 = 57389;
+    pub const F27: u32 = 57390;
+    pub const F28: u32 = 57391;
+    pub const F29: u32 = 57392;
+    pub const F30: u32 = 57393;
+    pub const F31: u32 = 57394;
+    pub const F32: u32 = 57395;
+    pub const F33: u32 = 57396;
+    pub const F34: u32 = 57397;
+    pub const F35: u32 = 57398;
+
+    // Modifier keys
+    pub const LEFT_SHIFT: u32 = 57441;
+    pub const LEFT_CONTROL: u32 = 57442;
+    pub const LEFT_ALT: u32 = 57443;
+    pub const LEFT_SUPER: u32 = 57444;
+    pub const LEFT_HYPER: u32 = 57445;
+    pub const LEFT_META: u32 = 57446;
+    pub const RIGHT_SHIFT: u32 = 57447;
+    pub const RIGHT_CONTROL: u32 = 57448;
+    pub const RIGHT_ALT: u32 = 57449;
+    pub const RIGHT_SUPER: u32 = 57450;
+    pub const RIGHT_HYPER: u32 = 57451;
+    pub const RIGHT_META: u32 = 57452;
+
+    // Media keys
+    pub const MEDIA_PLAY: u32 = 57428;
+    pub const MEDIA_PAUSE: u32 = 57429;
+    pub const MEDIA_PLAY_PAUSE: u32 = 57430;
+    pub const MEDIA_STOP: u32 = 57432;
+    pub const MEDIA_FAST_FORWARD: u32 = 57433;
+    pub const MEDIA_REWIND: u32 = 57434;
+    pub const MEDIA_TRACK_NEXT: u32 = 57435;
+    pub const MEDIA_TRACK_PREVIOUS: u32 = 57436;
+    pub const MEDIA_RECORD: u32 = 57437;
+    pub const VOLUME_DOWN: u32 = 57438;
+    pub const VOLUME_UP: u32 = 57439;
+    pub const VOLUME_MUTE: u32 = 57440;
+
+    // Misc keys
+    pub const SCROLL_LOCK: u32 = 57359;
+    pub const PRINT_SCREEN: u32 = 57361;
+    pub const PAUSE: u32 = 57362;
+    pub const MENU: u32 = 57363;
+    pub const CAPS_LOCK: u32 = 57358;
+    pub const NUM_LOCK: u32 = 57360;
+
+    // Control characters (these are just unicode codepoints)
+    pub const TAB: u32 = 9;
+    pub const ENTER: u32 = 13;
+    pub const ESCAPE: u32 = 27;
+    pub const BACKSPACE: u32 = 127;
+}
+
+/// Encode modifiers for kitty keyboard protocol.
+/// Returns modifiers+1 as per the protocol spec.
+fn encode_kitty_modifiers(key: &Key) -> u8 {
+    let mut mods: u8 = 0;
+    if key.shift {
+        mods |= 1;
+    }
+    if key.alt {
+        mods |= 2;
+    }
+    if key.ctrl {
+        mods |= 4;
+    }
+    if key.super_key {
+        mods |= 8;
+    }
+    if key.hyper {
+        mods |= 16;
+    }
+    if key.meta {
+        mods |= 32;
+    }
+    mods + 1 // Protocol requires modifiers+1
+}
+
+/// Translate a key event to terminal input bytes, respecting the terminal's mode flags.
+///
+/// This function implements the kitty keyboard protocol when the terminal has
+/// enabled the appropriate mode flags. It falls back to legacy encoding when
+/// kitty protocol is not enabled.
+///
+/// # Arguments
+/// * `key` - The key event to encode
+/// * `mode` - The terminal mode flags indicating which protocol features are enabled
+///
+/// # Returns
+/// * `Some(Vec<u8>)` - The encoded escape sequence
+/// * `None` - If the key should not produce output
+pub fn key_to_input(key: Key, mode: TermMode) -> Option<Vec<u8>> {
+    let kitty_seq = mode.intersects(
+        TermMode::REPORT_ALL_KEYS_AS_ESC
+            | TermMode::DISAMBIGUATE_ESC_CODES
+            | TermMode::REPORT_EVENT_TYPES,
+    );
+
+    // If kitty protocol is not enabled, use legacy encoding
+    // But only for key press events - releases should be ignored in legacy mode
+    if !kitty_seq {
+        if key.kind != KeyEventKind::Press {
+            return None;
+        }
+        return legacy_key_to_input(key);
+    }
+
+    let kitty_encode_all = mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC);
+    let kitty_event_type = mode.contains(TermMode::REPORT_EVENT_TYPES)
+        && (key.kind == KeyEventKind::Repeat || key.kind == KeyEventKind::Release);
+
+    // Determine if we should use kitty encoding for this specific key
+    let should_use_kitty = should_build_kitty_sequence(&key, mode);
+
+    if !should_use_kitty && !kitty_encode_all {
+        // Use legacy encoding for simple key presses
+        if key.kind != KeyEventKind::Press {
+            return None;
+        }
+        return legacy_key_to_input(key);
+    }
+
+    // Build the kitty sequence
+    build_kitty_sequence(&key, kitty_encode_all, kitty_event_type)
+}
+
+/// Determine if we should build a kitty escape sequence for this key.
+fn should_build_kitty_sequence(key: &Key, mode: TermMode) -> bool {
+    if mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC) {
+        return true;
+    }
+
+    let disambiguate = mode.contains(TermMode::DISAMBIGUATE_ESC_CODES);
+    if !disambiguate {
+        return false;
+    }
+
+    // Keys that need disambiguation
+    match key.code {
+        KeyCode::Esc => true,
+        // Numpad keys need disambiguation
+        _ if key.keypad => true,
+        // Modified keys (except plain shift on text keys)
+        KeyCode::Char(_) => {
+            let has_mods = key.ctrl || key.alt || key.super_key || key.hyper || key.meta;
+            has_mods
+        }
+        // Special keys that might be ambiguous
+        KeyCode::Tab | KeyCode::Enter | KeyCode::Backspace if key.shift || key.ctrl || key.alt => {
+            true
+        }
+        // Function keys F13+ always need kitty encoding, F1-F12 only with modifiers
+        KeyCode::Function(n) if n > 12 => true,
+        KeyCode::Function(_)
+        | KeyCode::Up
+        | KeyCode::Down
+        | KeyCode::Left
+        | KeyCode::Right
+        | KeyCode::Home
+        | KeyCode::End
+        | KeyCode::PageUp
+        | KeyCode::PageDown
+        | KeyCode::Insert
+        | KeyCode::Delete => key.shift || key.ctrl || key.alt || key.super_key,
+        // Modifier keys themselves
+        KeyCode::Modifier(_) => true,
+        // Media keys
+        KeyCode::Media(_) => true,
+        // Lock keys
+        KeyCode::CapsLock | KeyCode::ScrollLock | KeyCode::NumLock => true,
+        // Other special keys
+        KeyCode::PrintScreen | KeyCode::Pause | KeyCode::Menu => true,
+        _ => false,
+    }
+}
+
+/// Build a kitty keyboard protocol escape sequence.
+fn build_kitty_sequence(key: &Key, encode_all: bool, include_event_type: bool) -> Option<Vec<u8>> {
+    // Get the key code (unicode codepoint or kitty functional key code)
+    let (key_code, terminator) = get_kitty_key_code(key)?;
+
+    let modifiers = encode_kitty_modifiers(key);
+    let has_modifiers = modifiers > 1;
+
+    // For simple cases without modifiers or event types, we can use shorter sequences
+    if !has_modifiers && !include_event_type && !encode_all {
+        // For functional keys, still use CSI sequences
+        if terminator == 'u' || matches!(key.code, KeyCode::Function(_)) {
+            // Simple CSI sequence without modifiers
+            return Some(format!("\x1b[{key_code}{terminator}").into_bytes());
+        }
+    }
+
+    let mut payload = format!("\x1b[{key_code}");
+
+    // Add modifiers if present or if we need to add event type
+    if has_modifiers || include_event_type {
+        payload.push_str(&format!(";{modifiers}"));
+    }
+
+    // Add event type if reporting is enabled
+    if include_event_type {
+        payload.push(':');
+        let event_type = match key.kind {
+            KeyEventKind::Repeat => '2',
+            KeyEventKind::Press => '1',
+            KeyEventKind::Release => '3',
+        };
+        payload.push(event_type);
+    }
+
+    payload.push(terminator);
+
+    Some(payload.into_bytes())
+}
+
+/// Get the kitty key code and terminator for a key.
+/// Returns (code, terminator) where terminator is 'u' for kitty or a legacy terminator.
+fn get_kitty_key_code(key: &Key) -> Option<(u32, char)> {
+    use kitty_codes::*;
+
+    // Handle numpad keys when keypad flag is set
+    if key.keypad {
+        let code = match key.code {
+            KeyCode::Char('0') => NUMPAD_0,
+            KeyCode::Char('1') => NUMPAD_1,
+            KeyCode::Char('2') => NUMPAD_2,
+            KeyCode::Char('3') => NUMPAD_3,
+            KeyCode::Char('4') => NUMPAD_4,
+            KeyCode::Char('5') => NUMPAD_5,
+            KeyCode::Char('6') => NUMPAD_6,
+            KeyCode::Char('7') => NUMPAD_7,
+            KeyCode::Char('8') => NUMPAD_8,
+            KeyCode::Char('9') => NUMPAD_9,
+            KeyCode::Char('.') => NUMPAD_DECIMAL,
+            KeyCode::Char('/') => NUMPAD_DIVIDE,
+            KeyCode::Char('*') => NUMPAD_MULTIPLY,
+            KeyCode::Char('-') => NUMPAD_SUBTRACT,
+            KeyCode::Char('+') => NUMPAD_ADD,
+            KeyCode::Char('=') => NUMPAD_EQUAL,
+            KeyCode::Enter => NUMPAD_ENTER,
+            KeyCode::Left => NUMPAD_LEFT,
+            KeyCode::Right => NUMPAD_RIGHT,
+            KeyCode::Up => NUMPAD_UP,
+            KeyCode::Down => NUMPAD_DOWN,
+            KeyCode::PageUp => NUMPAD_PAGE_UP,
+            KeyCode::PageDown => NUMPAD_PAGE_DOWN,
+            KeyCode::Home => NUMPAD_HOME,
+            KeyCode::End => NUMPAD_END,
+            KeyCode::Insert => NUMPAD_INSERT,
+            KeyCode::Delete => NUMPAD_DELETE,
+            _ => return get_kitty_key_code_non_numpad(key),
+        };
+        return Some((code, 'u'));
+    }
+
+    get_kitty_key_code_non_numpad(key)
+}
+
+/// Get kitty key code for non-numpad keys.
+fn get_kitty_key_code_non_numpad(key: &Key) -> Option<(u32, char)> {
+    use kitty_codes::*;
+
+    match key.code {
+        // Character keys use their unicode codepoint
+        KeyCode::Char(c) => {
+            let code = if key.shift {
+                // For shifted characters, use the lowercase version as the base
+                u32::from(c.to_lowercase().next().unwrap_or(c))
+            } else {
+                u32::from(c)
+            };
+            Some((code, 'u'))
+        }
+
+        // Control characters
+        KeyCode::Tab => Some((TAB, 'u')),
+        KeyCode::Enter => Some((ENTER, 'u')),
+        KeyCode::Esc => Some((ESCAPE, 'u')),
+        KeyCode::Backspace => Some((BACKSPACE, 'u')),
+
+        // Navigation keys - use legacy terminators for compatibility
+        KeyCode::Up => Some((1, 'A')),
+        KeyCode::Down => Some((1, 'B')),
+        KeyCode::Right => Some((1, 'C')),
+        KeyCode::Left => Some((1, 'D')),
+        KeyCode::Home => Some((1, 'H')),
+        KeyCode::End => Some((1, 'F')),
+        KeyCode::PageUp => Some((5, '~')),
+        KeyCode::PageDown => Some((6, '~')),
+        KeyCode::Insert => Some((2, '~')),
+        KeyCode::Delete => Some((3, '~')),
+
+        // Function keys F1-F12 use legacy encoding
+        KeyCode::Function(n) => match n {
+            1 => Some((1, 'P')),
+            2 => Some((1, 'Q')),
+            3 => Some((13, '~')), // F3 in kitty differs from terminfo
+            4 => Some((1, 'S')),
+            5 => Some((15, '~')),
+            6 => Some((17, '~')),
+            7 => Some((18, '~')),
+            8 => Some((19, '~')),
+            9 => Some((20, '~')),
+            10 => Some((21, '~')),
+            11 => Some((23, '~')),
+            12 => Some((24, '~')),
+            // F13-F35 use kitty encoding
+            13 => Some((F13, 'u')),
+            14 => Some((F14, 'u')),
+            15 => Some((F15, 'u')),
+            16 => Some((F16, 'u')),
+            17 => Some((F17, 'u')),
+            18 => Some((F18, 'u')),
+            19 => Some((F19, 'u')),
+            20 => Some((F20, 'u')),
+            21 => Some((F21, 'u')),
+            22 => Some((F22, 'u')),
+            23 => Some((F23, 'u')),
+            24 => Some((F24, 'u')),
+            25 => Some((F25, 'u')),
+            26 => Some((F26, 'u')),
+            27 => Some((F27, 'u')),
+            28 => Some((F28, 'u')),
+            29 => Some((F29, 'u')),
+            30 => Some((F30, 'u')),
+            31 => Some((F31, 'u')),
+            32 => Some((F32, 'u')),
+            33 => Some((F33, 'u')),
+            34 => Some((F34, 'u')),
+            35 => Some((F35, 'u')),
+            _ => None,
+        },
+
+        // Modifier keys
+        KeyCode::Modifier(m) => {
+            let code = match m {
+                ModifierKeyCode::LeftShift => LEFT_SHIFT,
+                ModifierKeyCode::LeftControl => LEFT_CONTROL,
+                ModifierKeyCode::LeftAlt => LEFT_ALT,
+                ModifierKeyCode::LeftSuper => LEFT_SUPER,
+                ModifierKeyCode::LeftHyper => LEFT_HYPER,
+                ModifierKeyCode::LeftMeta => LEFT_META,
+                ModifierKeyCode::RightShift => RIGHT_SHIFT,
+                ModifierKeyCode::RightControl => RIGHT_CONTROL,
+                ModifierKeyCode::RightAlt => RIGHT_ALT,
+                ModifierKeyCode::RightSuper => RIGHT_SUPER,
+                ModifierKeyCode::RightHyper => RIGHT_HYPER,
+                ModifierKeyCode::RightMeta => RIGHT_META,
+            };
+            Some((code, 'u'))
+        }
+
+        // Media keys
+        KeyCode::Media(m) => {
+            let code = match m {
+                MediaKeyCode::Play => MEDIA_PLAY,
+                MediaKeyCode::Pause => MEDIA_PAUSE,
+                MediaKeyCode::PlayPause => MEDIA_PLAY_PAUSE,
+                MediaKeyCode::Stop => MEDIA_STOP,
+                MediaKeyCode::FastForward => MEDIA_FAST_FORWARD,
+                MediaKeyCode::Rewind => MEDIA_REWIND,
+                MediaKeyCode::TrackNext => MEDIA_TRACK_NEXT,
+                MediaKeyCode::TrackPrevious => MEDIA_TRACK_PREVIOUS,
+                MediaKeyCode::Record => MEDIA_RECORD,
+                MediaKeyCode::LowerVolume => VOLUME_DOWN,
+                MediaKeyCode::RaiseVolume => VOLUME_UP,
+                MediaKeyCode::MuteVolume => VOLUME_MUTE,
+            };
+            Some((code, 'u'))
+        }
+
+        // Lock keys
+        KeyCode::CapsLock => Some((CAPS_LOCK, 'u')),
+        KeyCode::ScrollLock => Some((SCROLL_LOCK, 'u')),
+        KeyCode::NumLock => Some((NUM_LOCK, 'u')),
+
+        // Other special keys
+        KeyCode::PrintScreen => Some((PRINT_SCREEN, 'u')),
+        KeyCode::Pause => Some((PAUSE, 'u')),
+        KeyCode::Menu => Some((MENU, 'u')),
+    }
 }
 
 /// Encode a mouse event as terminal escape sequences.
@@ -873,12 +1357,21 @@ pub fn encode_mouse_event(
     }
 }
 
-/// Default key bindings for terminal input.
+/// Default key bindings for terminal input with kitty keyboard protocol support.
+///
+/// This function respects the terminal's mode flags to determine whether to use
+/// kitty keyboard protocol encoding or legacy encoding.
+///
+/// # Arguments
+/// * `key` - The key event to handle
+/// * `mode` - The terminal mode flags (from `TerminalState::mode()`)
+/// * `on_input` - Function to convert terminal messages to application messages
 pub fn default_terminal_keybindings<Msg>(
     key: Key,
+    mode: TermMode,
     on_input: impl Fn(TerminalMsg) -> Msg,
 ) -> Option<Msg> {
-    key_to_input(key).map(|bytes| on_input(TerminalMsg::Input(bytes)))
+    key_to_input(key, mode).map(|bytes| on_input(TerminalMsg::Input(bytes)))
 }
 
 /// Renderable widget for the terminal.
@@ -1118,89 +1611,94 @@ impl Renderable for TerminalRenderable {
 mod tests {
     use super::*;
 
+    // Helper: test key_to_input in legacy mode (empty TermMode)
+    fn legacy_key_input(key: Key) -> Option<Vec<u8>> {
+        key_to_input(key, TermMode::empty())
+    }
+
     #[test]
     fn key_to_input_handles_regular_chars() {
         let key = Key::new(KeyCode::Char('a'));
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![b'a']));
     }
 
     #[test]
     fn key_to_input_handles_utf8() {
         let key = Key::new(KeyCode::Char('漢'));
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some("漢".as_bytes().to_vec()));
     }
 
     #[test]
     fn key_to_input_handles_ctrl_c() {
         let key = Key::with_modifiers(KeyCode::Char('c'), true, false, false, false);
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![3])); // ETX (End of Text)
     }
 
     #[test]
     fn key_to_input_handles_enter() {
         let key = Key::new(KeyCode::Enter);
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![b'\r']));
     }
 
     #[test]
     fn key_to_input_handles_backspace() {
         let key = Key::new(KeyCode::Backspace);
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![0x7f]));
     }
 
     #[test]
     fn key_to_input_handles_arrow_keys() {
         let key = Key::new(KeyCode::Up);
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![0x1b, b'[', b'A']));
 
         let key = Key::new(KeyCode::Down);
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![0x1b, b'[', b'B']));
 
         let key = Key::new(KeyCode::Right);
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![0x1b, b'[', b'C']));
 
         let key = Key::new(KeyCode::Left);
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![0x1b, b'[', b'D']));
     }
 
     #[test]
     fn key_to_input_handles_alt_keys() {
         let key = Key::with_modifiers(KeyCode::Char('f'), false, true, false, false);
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![0x1b, b'f']));
     }
 
     #[test]
     fn key_to_input_handles_ctrl_arrow() {
         let key = Key::with_modifiers(KeyCode::Right, true, false, false, false);
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![0x1b, b'[', b'1', b';', b'5', b'C']));
     }
 
     #[test]
     fn key_to_input_handles_function_keys() {
         let key = Key::new(KeyCode::Function(1));
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![0x1b, b'O', b'P']));
 
         let key = Key::new(KeyCode::Function(5));
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![0x1b, b'[', b'1', b'5', b'~']));
     }
 
     #[test]
     fn key_to_input_handles_function_key_modifiers() {
         let key = Key::with_modifiers(KeyCode::Function(3), true, false, false, false);
-        let input = key_to_input(key);
+        let input = legacy_key_input(key);
         assert_eq!(input, Some(vec![0x1b, b'[', b'1', b';', b'5', b'R']));
     }
 
@@ -1604,5 +2102,383 @@ mod tests {
             called.load(Ordering::Relaxed),
             "formatter should be invoked when handling size request"
         );
+    }
+
+    // ========================================================================
+    // Kitty Keyboard Protocol Tests
+    // ========================================================================
+
+    #[test]
+    fn kitty_legacy_mode_uses_legacy_encoding() {
+        // With no kitty flags, should use legacy encoding
+        let key = Key::new(KeyCode::Char('a'));
+        let mode = TermMode::empty();
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"a".to_vec()));
+    }
+
+    #[test]
+    fn kitty_legacy_mode_ignores_key_release() {
+        let mut key = Key::new(KeyCode::Char('a'));
+        key.kind = KeyEventKind::Release;
+        let mode = TermMode::empty();
+        let input = key_to_input(key, mode);
+        assert_eq!(input, None);
+    }
+
+    #[test]
+    fn kitty_disambiguate_mode_encodes_escape_key() {
+        let key = Key::new(KeyCode::Esc);
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 27 u
+        assert_eq!(input, Some(b"\x1b[27u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_disambiguate_mode_encodes_ctrl_c() {
+        let key = Key::with_modifiers(KeyCode::Char('c'), true, false, false, false);
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 99;5 u (99='c', 5=ctrl+1)
+        assert_eq!(input, Some(b"\x1b[99;5u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_encode_all_encodes_simple_chars() {
+        let key = Key::new(KeyCode::Char('a'));
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 97 u (97='a')
+        assert_eq!(input, Some(b"\x1b[97u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_encode_all_with_modifiers() {
+        let key = Key::with_modifiers(KeyCode::Char('a'), true, true, false, false);
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 97;7 u (97='a', 7=ctrl(4)+alt(2)+1)
+        assert_eq!(input, Some(b"\x1b[97;7u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_event_types_encodes_release() {
+        let mut key = Key::new(KeyCode::Char('a'));
+        key.kind = KeyEventKind::Release;
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_EVENT_TYPES;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 97;1:3 u (97='a', 1=no mods, 3=release)
+        assert_eq!(input, Some(b"\x1b[97;1:3u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_event_types_encodes_repeat() {
+        let mut key = Key::new(KeyCode::Char('a'));
+        key.kind = KeyEventKind::Repeat;
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC | TermMode::REPORT_EVENT_TYPES;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 97;1:2 u (97='a', 1=no mods, 2=repeat)
+        assert_eq!(input, Some(b"\x1b[97;1:2u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_numpad_keys() {
+        let mut key = Key::new(KeyCode::Char('5'));
+        key.keypad = true;
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 57404 u (numpad 5)
+        assert_eq!(input, Some(b"\x1b[57404u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_numpad_enter() {
+        let mut key = Key::new(KeyCode::Enter);
+        key.keypad = true;
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 57414 u (numpad enter)
+        assert_eq!(input, Some(b"\x1b[57414u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_modifier_keys() {
+        let key = Key::new(KeyCode::Modifier(ModifierKeyCode::LeftShift));
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 57441 u
+        assert_eq!(input, Some(b"\x1b[57441u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_function_key_f13() {
+        let key = Key::new(KeyCode::Function(13));
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 57376 u
+        assert_eq!(input, Some(b"\x1b[57376u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_media_keys() {
+        let key = Key::new(KeyCode::Media(MediaKeyCode::PlayPause));
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 57430 u
+        assert_eq!(input, Some(b"\x1b[57430u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_tab_key() {
+        let key = Key::new(KeyCode::Tab);
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 9 u
+        assert_eq!(input, Some(b"\x1b[9u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_shift_enter() {
+        let key = Key::with_modifiers(KeyCode::Enter, false, false, true, false);
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 13;2u (13=enter, 2=shift+1)
+        assert_eq!(input, Some(b"\x1b[13;2u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_enter_key() {
+        let key = Key::new(KeyCode::Enter);
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 13 u
+        assert_eq!(input, Some(b"\x1b[13u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_backspace_key() {
+        let key = Key::new(KeyCode::Backspace);
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 127 u
+        assert_eq!(input, Some(b"\x1b[127u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_shift_tab() {
+        let key = Key::with_modifiers(KeyCode::Tab, false, false, true, false);
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 9;2 u (9=tab, 2=shift+1)
+        assert_eq!(input, Some(b"\x1b[9;2u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_arrow_keys_with_mode() {
+        let key = Key::new(KeyCode::Up);
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // Arrow keys use legacy terminator for compatibility
+        assert_eq!(input, Some(b"\x1b[1A".to_vec()));
+    }
+
+    #[test]
+    fn kitty_arrow_keys_with_modifiers() {
+        let key = Key::with_modifiers(KeyCode::Up, true, false, false, false);
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // CSI 1;5 A (1=base, 5=ctrl+1, A=up)
+        assert_eq!(input, Some(b"\x1b[1;5A".to_vec()));
+    }
+
+    #[test]
+    fn kitty_caps_lock() {
+        let key = Key::new(KeyCode::CapsLock);
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // Should produce CSI 57358 u
+        assert_eq!(input, Some(b"\x1b[57358u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_insert_key() {
+        let key = Key::new(KeyCode::Insert);
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // Insert uses legacy encoding: CSI 2 ~
+        assert_eq!(input, Some(b"\x1b[2~".to_vec()));
+    }
+
+    #[test]
+    fn kitty_delete_key() {
+        let key = Key::new(KeyCode::Delete);
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // Delete uses legacy encoding: CSI 3 ~
+        assert_eq!(input, Some(b"\x1b[3~".to_vec()));
+    }
+
+    #[test]
+    fn kitty_all_modifiers_combined() {
+        let key = Key::with_kitty_extras(
+            KeyCode::Char('a'),
+            true, // ctrl
+            true, // alt
+            true, // shift
+            true, // super
+            true, // hyper
+            true, // meta
+            KeyEventKind::Press,
+            false,
+        );
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        // 1+2+4+8+16+32 = 63, so modifiers = 64 (63+1)
+        // But we lowercase 'a' for shift, so key code is 97
+        assert_eq!(input, Some(b"\x1b[97;64u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_page_up_down() {
+        let key = Key::new(KeyCode::PageUp);
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[5~".to_vec()));
+
+        let key = Key::new(KeyCode::PageDown);
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[6~".to_vec()));
+    }
+
+    #[test]
+    fn kitty_home_end() {
+        let key = Key::new(KeyCode::Home);
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[1H".to_vec()));
+
+        let key = Key::new(KeyCode::End);
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[1F".to_vec()));
+    }
+
+    #[test]
+    fn kitty_function_keys_f1_to_f12() {
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+
+        // F1-F4 use SS3 in legacy but CSI in kitty
+        let key = Key::new(KeyCode::Function(1));
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[1P".to_vec()));
+
+        let key = Key::new(KeyCode::Function(4));
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[1S".to_vec()));
+
+        // F5-F12 use CSI number ~
+        let key = Key::new(KeyCode::Function(5));
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[15~".to_vec()));
+
+        let key = Key::new(KeyCode::Function(12));
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[24~".to_vec()));
+    }
+
+    #[test]
+    fn kitty_numpad_operators() {
+        let mode = TermMode::DISAMBIGUATE_ESC_CODES;
+
+        let mut key = Key::new(KeyCode::Char('+'));
+        key.keypad = true;
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[57413u".to_vec())); // NUMPAD_ADD
+
+        let mut key = Key::new(KeyCode::Char('-'));
+        key.keypad = true;
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[57412u".to_vec())); // NUMPAD_SUBTRACT
+
+        let mut key = Key::new(KeyCode::Char('*'));
+        key.keypad = true;
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[57411u".to_vec())); // NUMPAD_MULTIPLY
+
+        let mut key = Key::new(KeyCode::Char('/'));
+        key.keypad = true;
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[57410u".to_vec())); // NUMPAD_DIVIDE
+    }
+
+    #[test]
+    fn kitty_right_modifier_keys() {
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+
+        let key = Key::new(KeyCode::Modifier(ModifierKeyCode::RightShift));
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[57447u".to_vec()));
+
+        let key = Key::new(KeyCode::Modifier(ModifierKeyCode::RightControl));
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[57448u".to_vec()));
+
+        let key = Key::new(KeyCode::Modifier(ModifierKeyCode::RightAlt));
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[57449u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_special_lock_keys() {
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+
+        let key = Key::new(KeyCode::ScrollLock);
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[57359u".to_vec()));
+
+        let key = Key::new(KeyCode::NumLock);
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[57360u".to_vec()));
+    }
+
+    #[test]
+    fn kitty_misc_keys() {
+        let mode = TermMode::REPORT_ALL_KEYS_AS_ESC;
+
+        let key = Key::new(KeyCode::PrintScreen);
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[57361u".to_vec()));
+
+        let key = Key::new(KeyCode::Pause);
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[57362u".to_vec()));
+
+        let key = Key::new(KeyCode::Menu);
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1b[57363u".to_vec()));
+    }
+
+    #[test]
+    fn legacy_insert_delete() {
+        // Verify legacy mode still works for insert/delete
+        let key = Key::new(KeyCode::Insert);
+        let input = legacy_key_input(key);
+        assert_eq!(input, Some(b"\x1b[2~".to_vec()));
+
+        let key = Key::new(KeyCode::Delete);
+        let input = legacy_key_input(key);
+        assert_eq!(input, Some(b"\x1b[3~".to_vec()));
+    }
+
+    #[test]
+    fn legacy_mode_ignores_modifier_keys() {
+        // Modifier keys don't produce output in legacy mode
+        let key = Key::new(KeyCode::Modifier(ModifierKeyCode::LeftShift));
+        let input = legacy_key_input(key);
+        assert_eq!(input, None);
+
+        let key = Key::new(KeyCode::CapsLock);
+        let input = legacy_key_input(key);
+        assert_eq!(input, None);
     }
 }

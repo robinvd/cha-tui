@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use crate::buffer::DoubleBuffer;
 use crate::dom::Node;
 use crate::error::ProgramError;
-use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};
+use crate::event::{Event, Key, KeyCode, KeyEventKind, MediaKeyCode, ModifierKeyCode, MouseButtons, MouseEvent, Size};
 use crate::palette::Palette;
 use crate::render::Renderer;
 use crate::scroll::ScrollAlignment;
@@ -737,7 +737,9 @@ fn map_mouse_event(mouse: termina::event::MouseEvent) -> Option<Event> {
 
 fn map_key_event(key: termina::event::KeyEvent) -> Option<Event> {
     let code = map_key_code(key.code)?;
-    let event_key = Key::with_all_modifiers(
+    let kind = map_key_event_kind(key.kind);
+    let keypad = key.state.contains(termina::event::KeyEventState::KEYPAD);
+    let event_key = Key::with_kitty_extras(
         code,
         key.modifiers.contains(termina::event::Modifiers::CONTROL),
         key.modifiers.contains(termina::event::Modifiers::ALT),
@@ -745,8 +747,18 @@ fn map_key_event(key: termina::event::KeyEvent) -> Option<Event> {
         key.modifiers.contains(termina::event::Modifiers::SUPER),
         key.modifiers.contains(termina::event::Modifiers::HYPER),
         key.modifiers.contains(termina::event::Modifiers::META),
+        kind,
+        keypad,
     );
     Some(Event::Key(event_key))
+}
+
+fn map_key_event_kind(kind: termina::event::KeyEventKind) -> KeyEventKind {
+    match kind {
+        termina::event::KeyEventKind::Press => KeyEventKind::Press,
+        termina::event::KeyEventKind::Release => KeyEventKind::Release,
+        termina::event::KeyEventKind::Repeat => KeyEventKind::Repeat,
+    }
 }
 
 fn map_key_code(code: termina::event::KeyCode) -> Option<KeyCode> {
@@ -767,7 +779,57 @@ fn map_key_code(code: termina::event::KeyCode) -> Option<KeyCode> {
         TnKeyCode::End => Some(KeyCode::End),
         TnKeyCode::Tab => Some(KeyCode::Tab),
         TnKeyCode::Function(n) => Some(KeyCode::Function(n)),
+        TnKeyCode::Insert => Some(KeyCode::Insert),
+        TnKeyCode::Delete => Some(KeyCode::Delete),
+        TnKeyCode::CapsLock => Some(KeyCode::CapsLock),
+        TnKeyCode::ScrollLock => Some(KeyCode::ScrollLock),
+        TnKeyCode::NumLock => Some(KeyCode::NumLock),
+        TnKeyCode::PrintScreen => Some(KeyCode::PrintScreen),
+        TnKeyCode::Pause => Some(KeyCode::Pause),
+        TnKeyCode::Menu => Some(KeyCode::Menu),
+        TnKeyCode::Modifier(m) => Some(KeyCode::Modifier(map_modifier_key_code(m))),
+        TnKeyCode::Media(m) => Some(KeyCode::Media(map_media_key_code(m))),
         _ => None,
+    }
+}
+
+fn map_modifier_key_code(code: termina::event::ModifierKeyCode) -> ModifierKeyCode {
+    use termina::event::ModifierKeyCode as TnMod;
+    match code {
+        TnMod::LeftShift => ModifierKeyCode::LeftShift,
+        TnMod::LeftControl => ModifierKeyCode::LeftControl,
+        TnMod::LeftAlt => ModifierKeyCode::LeftAlt,
+        TnMod::LeftSuper => ModifierKeyCode::LeftSuper,
+        TnMod::LeftHyper => ModifierKeyCode::LeftHyper,
+        TnMod::LeftMeta => ModifierKeyCode::LeftMeta,
+        TnMod::RightShift => ModifierKeyCode::RightShift,
+        TnMod::RightControl => ModifierKeyCode::RightControl,
+        TnMod::RightAlt => ModifierKeyCode::RightAlt,
+        TnMod::RightSuper => ModifierKeyCode::RightSuper,
+        TnMod::RightHyper => ModifierKeyCode::RightHyper,
+        TnMod::RightMeta => ModifierKeyCode::RightMeta,
+        // Map IsoLevel keys to their closest equivalents
+        TnMod::IsoLevel3Shift => ModifierKeyCode::RightAlt,
+        TnMod::IsoLevel5Shift => ModifierKeyCode::RightAlt,
+    }
+}
+
+fn map_media_key_code(code: termina::event::MediaKeyCode) -> MediaKeyCode {
+    use termina::event::MediaKeyCode as TnMedia;
+    match code {
+        TnMedia::Play => MediaKeyCode::Play,
+        TnMedia::Pause => MediaKeyCode::Pause,
+        TnMedia::PlayPause => MediaKeyCode::PlayPause,
+        TnMedia::Stop => MediaKeyCode::Stop,
+        TnMedia::FastForward => MediaKeyCode::FastForward,
+        TnMedia::Rewind => MediaKeyCode::Rewind,
+        TnMedia::TrackNext => MediaKeyCode::TrackNext,
+        TnMedia::TrackPrevious => MediaKeyCode::TrackPrevious,
+        TnMedia::Record => MediaKeyCode::Record,
+        TnMedia::LowerVolume => MediaKeyCode::LowerVolume,
+        TnMedia::RaiseVolume => MediaKeyCode::RaiseVolume,
+        TnMedia::MuteVolume => MediaKeyCode::MuteVolume,
+        TnMedia::Reverse => MediaKeyCode::Rewind, // Map to closest equivalent
     }
 }
 

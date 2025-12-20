@@ -7,6 +7,15 @@ pub enum Event {
     FocusLost,
 }
 
+/// The kind of key event (press, release, or repeat).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum KeyEventKind {
+    #[default]
+    Press,
+    Release,
+    Repeat,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Key {
     pub code: KeyCode,
@@ -16,6 +25,10 @@ pub struct Key {
     pub super_key: bool,
     pub hyper: bool,
     pub meta: bool,
+    /// The kind of key event (press, release, repeat).
+    pub kind: KeyEventKind,
+    /// Whether this key originated from the numpad.
+    pub keypad: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -58,6 +71,60 @@ pub enum KeyCode {
     End,
     Tab,
     Function(u8),
+    /// Insert key
+    Insert,
+    /// Delete key
+    Delete,
+    /// Caps Lock key
+    CapsLock,
+    /// Scroll Lock key
+    ScrollLock,
+    /// Num Lock key
+    NumLock,
+    /// Print Screen key
+    PrintScreen,
+    /// Pause key
+    Pause,
+    /// Context Menu key
+    Menu,
+    /// A modifier key (Shift, Ctrl, Alt, etc.)
+    Modifier(ModifierKeyCode),
+    /// A media key
+    Media(MediaKeyCode),
+}
+
+/// Modifier key codes for the kitty keyboard protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModifierKeyCode {
+    LeftShift,
+    LeftControl,
+    LeftAlt,
+    LeftSuper,
+    LeftHyper,
+    LeftMeta,
+    RightShift,
+    RightControl,
+    RightAlt,
+    RightSuper,
+    RightHyper,
+    RightMeta,
+}
+
+/// Media key codes for the kitty keyboard protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaKeyCode {
+    Play,
+    Pause,
+    PlayPause,
+    Stop,
+    FastForward,
+    Rewind,
+    TrackNext,
+    TrackPrevious,
+    Record,
+    LowerVolume,
+    RaiseVolume,
+    MuteVolume,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -98,6 +165,8 @@ impl Key {
             super_key: false,
             hyper: false,
             meta: false,
+            kind: KeyEventKind::Press,
+            keypad: false,
         }
     }
 
@@ -116,6 +185,8 @@ impl Key {
             super_key,
             hyper: false,
             meta: false,
+            kind: KeyEventKind::Press,
+            keypad: false,
         }
     }
 
@@ -136,6 +207,33 @@ impl Key {
             super_key,
             hyper,
             meta,
+            kind: KeyEventKind::Press,
+            keypad: false,
+        }
+    }
+
+    /// Create a key with full kitty keyboard protocol support.
+    pub fn with_kitty_extras(
+        code: KeyCode,
+        ctrl: bool,
+        alt: bool,
+        shift: bool,
+        super_key: bool,
+        hyper: bool,
+        meta: bool,
+        kind: KeyEventKind,
+        keypad: bool,
+    ) -> Self {
+        Self {
+            code,
+            ctrl,
+            alt,
+            shift,
+            super_key,
+            hyper,
+            meta,
+            kind,
+            keypad,
         }
     }
 }
@@ -235,6 +333,8 @@ mod tests {
                 assert!(!key.shift);
                 assert!(!key.hyper);
                 assert!(!key.meta);
+                assert_eq!(key.kind, KeyEventKind::Press);
+                assert!(!key.keypad);
             }
             other => panic!("expected key event, got {:?}", other),
         }
@@ -250,6 +350,8 @@ mod tests {
         assert!(!key.shift);
         assert!(!key.hyper);
         assert!(!key.meta);
+        assert_eq!(key.kind, KeyEventKind::Press);
+        assert!(!key.keypad);
     }
 
     #[test]
@@ -297,5 +399,66 @@ mod tests {
             Event::FocusGained => {}
             other => panic!("expected focus gained event, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn key_with_kitty_extras_sets_all_fields() {
+        let key = Key::with_kitty_extras(
+            KeyCode::Char('a'),
+            true,  // ctrl
+            true,  // alt
+            true,  // shift
+            false, // super
+            false, // hyper
+            false, // meta
+            KeyEventKind::Release,
+            true, // keypad
+        );
+
+        assert_eq!(key.code, KeyCode::Char('a'));
+        assert!(key.ctrl);
+        assert!(key.alt);
+        assert!(key.shift);
+        assert!(!key.super_key);
+        assert!(!key.hyper);
+        assert!(!key.meta);
+        assert_eq!(key.kind, KeyEventKind::Release);
+        assert!(key.keypad);
+    }
+
+    #[test]
+    fn key_event_kind_default_is_press() {
+        assert_eq!(KeyEventKind::default(), KeyEventKind::Press);
+    }
+
+    #[test]
+    fn modifier_key_code_variants_exist() {
+        // Just verify the variants exist and can be used
+        let _left_shift = KeyCode::Modifier(ModifierKeyCode::LeftShift);
+        let _right_ctrl = KeyCode::Modifier(ModifierKeyCode::RightControl);
+        let _left_alt = KeyCode::Modifier(ModifierKeyCode::LeftAlt);
+        let _left_super = KeyCode::Modifier(ModifierKeyCode::LeftSuper);
+    }
+
+    #[test]
+    fn media_key_code_variants_exist() {
+        // Just verify the variants exist and can be used
+        let _play = KeyCode::Media(MediaKeyCode::Play);
+        let _pause = KeyCode::Media(MediaKeyCode::Pause);
+        let _next = KeyCode::Media(MediaKeyCode::TrackNext);
+        let _mute = KeyCode::Media(MediaKeyCode::MuteVolume);
+    }
+
+    #[test]
+    fn new_key_codes_exist() {
+        // Verify new key codes can be created
+        let _insert = KeyCode::Insert;
+        let _delete = KeyCode::Delete;
+        let _caps = KeyCode::CapsLock;
+        let _scroll = KeyCode::ScrollLock;
+        let _num = KeyCode::NumLock;
+        let _print = KeyCode::PrintScreen;
+        let _pause = KeyCode::Pause;
+        let _menu = KeyCode::Menu;
     }
 }
