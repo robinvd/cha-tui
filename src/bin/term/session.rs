@@ -30,6 +30,13 @@ pub struct Session {
 impl Session {
     /// Create a new session with a spawned terminal.
     pub fn spawn(path: &Path, number: usize, id: SessionId) -> std::io::Result<Self> {
+        #[cfg(test)]
+        let _ = path;
+
+        #[cfg(test)]
+        let terminal = TerminalState::spawn("true", &[]).unwrap();
+
+        #[cfg(not(test))]
         let terminal = TerminalState::with_working_dir(path).or_else(|err| {
             warn!(
                 ?err,
