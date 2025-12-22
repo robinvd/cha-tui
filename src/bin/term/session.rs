@@ -67,7 +67,16 @@ impl Session {
         let base = self
             .title
             .clone()
-            .or_else(|| self.terminal.foreground_process_name())
+            .or_else(|| {
+                #[cfg(not(test))]
+                {
+                    self.terminal.foreground_process_name()
+                }
+                #[cfg(test)]
+                {
+                    None
+                }
+            })
             .unwrap_or_else(|| format!("session{}", self.number));
         if self.exited {
             format!("{base} [exited]")
