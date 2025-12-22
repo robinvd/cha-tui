@@ -337,6 +337,14 @@ fn clear_status_on_input(model: &mut Model, msg: &Msg) {
     }
 }
 
+fn session_index_from_digit(ch: char) -> Option<usize> {
+    match ch {
+        '1'..='9' => ch.to_digit(10).map(|n| n as usize),
+        '0' => Some(10),
+        _ => None,
+    }
+}
+
 fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
     let mut transitions = Vec::new();
 
@@ -431,6 +439,44 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                     project: pid,
                     session: sid,
                 });
+                return Transition::Continue;
+            }
+
+            if key.ctrl
+                && let KeyCode::Char(ch) = key.code
+                && let Some(target_index) = session_index_from_digit(ch)
+            {
+                if let Some((project_id, _)) = model.active {
+                    let target_session = model
+                        .project(project_id)
+                        .and_then(|project| project.sessions.get(target_index - 1))
+                        .map(|session| session.id);
+
+                    if let Some(target_sid) = target_session {
+                        if let Some((old_pid, old_sid)) = model.active {
+                            transitions.push(update(
+                                model,
+                                Msg::Terminal {
+                                    project: old_pid,
+                                    session: old_sid,
+                                    msg: TerminalMsg::FocusLost,
+                                },
+                            ));
+                        }
+                        model.select_session(project_id, target_sid);
+                        if model.focus == Focus::Terminal {
+                            transitions.push(update(
+                                model,
+                                Msg::Terminal {
+                                    project: project_id,
+                                    session: target_sid,
+                                    msg: TerminalMsg::FocusGained,
+                                },
+                            ));
+                        }
+                        return Transition::Multiple(transitions);
+                    }
+                }
                 return Transition::Continue;
             }
 
@@ -1034,6 +1080,56 @@ mod tests {
         assert_eq!(
             model.tree.selected(),
             Some(&TreeId::Session(project_id, first_session))
+        );
+    }
+
+    #[test]
+    fn cmd_number_switches_to_session_in_active_project() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        update(&mut model, Msg::NewSession);
+
+        let project_id = model.projects[0].id;
+        let first_session = model.projects[0].sessions[0].id;
+        let second_session = model.projects[0].sessions[1].id;
+
+        model.select_session(project_id, second_session);
+        model.focus = Focus::Terminal;
+
+        let mut key = Key::new(KeyCode::Char('1'));
+        key.super_key = true;
+        update(&mut model, Msg::Key(key));
+
+        assert_eq!(model.focus, Focus::Terminal);
+        assert_eq!(model.active, Some((project_id, first_session)));
+        assert_eq!(
+            model.tree.selected(),
+            Some(&TreeId::Session(project_id, first_session))
+        );
+    }
+
+    #[test]
+    fn cmd_number_does_not_change_when_session_missing() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+
+        let project_id = model.projects[0].id;
+        let active_session = model.projects[0].sessions[0].id;
+
+        model.select_session(project_id, active_session);
+        model.focus = Focus::Terminal;
+
+        let mut key = Key::new(KeyCode::Char('3'));
+        key.super_key = true;
+        update(&mut model, Msg::Key(key));
+
+        assert_eq!(model.focus, Focus::Terminal);
+        assert_eq!(model.active, Some((project_id, active_session)));
+        assert_eq!(
+            model.tree.selected(),
+            Some(&TreeId::Session(project_id, active_session))
         );
     }
 
