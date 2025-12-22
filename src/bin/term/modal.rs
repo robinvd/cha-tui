@@ -1,15 +1,22 @@
 //! Modal dialog components.
 
+use super::project::ProjectId;
+use super::session::SessionId;
 use chatui::dom::Color;
 use chatui::event::{Key, KeyCode};
-use chatui::{
-    InputMsg, InputState, InputStyle, Node, Style, block_with_title, modal, row, text,
-};
+use chatui::{InputMsg, InputState, InputStyle, Node, Style, block_with_title, modal, row, text};
 
 /// State for modal dialogs.
 #[derive(Clone)]
 pub enum ModalState {
-    NewProject { input: InputState },
+    NewProject {
+        input: InputState,
+    },
+    RenameSession {
+        input: InputState,
+        project: ProjectId,
+        session: SessionId,
+    },
 }
 
 /// Messages for modal interactions.
@@ -28,6 +35,12 @@ pub enum ModalResult {
     Cancelled,
     /// New project path was submitted.
     ProjectSubmitted(String),
+    /// Session rename was submitted.
+    SessionRenamed {
+        project: ProjectId,
+        session: SessionId,
+        name: String,
+    },
 }
 
 /// Handle a key event for the modal, returning a message if applicable.
@@ -49,21 +62,40 @@ pub fn modal_handle_key(key: Key) -> Option<ModalMsg> {
 pub fn modal_update(state: &mut ModalState, msg: ModalMsg) -> ModalResult {
     match msg {
         ModalMsg::Cancel => ModalResult::Cancelled,
-        ModalMsg::Submit => {
-            let ModalState::NewProject { input } = state;
-            let value = input.value();
-            let trimmed = value.trim();
-            if trimmed.is_empty() {
-                ModalResult::Cancelled
-            } else {
-                ModalResult::ProjectSubmitted(trimmed.to_string())
+        ModalMsg::Submit => match state {
+            ModalState::NewProject { input } => {
+                let value = input.value();
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    ModalResult::Cancelled
+                } else {
+                    ModalResult::ProjectSubmitted(trimmed.to_string())
+                }
             }
-        }
-        ModalMsg::Input(input_msg) => {
-            let ModalState::NewProject { input } = state;
-            input.update(input_msg);
-            ModalResult::Continue
-        }
+            ModalState::RenameSession {
+                input,
+                project,
+                session,
+            } => {
+                let value = input.value();
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    ModalResult::Cancelled
+                } else {
+                    ModalResult::SessionRenamed {
+                        project: *project,
+                        session: *session,
+                        name: trimmed.to_string(),
+                    }
+                }
+            }
+        },
+        ModalMsg::Input(input_msg) => match state {
+            ModalState::NewProject { input } | ModalState::RenameSession { input, .. } => {
+                input.update(input_msg);
+                ModalResult::Continue
+            }
+        },
     }
 }
 
@@ -82,6 +114,18 @@ pub fn modal_view<Msg: Clone + 'static>(
             let inner = row(vec![prompt, field]).with_min_width(taffy::Dimension::length(40.0));
 
             let modal_node = block_with_title("Add project", vec![inner.with_fill()]).with_fill();
+            modal(vec![modal_node])
+        }
+        ModalState::RenameSession { input, .. } => {
+            let mut input_style = InputStyle::default();
+            input_style.cursor.bg = Some(Color::rgb(100, 200, 255));
+            let prompt = text::<Msg>("Session name: ").with_style(Style::bold());
+            let field = chatui::input::<Msg>("rename-session", input, &input_style, wrap_input)
+                .with_flex_grow(1.0);
+            let inner = row(vec![prompt, field]).with_min_width(taffy::Dimension::length(32.0));
+
+            let modal_node =
+                block_with_title("Rename session", vec![inner.with_fill()]).with_fill();
             modal(vec![modal_node])
         }
     }

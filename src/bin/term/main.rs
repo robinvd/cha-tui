@@ -8,8 +8,8 @@ mod session;
 mod sidebar;
 mod status;
 
-use std::path::PathBuf;
 use std::io;
+use std::path::PathBuf;
 
 #[cfg(test)]
 use once_cell::sync::Lazy;
@@ -30,8 +30,8 @@ use persistence::{load_projects, save_projects};
 use project::{Project, ProjectId};
 use session::{Session, SessionId};
 use sidebar::{
-    TreeId, move_project_down, move_project_up, next_session, prev_session,
-    rebuild_tree, section_style, sidebar_view,
+    TreeId, move_project_down, move_project_up, next_session, prev_session, rebuild_tree,
+    section_style, sidebar_view,
 };
 use status::{StatusMessage, status_bar_view};
 
@@ -178,8 +178,6 @@ impl Model {
         let session = project.session(sid)?;
         Some((project, session))
     }
-
-
 
     fn project(&self, pid: ProjectId) -> Option<&Project> {
         self.projects.iter().find(|p| p.id == pid)
@@ -407,6 +405,35 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 return Transition::Multiple(transitions);
             }
 
+            if key.ctrl && key.code == KeyCode::Char(',') {
+                let Some(TreeId::Session(pid, sid)) = model.tree.selected().cloned() else {
+                    model.status = Some(StatusMessage::error("Select a session to rename"));
+                    return Transition::Continue;
+                };
+
+                let Some(session_name) = model
+                    .project(pid)
+                    .and_then(|project| project.session(sid))
+                    .map(|session| {
+                        session
+                            .custom_title
+                            .clone()
+                            .or_else(|| session.title.clone())
+                            .unwrap_or_else(|| format!("session{}", session.number))
+                    })
+                else {
+                    model.status = Some(StatusMessage::error("Session no longer exists"));
+                    return Transition::Continue;
+                };
+
+                model.modal = Some(ModalState::RenameSession {
+                    input: InputState::with_value(session_name),
+                    project: pid,
+                    session: sid,
+                });
+                return Transition::Continue;
+            }
+
             // Session navigation with Ctrl+Up/Down
             if key.ctrl
                 && key.code == KeyCode::Up
@@ -563,12 +590,15 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 Focus::Terminal => {
                     if let Some((pid, sid)) = model.active
                         && let Some((_, session)) = model.active_session()
-                        && let Some(msg) =
-                            default_terminal_keybindings(key, session.terminal.mode(), move |term_msg| Msg::Terminal {
+                        && let Some(msg) = default_terminal_keybindings(
+                            key,
+                            session.terminal.mode(),
+                            move |term_msg| Msg::Terminal {
                                 project: pid,
                                 session: sid,
                                 msg: term_msg,
-                            })
+                            },
+                        )
                     {
                         return update(model, msg);
                     }
@@ -691,6 +721,22 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                         }
                         model.modal = None;
                     }
+                    ModalResult::SessionRenamed {
+                        project,
+                        session,
+                        name,
+                    } => {
+                        if let Some(project) = model.project_mut(project)
+                            && let Some(session) = project.session_mut(session)
+                        {
+                            session.custom_title = Some(name);
+                            session.sync_display_name();
+                            rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+                        } else {
+                            model.status = Some(StatusMessage::error("Session no longer exists"));
+                        }
+                        model.modal = None;
+                    }
                 }
             }
         }
@@ -703,8 +749,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 TreeId::Session(pid, _) => pid,
             };
 
-            let Some(project_index) = model.projects.iter().position(|p| p.id == project_id)
-            else {
+            let Some(project_index) = model.projects.iter().position(|p| p.id == project_id) else {
                 return Transition::Continue;
             };
 
@@ -776,9 +821,13 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             }
         }
         Msg::ModalInput(input_msg) => {
-            if let Some(ModalState::NewProject { input }) = model.modal.as_mut() {
-                input.update(input_msg);
-            }
+            match model.modal.as_mut() {
+                Some(ModalState::NewProject { input })
+                | Some(ModalState::RenameSession { input, .. }) => {
+                    input.update(input_msg);
+                }
+                None => {}
+            };
         }
     }
 
@@ -989,6 +1038,56 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_comma_opens_and_applies_session_rename() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        let (project_id, session_id, initial_name) = {
+            let (project, session) = model.active_session().expect("active session");
+            (
+                project.id,
+                session.id,
+                session
+                    .custom_title
+                    .clone()
+                    .or_else(|| session.title.clone())
+                    .unwrap_or_else(|| format!("session{}", session.number)),
+            )
+        };
+
+        let mut key = Key::new(KeyCode::Char(','));
+        key.ctrl = true;
+        update(&mut model, Msg::Key(key));
+
+        let (target_project, target_session) = match model.modal.as_ref() {
+            Some(ModalState::RenameSession {
+                project,
+                session,
+                input,
+            }) => {
+                assert_eq!(*project, project_id);
+                assert_eq!(*session, session_id);
+                assert_eq!(input.value(), initial_name);
+                (*project, *session)
+            }
+            _ => panic!("expected rename modal to open"),
+        };
+
+        if let Some(ModalState::RenameSession { input, .. }) = model.modal.as_mut() {
+            input.set_value("custom session");
+        }
+
+        update(&mut model, Msg::Modal(ModalMsg::Submit));
+
+        let session = model
+            .project(target_project)
+            .and_then(|project| project.session(target_session))
+            .expect("session still present after rename");
+        assert_eq!(session.display_name(), "custom session");
+        assert!(model.modal.is_none());
+    }
+
+    #[test]
     fn bell_indicator_shows_for_session() {
         let Some(mut model) = test_model() else {
             return;
@@ -1147,13 +1246,9 @@ mod tests {
         model.focus = Focus::Sidebar;
 
         let project_name = &model.projects[0].name;
-        let mut node = sidebar_view(
-            &model.tree,
-            model.auto_hide,
-            true,
-            Msg::Tree,
-            || Msg::FocusSidebar,
-        )
+        let mut node = sidebar_view(&model.tree, model.auto_hide, true, Msg::Tree, || {
+            Msg::FocusSidebar
+        })
         .with_fill();
         compute_root_layout(
             &mut node,

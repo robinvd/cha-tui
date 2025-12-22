@@ -4,6 +4,7 @@ use std::path::Path;
 
 use chatui::{TerminalMsg, TerminalState};
 use smol::channel::Receiver;
+#[cfg(not(test))]
 use tracing::warn;
 
 /// Unique identifier for a session.
@@ -15,6 +16,7 @@ pub struct Session {
     pub id: SessionId,
     pub number: usize,
     pub title: Option<String>,
+    pub custom_title: Option<String>,
     pub bell: bool,
     pub exited: bool,
     pub terminal: TerminalState,
@@ -49,6 +51,7 @@ impl Session {
             id,
             number,
             title: None,
+            custom_title: None,
             bell: false,
             exited: false,
             terminal,
@@ -65,8 +68,9 @@ impl Session {
     /// Generate the display name for this session.
     pub fn display_name(&self) -> String {
         let base = self
-            .title
+            .custom_title
             .clone()
+            .or_else(|| self.title.clone())
             .or_else(|| {
                 #[cfg(not(test))]
                 {
