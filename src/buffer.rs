@@ -268,45 +268,63 @@ impl DoubleBuffer {
 
     /// Write a single character at the given position in the back buffer
     pub fn write_char(&mut self, x: usize, y: usize, ch: char, attrs: &CellAttributes) {
-        if x < self.width && y < self.height {
-            // Check if we need to blend colors due to transparency
-            let mut final_attrs = attrs.clone();
+        if x >= self.width || y >= self.height {
+            return;
+        }
 
-            // Blend background color if it has transparency
-            if let Some(new_bg) = attrs.background
-                && new_bg.a < 255
-            {
-                // Get the existing cell's background color
-                let existing_bg = self.back[y][x]
-                    .attrs
-                    .background
-                    .unwrap_or(Rgba::opaque(0, 0, 0)); // Default to black if no background
+        let width = grapheme_column_width(&ch.to_string(), None);
+        if width == 0 {
+            return;
+        }
+        if x + width > self.width {
+            return;
+        }
 
-                // Blend using oklab
-                let bottom = existing_bg.to_straight_rgba();
-                let top = new_bg.to_straight_rgba();
-                let blended = bottom.oklab_blend(top);
-                final_attrs.background = Some(Rgba::from_straight_rgba(blended));
-            }
+        // Check if we need to blend colors due to transparency
+        let mut final_attrs = attrs.clone();
 
-            // Blend foreground color if it has transparency
-            if let Some(new_fg) = attrs.foreground
-                && new_fg.a < 255
-            {
-                // Get the existing cell's foreground color
-                let existing_fg = self.back[y][x]
-                    .attrs
-                    .foreground
-                    .unwrap_or(Rgba::opaque(255, 255, 255)); // Default to white if no foreground
+        // Blend background color if it has transparency
+        if let Some(new_bg) = attrs.background
+            && new_bg.a < 255
+        {
+            // Get the existing cell's background color
+            let existing_bg = self.back[y][x]
+                .attrs
+                .background
+                .unwrap_or(Rgba::opaque(0, 0, 0)); // Default to black if no background
 
-                // Blend using oklab
-                let bottom = existing_fg.to_straight_rgba();
-                let top = new_fg.to_straight_rgba();
-                let blended = bottom.oklab_blend(top);
-                final_attrs.foreground = Some(Rgba::from_straight_rgba(blended));
-            }
+            // Blend using oklab
+            let bottom = existing_bg.to_straight_rgba();
+            let top = new_bg.to_straight_rgba();
+            let blended = bottom.oklab_blend(top);
+            final_attrs.background = Some(Rgba::from_straight_rgba(blended));
+        }
 
-            self.back[y][x] = Cell::new(ch, final_attrs);
+        // Blend foreground color if it has transparency
+        if let Some(new_fg) = attrs.foreground
+            && new_fg.a < 255
+        {
+            // Get the existing cell's foreground color
+            let existing_fg = self.back[y][x]
+                .attrs
+                .foreground
+                .unwrap_or(Rgba::opaque(255, 255, 255)); // Default to white if no foreground
+
+            // Blend using oklab
+            let bottom = existing_fg.to_straight_rgba();
+            let top = new_fg.to_straight_rgba();
+            let blended = bottom.oklab_blend(top);
+            final_attrs.foreground = Some(Rgba::from_straight_rgba(blended));
+        }
+
+        self.back[y][x] = Cell::new(ch, final_attrs.clone());
+
+        // Mark trailing cells for wide characters as zero-width spacers
+        for i in 1..width {
+            let mut spacer = Cell::blank();
+            spacer.zero_width = true;
+            spacer.attrs = final_attrs.clone();
+            self.back[y][x + i] = spacer;
         }
     }
 
@@ -620,6 +638,25 @@ mod tests {
 
         let cell = buffer.get_cell(5, 1).unwrap();
         assert_eq!(cell.ch, 'X');
+    }
+
+    #[test]
+    fn write_char_handles_wide_graphemes() {
+        let mut buffer = DoubleBuffer::new(6, 1);
+        let attrs = CellAttributes::default();
+
+        buffer.write_char(0, 0, '📦', &attrs);
+        buffer.write_char(2, 0, 'x', &attrs);
+
+        assert_eq!(buffer.get_cell(0, 0).unwrap().ch, '📦');
+        assert!(buffer.get_cell(1, 0).unwrap().zero_width);
+        assert_eq!(buffer.get_cell(2, 0).unwrap().ch, 'x');
+
+        let text = buffer.to_string();
+        assert!(
+            text.starts_with("📦x"),
+            "wide char should not insert extra padding before following cells"
+        );
     }
 
     #[test]

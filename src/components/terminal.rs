@@ -1541,6 +1541,18 @@ impl Renderable for TerminalRenderable {
                 continue;
             }
 
+            let flags = cell.flags;
+            if flags.intersects(
+                term::cell::Flags::WIDE_CHAR_SPACER | term::cell::Flags::LEADING_WIDE_CHAR_SPACER,
+            ) {
+                if let Some(cell) =
+                    ctx.buffer().get_cell_mut(area.x + x, area.y + screen_y as usize)
+                {
+                    cell.zero_width = true;
+                }
+                continue;
+            }
+
             let mut attrs = CellAttributes::default();
 
             // Set foreground color
@@ -1558,7 +1570,6 @@ impl Renderable for TerminalRenderable {
             }
 
             // Set text attributes
-            let flags = cell.flags;
             if flags.contains(term::cell::Flags::BOLD) {
                 attrs.set_bold(true);
             }
