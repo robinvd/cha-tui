@@ -42,6 +42,7 @@ struct Model {
     projects: Vec<Project>,
     tree: TreeState<TreeId>,
     focus: Focus,
+    terminal_locked: bool,
     auto_hide: bool,
     active: Option<(ProjectId, SessionId)>,
     modal: Option<ModalState>,
@@ -77,6 +78,7 @@ impl Model {
             projects: Vec::new(),
             tree: TreeState::new(),
             focus: Focus::Sidebar,
+            terminal_locked: false,
             auto_hide: false,
             active: None,
             modal: None,
@@ -413,6 +415,30 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 return Transition::Multiple(transitions);
             }
 
+            if model.focus == Focus::Terminal {
+                if key.ctrl && key.code == KeyCode::Char('g') {
+                    model.terminal_locked = !model.terminal_locked;
+                    return Transition::Continue;
+                }
+                if model.terminal_locked {
+                    if let Some((pid, sid)) = model.active
+                        && let Some((_, session)) = model.active_session()
+                        && let Some(msg) = default_terminal_keybindings(
+                            key,
+                            session.terminal.mode(),
+                            move |term_msg| Msg::Terminal {
+                                project: pid,
+                                session: sid,
+                                msg: term_msg,
+                            },
+                        )
+                    {
+                        return update(model, msg);
+                    }
+                    return Transition::Continue;
+                }
+            }
+
             if key.ctrl && key.code == KeyCode::Char(',') {
                 let Some(TreeId::Session(pid, sid)) = model.tree.selected().cloned() else {
                     model.status = Some(StatusMessage::error("Select a session to rename"));
@@ -442,7 +468,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 return Transition::Continue;
             }
 
-            if key.ctrl
+            if (key.ctrl || key.super_key)
                 && let KeyCode::Char(ch) = key.code
                 && let Some(target_index) = session_index_from_digit(ch)
             {
@@ -481,7 +507,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             }
 
             // Session navigation with Ctrl+Up/Down
-            if key.ctrl
+            if (key.ctrl || key.super_key)
                 && key.code == KeyCode::Up
                 && let Some((pid, sid)) = prev_session(&model.tree, model.active)
             {
@@ -508,7 +534,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 }
                 return Transition::Multiple(transitions);
             }
-            if key.ctrl
+            if (key.ctrl || key.super_key)
                 && key.code == KeyCode::Down
                 && let Some((pid, sid)) = next_session(&model.tree, model.active)
             {
@@ -928,6 +954,7 @@ fn view(model: &Model) -> Node<Msg> {
         model.status.as_ref(),
         model.auto_hide,
         model.active_session(),
+        model.terminal_locked,
     );
 
     let mut nodes = vec![content, status];

@@ -38,6 +38,7 @@ pub fn status_bar_view(
     status: Option<&StatusMessage>,
     auto_hide: bool,
     active_session: Option<(&Project, &Session)>,
+    terminal_locked: bool,
 ) -> Node<Msg> {
     let base_style = Style::default();
     let key_style = Style::bold();
@@ -52,7 +53,12 @@ pub fn status_bar_view(
         .with_id("status-focus"),
     );
 
-    left_items.extend(shortcut_buttons(focus, &key_style, &base_style));
+    left_items.extend(shortcut_buttons(
+        focus,
+        &key_style,
+        &base_style,
+        terminal_locked,
+    ));
 
     if auto_hide && let Some((project, session)) = active_session {
         right_spans.push(TextSpan::new(&project.name, base_style));
@@ -85,9 +91,26 @@ pub fn status_bar_view(
     ])
 }
 
-fn shortcut_buttons(focus: Focus, key_style: &Style, text_style: &Style) -> Vec<Node<Msg>> {
+fn shortcut_buttons(
+    focus: Focus,
+    key_style: &Style,
+    text_style: &Style,
+    terminal_locked: bool,
+) -> Vec<Node<Msg>> {
     let mut items = Vec::new();
     let mut idx = 0;
+
+    if matches!(focus, Focus::Terminal) && terminal_locked {
+        items.push(shortcut_button(
+            "C+G",
+            "unlock",
+            idx,
+            key_style,
+            text_style,
+            || Msg::Key(ctrl_key(KeyCode::Char('g'))),
+        ));
+        return items;
+    }
 
     match focus {
         Focus::Sidebar => {
@@ -207,6 +230,15 @@ fn shortcut_buttons(focus: Focus, key_style: &Style, text_style: &Style) -> Vec<
                 key_style,
                 text_style,
                 || Msg::Key(ctrl_key(KeyCode::Char(','))),
+            ));
+            idx += 1;
+            items.push(shortcut_button(
+                "C+G",
+                "lock terminal",
+                idx,
+                key_style,
+                text_style,
+                || Msg::Key(ctrl_key(KeyCode::Char('g'))),
             ));
         }
     }
