@@ -19,7 +19,6 @@ pub use alacritty_terminal::term::TermMode;
 use once_cell::sync::Lazy;
 use std::any::Any;
 use std::borrow::Cow;
-#[cfg(unix)]
 use std::io;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -32,12 +31,11 @@ use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 
 use super::process;
-
 use alacritty_terminal::event::{Event as TermEvent, EventListener, WindowSize};
 use alacritty_terminal::event_loop::{EventLoop, EventLoopSender, Msg, State as EventLoopState};
 use alacritty_terminal::grid::Scroll;
 use alacritty_terminal::sync::FairMutex;
-use alacritty_terminal::term::color::Colors;
+use alacritty_terminal::term::color::{COUNT as COLOR_COUNT, Colors};
 use alacritty_terminal::term::test::TermSize;
 use alacritty_terminal::term::{self, Config as TermConfig, Term};
 use alacritty_terminal::tty::{self, Options as PtyOptions, Shell};
@@ -209,6 +207,24 @@ impl std::fmt::Debug for TerminalState {
 }
 
 impl TerminalState {
+    fn format_color_response(
+        term: &Arc<FairMutex<Term<TerminalEventListener>>>,
+        index: usize,
+        formatter: &dyn Fn(ansi::Rgb) -> String,
+    ) -> Option<String> {
+        if index >= COLOR_COUNT {
+            tracing::warn!(index, "Color request index out of bounds");
+            return None;
+        }
+
+        let color = {
+            let term = term.lock();
+            term.colors()[index]
+        };
+
+        color.map(formatter)
+    }
+
     fn handle_event_now(
         event: TermEvent,
         sender: &EventLoopSender,
@@ -217,6 +233,9 @@ impl TerminalState {
         exited_shared: &Arc<AtomicBool>,
         title_shared: &Arc<Mutex<Option<String>>>,
         bell_shared: &Arc<AtomicBool>,
+        term: &Arc<FairMutex<Term<TerminalEventListener>>>,
+        version: &Arc<AtomicU64>,
+        wakeup_sender: &Sender<()>,
     ) {
         match event {
             TermEvent::TextAreaSizeRequest(formatter) => {
@@ -247,6 +266,17 @@ impl TerminalState {
             }
             TermEvent::Bell => {
                 bell_shared.store(true, Ordering::Relaxed);
+            }
+            TermEvent::ClipboardStore(_, _) | TermEvent::ClipboardLoad(_, _) => {}
+            TermEvent::ColorRequest(index, formatter) => {
+                if let Some(payload) = Self::format_color_response(term, index, formatter.as_ref())
+                {
+                    let _ = sender.send(Msg::Input(Cow::Owned(payload.into_bytes())));
+                }
+            }
+            TermEvent::MouseCursorDirty | TermEvent::CursorBlinkingChange => {
+                version.fetch_add(1, Ordering::Relaxed);
+                let _ = wakeup_sender.try_send(());
             }
             _ => {}
         }
@@ -336,13 +366,37 @@ impl TerminalState {
         let sender = event_loop.channel();
         let join_handle = event_loop.spawn();
 
+        let state = Self {
+            term: term.clone(),
+            sender: sender.clone(),
+            version: version.clone(),
+            wakeup_sender: wakeup_sender.clone(),
+            wakeup_receiver,
+            event_sender,
+            cols_shared: cols_shared.clone(),
+            rows_shared: rows_shared.clone(),
+            exited_shared: exited_shared.clone(),
+            title: title_shared.clone(),
+            bell: bell_shared.clone(),
+            #[cfg(unix)]
+            pty_fd: pty_fd.into(),
+            cols,
+            rows,
+            join_handle: Some(join_handle),
+            #[cfg(test)]
+            _test_permit: test_permit,
+        };
+
         {
-            let cols_shared = cols_shared.clone();
-            let rows_shared = rows_shared.clone();
-            let exited_shared = exited_shared.clone();
-            let title_shared = title_shared.clone();
-            let bell_shared = bell_shared.clone();
-            let sender = sender.clone();
+            let cols_shared = state.cols_shared.clone();
+            let rows_shared = state.rows_shared.clone();
+            let exited_shared = state.exited_shared.clone();
+            let title_shared = state.title.clone();
+            let bell_shared = state.bell.clone();
+            let term = state.term.clone();
+            let version = state.version.clone();
+            let wakeup_sender = state.wakeup_sender.clone();
+            let sender = state.sender.clone();
             smol::spawn(async move {
                 while let Ok(event) = event_receiver.recv().await {
                     Self::handle_event_now(
@@ -353,32 +407,16 @@ impl TerminalState {
                         &exited_shared,
                         &title_shared,
                         &bell_shared,
+                        &term,
+                        &version,
+                        &wakeup_sender,
                     );
                 }
             })
             .detach();
         }
 
-        Ok(Self {
-            term,
-            sender,
-            version,
-            wakeup_sender,
-            wakeup_receiver,
-            event_sender,
-            cols_shared,
-            rows_shared,
-            exited_shared,
-            title: title_shared,
-            bell: bell_shared,
-            #[cfg(unix)]
-            pty_fd: pty_fd.into(),
-            cols,
-            rows,
-            join_handle: Some(join_handle),
-            #[cfg(test)]
-            _test_permit: test_permit,
-        })
+        Ok(state)
     }
 
     /// Update the terminal state based on a message.
@@ -467,6 +505,9 @@ impl TerminalState {
             &self.exited_shared,
             &self.title,
             &self.bell,
+            &self.term,
+            &self.version,
+            &self.wakeup_sender,
         );
     }
 
@@ -1545,8 +1586,9 @@ impl Renderable for TerminalRenderable {
             if flags.intersects(
                 term::cell::Flags::WIDE_CHAR_SPACER | term::cell::Flags::LEADING_WIDE_CHAR_SPACER,
             ) {
-                if let Some(cell) =
-                    ctx.buffer().get_cell_mut(area.x + x, area.y + screen_y as usize)
+                if let Some(cell) = ctx
+                    .buffer()
+                    .get_cell_mut(area.x + x, area.y + screen_y as usize)
                 {
                     cell.zero_width = true;
                 }
@@ -2112,6 +2154,50 @@ mod tests {
         assert!(
             called.load(Ordering::Relaxed),
             "formatter should be invoked when handling size request"
+        );
+    }
+
+    #[test]
+    fn color_request_uses_current_colors() {
+        let state = TerminalState::new().expect("failed to create terminal");
+        let target = ansi::Rgb { r: 1, g: 2, b: 3 };
+
+        {
+            let mut term = state.term.lock();
+            term.set_color(NamedColor::Foreground as usize, target);
+        }
+
+        let response = TerminalState::format_color_response(
+            &state.term,
+            NamedColor::Foreground as usize,
+            &|color| format!("{:02x}-{:02x}-{:02x}", color.r, color.g, color.b),
+        );
+
+        assert_eq!(response, Some("01-02-03".to_string()));
+    }
+
+    #[test]
+    fn cursor_blinking_change_triggers_wakeup() {
+        use std::time::Duration;
+
+        let mut state = TerminalState::new().expect("failed to create terminal");
+        let initial_version = state.version();
+        let receiver = state.wakeup_receiver();
+
+        state.handle_event_direct(TermEvent::CursorBlinkingChange);
+
+        let woke = smol::block_on(async {
+            smol::future::or(async { receiver.recv().await.is_ok() }, async {
+                smol::Timer::after(Duration::from_millis(100)).await;
+                false
+            })
+            .await
+        });
+
+        assert!(woke, "wakeup should be delivered for cursor state changes");
+        assert!(
+            state.version() > initial_version,
+            "version should increment on cursor state change"
         );
     }
 
