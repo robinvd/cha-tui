@@ -783,12 +783,12 @@ fn commit_input_style() -> InputStyle {
     style.text.fg = Some(highlight::EVERFOREST_GREEN);
     style.text.bg = Some(highlight::EVERFOREST_FG);
 
-    let mut selection = style.selection.clone();
+    let mut selection = style.selection;
     selection.bg = Some(highlight::EVERFOREST_BG_GREEN);
     selection.fg = Some(highlight::EVERFOREST_FG);
     style.selection = selection;
 
-    let mut cursor = style.cursor.clone();
+    let mut cursor = style.cursor;
     cursor.bg = Some(highlight::EVERFOREST_GREEN);
     cursor.fg = Some(highlight::EVERFOREST_BG_GREEN);
     style.cursor = cursor;
@@ -2689,7 +2689,7 @@ fn merge_inline_segments(
 
         while !remaining.is_empty() {
             if seg_index >= segments.len() {
-                let style = base.style.clone();
+                let style = base.style;
                 result.push(TextSpan::new(remaining.to_string(), style));
                 break;
             }
@@ -2711,7 +2711,7 @@ fn merge_inline_segments(
             let (take, rest) = remaining.split_at(take_len);
             remaining = rest;
 
-            let mut style = base.style.clone();
+            let mut style = base.style;
             if *emphasized {
                 apply_inline_emphasis(&mut style, change_tag);
             }

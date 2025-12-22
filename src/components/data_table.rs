@@ -558,7 +558,7 @@ where
             let mut table_col = TableColumn::new(col_def.width());
 
             if let Some(header_text) = col_def.header() {
-                let header_spans = vec![TextSpan::new(header_text, style.header_style.clone())];
+                let header_spans = vec![TextSpan::new(header_text, style.header_style)];
                 let header_node = rich_text::<Msg>(header_spans);
 
                 // Note: Cannot add click handlers to text nodes directly
@@ -640,26 +640,24 @@ fn get_cell_style(ctx: CellStyleContext) -> Style {
     let mut base_style = match ctx.mode {
         SelectionMode::Row => {
             if Some(ctx.row_idx) == ctx.selected_row {
-                ctx.style.selected_row_style.clone()
+                ctx.style.selected_row_style
             } else if ctx.is_alternate {
                 ctx.style
                     .alternate_row_style
-                    .clone()
-                    .unwrap_or_else(|| ctx.style.row_style.clone())
+                    .unwrap_or(ctx.style.row_style)
             } else {
-                ctx.style.row_style.clone()
+                ctx.style.row_style
             }
         }
         SelectionMode::Cell => {
             if Some(CellPosition::new(ctx.row_idx, ctx.col_idx)) == ctx.selected_cell {
-                ctx.style.selected_cell_style.clone()
+                ctx.style.selected_cell_style
             } else if ctx.is_alternate {
                 ctx.style
                     .alternate_row_style
-                    .clone()
-                    .unwrap_or_else(|| ctx.style.row_style.clone())
+                    .unwrap_or(ctx.style.row_style)
             } else {
-                ctx.style.row_style.clone()
+                ctx.style.row_style
             }
         }
     };

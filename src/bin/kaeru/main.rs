@@ -1311,7 +1311,7 @@ fn render_message(message: &ChatMessage) -> Node<Msg> {
 
     let label_node = text::<Msg>(label).with_style(label_style);
     let content =
-        paragraph::rich_paragraph::<Msg>(vec![TextSpan::new(&message.content, msg_style.clone())])
+        paragraph::rich_paragraph::<Msg>(vec![TextSpan::new(&message.content, msg_style)])
             .with_flex_grow(1.)
             .with_min_width(Dimension::ZERO);
 

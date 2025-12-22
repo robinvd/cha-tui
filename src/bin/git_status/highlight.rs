@@ -1012,7 +1012,7 @@ fn push_segment(line: &mut Vec<TextSpan>, segment: &str, style: &Style) {
         last.content.push_str(segment);
         return;
     }
-    line.push(TextSpan::new(segment, style.clone()));
+    line.push(TextSpan::new(segment, *style));
 }
 
 fn canonical_language_from_token(token: &str) -> Option<&'static str> {

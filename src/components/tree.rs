@@ -293,8 +293,8 @@ where
             has_children,
             is_expanded,
             label: node.label.clone(),
-            row_style: node.row_style.clone(),
-            selected_row_style: node.selected_row_style.clone(),
+            row_style: node.row_style,
+            selected_row_style: node.selected_row_style,
         });
 
         if is_expanded {
@@ -398,14 +398,14 @@ where
 
         let base_style = if selected {
             if is_active {
-                style.active_selected_row.clone()
+                style.active_selected_row
             } else {
-                style.inactive_selected_row.clone()
+                style.inactive_selected_row
             }
         } else if is_active {
-            style.active_row.clone()
+            style.active_row
         } else {
-            style.inactive_row.clone()
+            style.inactive_row
         };
 
         let row_style = if selected {
@@ -425,7 +425,7 @@ where
         };
 
         let row_text = rich_text::<Msg>(spans)
-            .with_style(row_style.clone())
+            .with_style(row_style)
             .with_width(taffy::Dimension::percent(1.));
 
         let mut node = row(vec![row_text])

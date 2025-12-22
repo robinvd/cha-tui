@@ -42,8 +42,8 @@ pub fn load_projects() -> io::Result<Vec<PersistedProject>> {
     }
 
     let data = fs::read_to_string(&path)?;
-    let state: PersistedState =
-        serde_json::from_str(&data).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    let state: PersistedState = serde_json::from_str(&data)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     Ok(state.projects)
 }
 

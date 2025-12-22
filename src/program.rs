@@ -8,7 +8,10 @@ use std::time::{Duration, Instant};
 use crate::buffer::DoubleBuffer;
 use crate::dom::Node;
 use crate::error::ProgramError;
-use crate::event::{Event, Key, KeyCode, KeyEventKind, MediaKeyCode, ModifierKeyCode, MouseButtons, MouseEvent, Size};
+use crate::event::{
+    Event, Key, KeyCode, KeyEventKind, MediaKeyCode, ModifierKeyCode, MouseButtons, MouseEvent,
+    Size,
+};
 use crate::palette::Palette;
 use crate::render::Renderer;
 use crate::scroll::ScrollAlignment;
@@ -867,6 +870,7 @@ mod tests {
         let mut program =
             Program::new(CounterModel::default(), update, view).map_event(|event| match event {
                 Event::Key(key) if matches!(key.code, KeyCode::Char('+')) => Some(Msg::Increment),
+                Event::Key(key) if matches!(key.code, KeyCode::Char('q')) => Some(Msg::Quit),
                 _ => None,
             });
         let mut buffer = DoubleBuffer::new(10, 2);
@@ -875,6 +879,11 @@ mod tests {
             .process_event(Event::key(KeyCode::Char('+')), Some(&mut buffer))
             .expect("send should succeed");
         assert!(!quit);
+
+        let quit = program
+            .process_event(Event::key(KeyCode::Char('q')), Some(&mut buffer))
+            .expect("send should succeed");
+        assert!(quit);
 
         let screen = buffer.to_string();
         assert!(screen.contains("count: 1"));

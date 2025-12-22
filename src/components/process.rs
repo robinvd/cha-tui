@@ -111,7 +111,7 @@ fn get_process_cmdline(pid: u32) -> Option<Vec<String>> {
 
 #[cfg(target_os = "macos")]
 fn get_process_cmdline(pid: u32) -> Option<Vec<String>> {
-    use libc::{c_int, c_void, sysctl, CTL_KERN, KERN_PROCARGS2};
+    use libc::{CTL_KERN, KERN_PROCARGS2, c_int, c_void, sysctl};
 
     let mut mib = [CTL_KERN, KERN_PROCARGS2, pid as c_int];
     let mut size: usize = 0;
@@ -180,11 +180,7 @@ fn get_process_cmdline(pid: u32) -> Option<Vec<String>> {
             }
         }
 
-        if args.is_empty() {
-            None
-        } else {
-            Some(args)
-        }
+        if args.is_empty() { None } else { Some(args) }
     }
 }
 
@@ -206,11 +202,10 @@ fn format_cmdline(args: Vec<String>) -> Option<String> {
         };
         !key.is_empty()
             && !value.is_empty()
-            && key
-                .bytes()
-                .enumerate()
-                .all(|(i, b)| (i == 0 && (b.is_ascii_alphabetic() || b == b'_'))
-                    || (i > 0 && (b.is_ascii_alphanumeric() || b == b'_')))
+            && key.bytes().enumerate().all(|(i, b)| {
+                (i == 0 && (b.is_ascii_alphabetic() || b == b'_'))
+                    || (i > 0 && (b.is_ascii_alphanumeric() || b == b'_'))
+            })
     }
 
     let mut args = args;
@@ -269,8 +264,10 @@ mod tests {
             (vec!["VAR1=1", "VAR2=2", "cmd", "arg"], Some("cmd arg")),
             (vec!["cmd", "ARG=val"], Some("cmd ARG=val")),
             (
-                vec!["verylongcommandname" ; 10],
-                Some("verylongcommandname verylongcommandname verylongcommandname verylongcommandname ver..."),
+                vec!["verylongcommandname"; 10],
+                Some(
+                    "verylongcommandname verylongcommandname verylongcommandname verylongcommandname ver...",
+                ),
             ),
         ];
 

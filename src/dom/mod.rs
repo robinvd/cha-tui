@@ -538,11 +538,11 @@ impl<Msg> Node<Msg> {
                 element.attrs.style = style;
             }
             NodeContent::Text(text) => {
-                let prev = text.base_style.clone();
-                text.base_style = style.clone();
+                let prev = text.base_style;
+                text.base_style = style;
                 for span in &mut text.spans {
                     if span.style == prev {
-                        span.style = style.clone();
+                        span.style = style;
                     }
                 }
             }
@@ -888,7 +888,7 @@ impl TextNode {
 
     pub fn apply_uniform_style(&mut self, style: Style) {
         for span in &mut self.spans {
-            span.style = style.clone();
+            span.style = style;
         }
     }
 }

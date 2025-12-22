@@ -439,7 +439,8 @@ impl DoubleBuffer {
                             current_attrs = run_attrs.clone();
                         }
                         write!(
-                            buffer, "\x1b[{};{}H{}",
+                            buffer,
+                            "\x1b[{};{}H{}",
                             y + 1,
                             run_start.unwrap() + 1,
                             run_text
@@ -521,7 +522,7 @@ impl DoubleBuffer {
         if !has_any_attrs {
             // Just reset to defaults
             write!(buffer, "\x1b[0m")?;
-            return Ok(())
+            return Ok(());
         }
 
         // Always start with a reset to ensure clean state when transitioning

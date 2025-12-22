@@ -30,11 +30,11 @@ impl Paragraph {
     }
 
     pub fn with_style(mut self, style: Style) -> Self {
-        let prev = self.base_style.clone();
-        self.base_style = style.clone();
+        let prev = self.base_style;
+        self.base_style = style;
         for span in &mut self.spans {
             if span.style == prev {
-                span.style = style.clone();
+                span.style = style;
             }
         }
         self
@@ -73,7 +73,7 @@ impl Paragraph {
             }
             let style = buffer_style
                 .as_ref()
-                .cloned()
+                .copied()
                 .unwrap_or_else(Style::default);
             lines
                 .last_mut()
@@ -94,7 +94,7 @@ impl Paragraph {
                     &mut buffer_style,
                 );
             }
-            buffer_style = Some(span.style.clone());
+            buffer_style = Some(span.style);
 
             for ch in span.content.chars() {
                 if ch == '\n' {

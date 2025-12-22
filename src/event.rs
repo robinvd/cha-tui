@@ -213,6 +213,7 @@ impl Key {
     }
 
     /// Create a key with full kitty keyboard protocol support.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_kitty_extras(
         code: KeyCode,
         ctrl: bool,

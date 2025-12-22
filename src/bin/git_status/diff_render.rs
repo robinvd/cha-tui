@@ -137,7 +137,7 @@ impl Renderable for DiffLeaf {
                 }
 
                 if span.style.bg.is_some() || span.style.dim {
-                    fill_style = Some(span.style.clone());
+                    fill_style = Some(span.style);
                 }
 
                 let mut collected = String::new();

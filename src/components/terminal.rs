@@ -225,6 +225,7 @@ impl TerminalState {
         color.map(formatter)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_event_now(
         event: TermEvent,
         sender: &EventLoopSender,
@@ -627,12 +628,10 @@ where
         }
 
         // Handle horizontal scroll
-        if event.buttons.horz_wheel {
-            if current_mode.intersects(TermMode::MOUSE_MODE) {
-                let sgr = current_mode.contains(TermMode::SGR_MOUSE);
-                if let Some(bytes) = encode_mouse_event(&event, true, sgr, false) {
-                    return Some(mouse_handler(TerminalMsg::Input(bytes)));
-                }
+        if event.buttons.horz_wheel && current_mode.intersects(TermMode::MOUSE_MODE) {
+            let sgr = current_mode.contains(TermMode::SGR_MOUSE);
+            if let Some(bytes) = encode_mouse_event(&event, true, sgr, false) {
+                return Some(mouse_handler(TerminalMsg::Input(bytes)));
             }
         }
 
@@ -1082,10 +1081,7 @@ fn should_build_kitty_sequence(key: &Key, mode: TermMode) -> bool {
         // Numpad keys need disambiguation
         _ if key.keypad => true,
         // Modified keys (except plain shift on text keys)
-        KeyCode::Char(_) => {
-            let has_mods = key.ctrl || key.alt || key.super_key || key.hyper || key.meta;
-            has_mods
-        }
+        KeyCode::Char(_) => key.ctrl || key.alt || key.super_key || key.hyper || key.meta,
         // Special keys that might be ambiguous
         KeyCode::Tab | KeyCode::Enter | KeyCode::Backspace if key.shift || key.ctrl || key.alt => {
             true

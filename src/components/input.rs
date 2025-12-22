@@ -790,7 +790,7 @@ impl<'a> Iterator for HighlightRuns<'a> {
                     if span_end < next_boundary {
                         next_boundary = span_end;
                     }
-                    let merged = style.get_or_insert_with(|| self.base_style.clone());
+                    let merged = style.get_or_insert(*self.base_style);
                     merged.apply_overlay(&span.style);
                 } else if let Some(start) = cursor.upcoming_start()
                     && start > self.pos
@@ -1167,7 +1167,7 @@ impl InlineHintStore {
             anchor,
             text,
             width,
-            style: hint.style.clone(),
+            style: hint.style,
             placement: hint.placement,
             line,
         }
@@ -3152,9 +3152,9 @@ impl InputRenderable {
             .collect();
         cursor_positions.sort_unstable();
 
-        let base_style = style.text.clone();
-        let selection_style = style.selection.clone();
-        let cursor_style = style.cursor.clone();
+        let base_style = style.text;
+        let selection_style = style.selection;
+        let cursor_style = style.cursor;
 
         let mut selection_ranges: Vec<(usize, usize)> = state
             .carets()
@@ -3179,7 +3179,7 @@ impl InputRenderable {
         let hint_layout = InlineHintLayout::build(&state.inline_hints, &rope);
         let content_line_count = hint_layout.content_line_count();
         let gutter_metrics = state.primary_view().gutter.metrics(content_line_count);
-        let gutter_style = style.gutter.clone();
+        let gutter_style = style.gutter;
         let cursor_line = rope.char_to_line(cursor);
         let cursor_char = (cursor < len_chars).then(|| rope.char(cursor));
 
@@ -3376,7 +3376,7 @@ impl<'a> LineStyleCursor<'a> {
         if self.highlight_idx < self.highlight_runs.len() {
             let run = &self.highlight_runs[self.highlight_idx];
             if idx >= run.range.start && idx < run.range.end {
-                return RunStyle::Highlight(run.style.clone());
+                return RunStyle::Highlight(run.style);
             }
         }
 
@@ -3595,7 +3595,7 @@ impl InputRenderable {
         selection_attrs: &CellAttributes,
         cursor_attrs: &CellAttributes,
     ) -> bool {
-        let style = RunStyle::InlineHint(hint.style.clone());
+        let style = RunStyle::InlineHint(hint.style);
         let mut row_full = false;
 
         for ch in hint.text.chars() {
@@ -5001,7 +5001,7 @@ mod tests {
         use crate::buffer::{CursorShape, CursorState, DoubleBuffer};
         use crate::dom::rounding::round_layout;
         use crate::event::Size;
-        use crate::palette::{Palette, Rgba};
+        use crate::palette::Palette;
         use crate::render::Renderer;
         use taffy::{AvailableSpace, compute_root_layout};
 
