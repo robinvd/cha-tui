@@ -1,6 +1,7 @@
 //! Session manager demo with a sidebar tree and a single terminal pane.
 
 mod focus;
+mod git;
 mod keymap;
 mod modal;
 mod persistence;
@@ -29,7 +30,7 @@ use focus::Focus;
 use keymap::{Action, Keymap, Scope};
 use modal::{ModalMsg, ModalResult, ModalState, modal_handle_key, modal_update, modal_view};
 use persistence::{load_projects, save_projects};
-use project::{Project, ProjectId};
+use project::{Project, ProjectId, SessionKey, WorktreeId};
 use session::{Session, SessionId};
 use sidebar::{
     TreeId, move_project_down, move_project_up, next_session, prev_session, rebuild_tree,
@@ -46,13 +47,15 @@ struct Model {
     focus: Focus,
     terminal_locked: bool,
     auto_hide: bool,
-    active: Option<(ProjectId, SessionId)>,
+    active: Option<SessionKey>,
     modal: Option<ModalState>,
     initial_update: bool,
     next_project_id: u64,
     next_session_id: u64,
     /// When true, skip writing to the config file (used in tests).
     skip_persist: bool,
+    /// When true, skip worktree discovery (used in tests).
+    skip_worktrees: bool,
     status: Option<StatusMessage>,
     keymap: Keymap,
     #[cfg(test)]
@@ -89,6 +92,7 @@ impl Model {
             next_project_id: 1,
             next_session_id: 1,
             skip_persist,
+            skip_worktrees: skip_persist,
             status: None,
             keymap: Keymap::default(),
             #[cfg(test)]
@@ -150,8 +154,11 @@ impl Model {
         self.next_project_id += 1;
 
         let mut project = Project::new(project_id, name, path);
-        let session = self.spawn_session(&project.path.clone())?;
-        project.add_session(session);
+        let session = self.spawn_session_for(&project, None)?;
+        project.add_session(None, session);
+        if !self.skip_worktrees {
+            self.load_worktrees(&mut project);
+        }
 
         self.projects.push(project);
         rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
@@ -165,23 +172,107 @@ impl Model {
         Ok(())
     }
 
-    fn spawn_session(&mut self, path: &PathBuf) -> std::io::Result<Session> {
+    fn spawn_session(&mut self, path: &std::path::Path, number: usize) -> std::io::Result<Session> {
         let id = SessionId(self.next_session_id);
         self.next_session_id += 1;
-        // Find the project to get the next session number
-        let number = self
-            .projects
-            .iter()
-            .find(|p| &p.path == path)
-            .map(|p| p.next_session_number)
-            .unwrap_or(1);
         Session::spawn(path, number, id)
     }
 
+    fn spawn_session_for(
+        &mut self,
+        project: &Project,
+        worktree: Option<WorktreeId>,
+    ) -> std::io::Result<Session> {
+        match worktree {
+            None => self.spawn_session(&project.path, project.next_session_number),
+            Some(wid) => {
+                let Some(worktree) = project.worktree(wid) else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "worktree not found",
+                    ));
+                };
+                self.spawn_session(&worktree.path, worktree.next_session_number)
+            }
+        }
+    }
+
+    fn load_worktrees(&mut self, project: &mut Project) {
+        let worktrees = match git::list_worktrees(&project.path) {
+            Ok(worktrees) => worktrees,
+            Err(err) => {
+                warn!(?err, "failed to load worktrees");
+                Vec::new()
+            }
+        };
+
+        for worktree in worktrees {
+            let wid = project.add_worktree(worktree.name, worktree.path);
+            let session = match self.spawn_session_for(project, Some(wid)) {
+                Ok(session) => session,
+                Err(err) => {
+                    warn!(?err, "failed to create worktree session");
+                    continue;
+                }
+            };
+            project.add_session(Some(wid), session);
+        }
+    }
+
+    fn add_worktree(&mut self, project_id: ProjectId, name: String) -> Option<TreeId> {
+        let project_index = self.projects.iter().position(|p| p.id == project_id)?;
+        if self.projects[project_index].worktree_by_name(&name).is_some() {
+            self.status = Some(StatusMessage::error("Worktree name already exists"));
+            return None;
+        }
+
+        let repo_path = self.projects[project_index].path.clone();
+        let path = match git::add_worktree(&repo_path, &name) {
+            Ok(path) => path,
+            Err(err) => {
+                self.status = Some(StatusMessage::error(format!(
+                    "Failed to add worktree: {err}"
+                )));
+                return None;
+            }
+        };
+        copy_optional_files(&repo_path, &path, &mut self.status);
+
+        let wid = self.projects[project_index].add_worktree(name, path);
+        let (path, number) = match self.projects[project_index].worktree(wid) {
+            Some(worktree) => (worktree.path.clone(), worktree.next_session_number),
+            None => {
+                self.status = Some(StatusMessage::error("Worktree no longer exists"));
+                return None;
+            }
+        };
+        let session = match self.spawn_session(&path, number) {
+            Ok(session) => session,
+            Err(err) => {
+                self.status = Some(StatusMessage::error(format!(
+                    "Failed to create worktree session: {err}"
+                )));
+                return None;
+            }
+        };
+
+        let sid = session.id;
+        self.projects[project_index].add_session(Some(wid), session);
+        rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
+        self.select_session(SessionKey {
+            project: project_id,
+            worktree: Some(wid),
+            session: sid,
+        });
+        self.set_focus(Focus::Sidebar);
+
+        Some(TreeId::Session(project_id, Some(wid), sid))
+    }
+
     fn active_session(&self) -> Option<(&Project, &Session)> {
-        let (pid, sid) = self.active?;
-        let project = self.projects.iter().find(|p| p.id == pid)?;
-        let session = project.session(sid)?;
+        let key = self.active?;
+        let project = self.projects.iter().find(|p| p.id == key.project)?;
+        let session = project.session(key.worktree, key.session)?;
         Some((project, session))
     }
 
@@ -193,19 +284,20 @@ impl Model {
         self.projects.iter_mut().find(|p| p.id == pid)
     }
 
-    fn select_session(&mut self, pid: ProjectId, sid: SessionId) {
+    fn select_session(&mut self, key: SessionKey) {
         let mut cleared_bell = false;
         let mut cleared_unread = false;
 
-        if let Some(project) = self.project_mut(pid)
-            && let Some(session) = project.session_mut(sid)
+        if let Some(project) = self.project_mut(key.project)
+            && let Some(session) = project.session_mut(key.worktree, key.session)
         {
             cleared_bell = session.clear_bell();
             cleared_unread = session.mark_seen();
         }
 
-        self.active = Some((pid, sid));
-        self.tree.select(TreeId::Session(pid, sid));
+        self.active = Some(key);
+        self.tree
+            .select(TreeId::Session(key.project, key.worktree, key.session));
 
         if cleared_bell || cleared_unread {
             rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
@@ -217,18 +309,22 @@ impl Model {
     }
 
     fn sync_active_from_tree_selection(&mut self) {
-        if let Some(TreeId::Session(pid, sid)) = self.tree.selected().cloned() {
+        if let Some(TreeId::Session(pid, worktree, sid)) = self.tree.selected().cloned() {
             let mut cleared_bell = false;
             let mut cleared_unread = false;
 
             if let Some(project) = self.project_mut(pid)
-                && let Some(session) = project.session_mut(sid)
+                && let Some(session) = project.session_mut(worktree, sid)
             {
                 cleared_bell = session.clear_bell();
                 cleared_unread = session.mark_seen();
             }
 
-            self.active = Some((pid, sid));
+            self.active = Some(SessionKey {
+                project: pid,
+                worktree,
+                session: sid,
+            });
 
             if cleared_bell || cleared_unread {
                 rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
@@ -238,29 +334,33 @@ impl Model {
 
     fn wakeup_for(&self, id: &TreeId) -> Option<Receiver<()>> {
         match id {
-            TreeId::Session(pid, sid) => {
+            TreeId::Session(pid, worktree, sid) => {
                 let project = self.project(*pid)?;
-                let session = project.session(*sid)?;
+                let session = project.session(*worktree, *sid)?;
                 Some(session.wakeup.clone())
             }
-            TreeId::Project(_) => None,
+            TreeId::Project(_) | TreeId::Worktree(_, _) => None,
         }
     }
 
     fn sync_session_state(&mut self, id: &TreeId) -> bool {
-        let TreeId::Session(pid, sid) = id else {
+        let TreeId::Session(pid, worktree, sid) = id else {
             return false;
         };
 
         let is_active = self
             .active
-            .map(|active| active == (*pid, *sid))
+            .map(|active| {
+                active.project == *pid
+                    && active.session == *sid
+                    && active.worktree == *worktree
+            })
             .unwrap_or(false);
 
         let Some(project) = self.project_mut(*pid) else {
             return false;
         };
-        let Some(session) = project.session_mut(*sid) else {
+        let Some(session) = project.session_mut(*worktree, *sid) else {
             return false;
         };
 
@@ -272,26 +372,42 @@ impl Model {
         changed
     }
 
-    fn ensure_project_has_session(
+    fn ensure_container_has_session(
         &mut self,
         project_index: usize,
+        worktree: Option<WorktreeId>,
     ) -> std::io::Result<Option<TreeId>> {
-        if self.projects[project_index].sessions.is_empty() {
-            let project_id = self.projects[project_index].id;
-            let path = self.projects[project_index].path.clone();
+        let (path, number, is_empty) = {
+            let project = &self.projects[project_index];
+            match worktree {
+                None => (
+                    project.path.clone(),
+                    project.next_session_number,
+                    project.sessions.is_empty(),
+                ),
+                Some(wid) => {
+                    let Some(worktree) = project.worktree(wid) else {
+                        return Ok(None);
+                    };
+                    (
+                        worktree.path.clone(),
+                        worktree.next_session_number,
+                        worktree.sessions.is_empty(),
+                    )
+                }
+            }
+        };
 
-            let id = SessionId(self.next_session_id);
-            self.next_session_id += 1;
-            let number = self.projects[project_index].next_session_number;
-            let session = Session::spawn(&path, number, id)?;
-            let tree_id = TreeId::Session(project_id, session.id);
-
-            self.projects[project_index].add_session(session);
-            rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
-            Ok(Some(tree_id))
-        } else {
-            Ok(None)
+        if !is_empty {
+            return Ok(None);
         }
+
+        let session = self.spawn_session(&path, number)?;
+        let tree_id = TreeId::Session(self.projects[project_index].id, worktree, session.id);
+
+        self.projects[project_index].add_session(worktree, session);
+        rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
+        Ok(Some(tree_id))
     }
 
     fn save(&self) {
@@ -311,6 +427,7 @@ enum Msg {
     Tree(TreeMsg<TreeId>),
     Terminal {
         project: ProjectId,
+        worktree: Option<WorktreeId>,
         session: SessionId,
         msg: TerminalMsg,
     },
@@ -318,6 +435,9 @@ enum Msg {
     FocusGained,
     FocusLost,
     OpenNewProject,
+    OpenNewWorktree {
+        project: ProjectId,
+    },
     Modal(ModalMsg),
     NewSession,
 }
@@ -337,6 +457,7 @@ fn clear_status_on_input(model: &mut Model, msg: &Msg) {
             | Msg::Modal(_)
             | Msg::FocusSidebar
             | Msg::OpenNewProject
+            | Msg::OpenNewWorktree { .. }
             | Msg::NewSession
     ) {
         model.status = None;
@@ -353,9 +474,17 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         for project in &model.projects {
             for session in &project.sessions {
                 transitions.push(arm_wakeup(
-                    TreeId::Session(project.id, session.id),
+                    TreeId::Session(project.id, None, session.id),
                     session.wakeup.clone(),
                 ));
+            }
+            for worktree in &project.worktrees {
+                for session in &worktree.sessions {
+                    transitions.push(arm_wakeup(
+                        TreeId::Session(project.id, Some(worktree.id), session.id),
+                        session.wakeup.clone(),
+                    ));
+                }
             }
         }
     }
@@ -363,13 +492,14 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
     match msg {
         Msg::FocusSidebar => {
             if model.focus == Focus::Terminal
-                && let Some((pid, sid)) = model.active
+                && let Some(active) = model.active
             {
                 transitions.push(update(
                     model,
                     Msg::Terminal {
-                        project: pid,
-                        session: sid,
+                        project: active.project,
+                        worktree: active.worktree,
+                        session: active.session,
                         msg: TerminalMsg::FocusLost,
                     },
                 ));
@@ -401,13 +531,14 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
 
             // Fallback: when terminal focused, send to terminal
             if model.focus == Focus::Terminal
-                && let Some((pid, sid)) = model.active
+                && let Some(active) = model.active
                 && let Some((_, session)) = model.active_session()
                 && let Some(msg) =
                     default_terminal_keybindings(key, session.terminal.mode(), move |term_msg| {
                         Msg::Terminal {
-                            project: pid,
-                            session: sid,
+                            project: active.project,
+                            worktree: active.worktree,
+                            session: active.session,
                             msg: term_msg,
                         }
                     })
@@ -423,24 +554,30 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 model.tree.toggle_expanded(&id);
                 model.set_focus(Focus::Sidebar);
             }
-            TreeMsg::Activate(TreeId::Session(pid, sid))
-            | TreeMsg::DoubleClick(TreeId::Session(pid, sid)) => {
-                if let Some((old_pid, old_sid)) = model.active {
+            TreeMsg::Activate(TreeId::Session(pid, worktree, sid))
+            | TreeMsg::DoubleClick(TreeId::Session(pid, worktree, sid)) => {
+                if let Some(active) = model.active {
                     transitions.push(update(
-                        model,
-                        Msg::Terminal {
-                            project: old_pid,
-                            session: old_sid,
-                            msg: TerminalMsg::FocusLost,
-                        },
-                    ));
+                    model,
+                    Msg::Terminal {
+                        project: active.project,
+                        worktree: active.worktree,
+                        session: active.session,
+                        msg: TerminalMsg::FocusLost,
+                    },
+                ));
                 }
-                model.select_session(pid, sid);
+                model.select_session(SessionKey {
+                    project: pid,
+                    worktree,
+                    session: sid,
+                });
                 model.set_focus(Focus::Terminal);
                 transitions.push(update(
                     model,
                     Msg::Terminal {
                         project: pid,
+                        worktree,
                         session: sid,
                         msg: TerminalMsg::FocusGained,
                     },
@@ -451,19 +588,27 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             | TreeMsg::DoubleClick(TreeId::Project(pid)) => {
                 model.tree.toggle_expanded(&TreeId::Project(pid));
             }
+            TreeMsg::Activate(TreeId::Worktree(pid, wid))
+            | TreeMsg::DoubleClick(TreeId::Worktree(pid, wid)) => {
+                model.tree.toggle_expanded(&TreeId::Worktree(pid, wid));
+            }
         },
         Msg::Terminal {
             project,
+            worktree,
             session,
             msg,
         } => {
             if let Some(proj) = model.project_mut(project)
-                && let Some(sess) = proj.session_mut(session)
+                && let Some(sess) = proj.session_mut(worktree, session)
             {
                 sess.update(msg);
                 let wakeup = sess.wakeup.clone();
                 transitions.push(Transition::Continue);
-                transitions.push(arm_wakeup(TreeId::Session(project, session), wakeup));
+                transitions.push(arm_wakeup(
+                    TreeId::Session(project, worktree, session),
+                    wakeup,
+                ));
             }
         }
         Msg::SessionWake(id) => {
@@ -476,13 +621,14 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         }
         Msg::FocusGained => {
             if model.focus == Focus::Terminal
-                && let Some((pid, sid)) = model.active
+                && let Some(active) = model.active
             {
                 return update(
                     model,
                     Msg::Terminal {
-                        project: pid,
-                        session: sid,
+                        project: active.project,
+                        worktree: active.worktree,
+                        session: active.session,
                         msg: TerminalMsg::FocusGained,
                     },
                 );
@@ -490,13 +636,14 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         }
         Msg::FocusLost => {
             if model.focus == Focus::Terminal
-                && let Some((pid, sid)) = model.active
+                && let Some(active) = model.active
             {
                 return update(
                     model,
                     Msg::Terminal {
-                        project: pid,
-                        session: sid,
+                        project: active.project,
+                        worktree: active.worktree,
+                        session: active.session,
                         msg: TerminalMsg::FocusLost,
                     },
                 );
@@ -506,6 +653,14 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             model.modal = Some(ModalState::NewProject {
                 input: InputState::new(),
                 scroll: ScrollState::horizontal(),
+            });
+            model.set_focus(Focus::Sidebar);
+        }
+        Msg::OpenNewWorktree { project } => {
+            model.modal = Some(ModalState::NewWorktree {
+                input: InputState::new(),
+                scroll: ScrollState::horizontal(),
+                project,
             });
             model.set_focus(Focus::Sidebar);
         }
@@ -531,17 +686,30 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                         } else if let Some(project) = model.projects.last()
                             && let Some(session) = project.sessions.first()
                         {
-                            model.select_session(project.id, session.id);
+                            model.select_session(SessionKey {
+                                project: project.id,
+                                worktree: None,
+                                session: session.id,
+                            });
+                        }
+                        model.modal = None;
+                    }
+                    ModalResult::WorktreeSubmitted { project, name } => {
+                        if let Some(tree_id) = model.add_worktree(project, name)
+                            && let Some(receiver) = model.wakeup_for(&tree_id)
+                        {
+                            transitions.push(arm_wakeup(tree_id, receiver));
                         }
                         model.modal = None;
                     }
                     ModalResult::SessionRenamed {
                         project,
+                        worktree,
                         session,
                         name,
                     } => {
                         if let Some(project) = model.project_mut(project)
-                            && let Some(session) = project.session_mut(session)
+                            && let Some(session) = project.session_mut(worktree, session)
                         {
                             session.custom_title = Some(name);
                             session.sync_display_name();
@@ -558,12 +726,13 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             let Some(selected) = model.tree.selected().cloned() else {
                 return Transition::Continue;
             };
-            let project_id = match selected {
-                TreeId::Project(pid) => pid,
-                TreeId::Session(pid, _) => pid,
+            let (project_id, worktree) = match selected {
+                TreeId::Project(pid) => (pid, None),
+                TreeId::Worktree(pid, wid) => (pid, Some(wid)),
+                TreeId::Session(pid, worktree, _) => (pid, worktree),
             };
 
-            create_session(model, project_id, &mut transitions);
+            create_session(model, project_id, worktree, &mut transitions);
         }
     }
 
@@ -589,7 +758,7 @@ fn handle_action(
             model.set_focus(new_focus);
 
             if old_focus != new_focus
-                && let Some((pid, sid)) = model.active
+                && let Some(active) = model.active
             {
                 let msg = match new_focus {
                     Focus::Terminal => TerminalMsg::FocusGained,
@@ -598,8 +767,9 @@ fn handle_action(
                 transitions.push(update(
                     model,
                     Msg::Terminal {
-                        project: pid,
-                        session: sid,
+                        project: active.project,
+                        worktree: active.worktree,
+                        session: active.session,
                         msg,
                     },
                 ));
@@ -614,14 +784,15 @@ fn handle_action(
         }
         Action::FocusTerminal => {
             if model.focus != Focus::Terminal
-                && let Some((pid, sid)) = model.active
+                && let Some(active) = model.active
             {
                 model.set_focus(Focus::Terminal);
                 transitions.push(update(
                     model,
                     Msg::Terminal {
-                        project: pid,
-                        session: sid,
+                        project: active.project,
+                        worktree: active.worktree,
+                        session: active.session,
                         msg: TerminalMsg::FocusGained,
                     },
                 ));
@@ -647,9 +818,10 @@ fn handle_action(
             if let Some(selected) = model.tree.selected().cloned() {
                 let moved = match selected {
                     TreeId::Project(pid) => move_project_up(&mut model.projects, pid),
-                    TreeId::Session(pid, sid) => {
+                    TreeId::Worktree(_, _) => false,
+                    TreeId::Session(pid, worktree, sid) => {
                         if let Some(project) = model.project_mut(pid) {
-                            project.move_session_up(sid)
+                            project.move_session_up(worktree, sid)
                         } else {
                             false
                         }
@@ -666,9 +838,10 @@ fn handle_action(
             if let Some(selected) = model.tree.selected().cloned() {
                 let moved = match selected {
                     TreeId::Project(pid) => move_project_down(&mut model.projects, pid),
-                    TreeId::Session(pid, sid) => {
+                    TreeId::Worktree(_, _) => false,
+                    TreeId::Session(pid, worktree, sid) => {
                         if let Some(project) = model.project_mut(pid) {
-                            project.move_session_down(sid)
+                            project.move_session_down(worktree, sid)
                         } else {
                             false
                         }
@@ -689,27 +862,60 @@ fn handle_action(
                         if let Some(project) = model.project(pid)
                             && let Some(session) = project.sessions.first()
                         {
-                            model.select_session(pid, session.id);
+                            model.select_session(SessionKey {
+                                project: pid,
+                                worktree: None,
+                                session: session.id,
+                            });
+                        } else if let Some(project) = model.project(pid)
+                            && let Some(worktree) = project.worktrees.first()
+                            && let Some(session) = worktree.sessions.first()
+                        {
+                            model.select_session(SessionKey {
+                                project: pid,
+                                worktree: Some(worktree.id),
+                                session: session.id,
+                            });
                         }
                         Transition::Continue
                     }
-                    TreeId::Session(pid, sid) => {
-                        if let Some((old_pid, old_sid)) = model.active {
+                    TreeId::Worktree(pid, wid) => {
+                        model.tree.toggle_expanded(&selected);
+                        if let Some(project) = model.project(pid)
+                            && let Some(worktree) = project.worktree(wid)
+                            && let Some(session) = worktree.sessions.first()
+                        {
+                            model.select_session(SessionKey {
+                                project: pid,
+                                worktree: Some(wid),
+                                session: session.id,
+                            });
+                        }
+                        Transition::Continue
+                    }
+                    TreeId::Session(pid, worktree, sid) => {
+                        if let Some(active) = model.active {
                             transitions.push(update(
                                 model,
                                 Msg::Terminal {
-                                    project: old_pid,
-                                    session: old_sid,
+                                    project: active.project,
+                                    worktree: active.worktree,
+                                    session: active.session,
                                     msg: TerminalMsg::FocusLost,
                                 },
                             ));
                         }
-                        model.select_session(pid, sid);
+                        model.select_session(SessionKey {
+                            project: pid,
+                            worktree,
+                            session: sid,
+                        });
                         model.set_focus(Focus::Terminal);
                         transitions.push(update(
                             model,
                             Msg::Terminal {
                                 project: pid,
+                                worktree,
                                 session: sid,
                                 msg: TerminalMsg::FocusGained,
                             },
@@ -722,27 +928,39 @@ fn handle_action(
             }
         }
         Action::NewProject => update(model, Msg::OpenNewProject),
+        Action::NewWorktree => {
+            let Some(selected) = model.tree.selected().cloned() else {
+                model.status = Some(StatusMessage::error("Select a project or session first"));
+                return Transition::Continue;
+            };
+            let project_id = match selected {
+                TreeId::Project(pid) => pid,
+                TreeId::Worktree(pid, _) => pid,
+                TreeId::Session(pid, _, _) => pid,
+            };
+            update(model, Msg::OpenNewWorktree { project: project_id })
+        }
         Action::NewSession => update(model, Msg::NewSession),
         Action::DeleteSelected => {
             delete_selected(model);
             Transition::Continue
         }
         Action::RenameSession => {
-            if let Some(TreeId::Session(pid, sid)) = model.tree.selected().cloned() {
-                if let Some(session_name) = model
-                    .project(pid)
-                    .and_then(|project| project.session(sid))
-                    .map(|session| {
+            if let Some(TreeId::Session(pid, worktree, sid)) = model.tree.selected().cloned() {
+                let session_name = model.project(pid).and_then(|project| {
+                    project.session(worktree, sid).map(|session| {
                         session
                             .custom_title
                             .clone()
                             .or_else(|| session.title.clone())
                             .unwrap_or_else(|| format!("session{}", session.number))
                     })
-                {
+                });
+                if let Some(session_name) = session_name {
                     model.modal = Some(ModalState::RenameSession {
                         input: InputState::with_value(session_name),
                         project: pid,
+                        worktree,
                         session: sid,
                         scroll: ScrollState::horizontal(),
                     });
@@ -755,30 +973,39 @@ fn handle_action(
             Transition::Continue
         }
         Action::SessionByIndex(target_index) => {
-            if let Some((project_id, _)) = model.active {
-                let target_session = model
-                    .project(project_id)
-                    .and_then(|project| project.sessions.get(target_index - 1))
-                    .map(|session| session.id);
+            if let Some(active) = model.active {
+                let target_session = model.project(active.project).and_then(|project| match active.worktree {
+                    None => project.sessions.get(target_index - 1),
+                    Some(wid) => project
+                        .worktree(wid)
+                        .and_then(|wt| wt.sessions.get(target_index - 1)),
+                });
+                let target_session_id = target_session.map(|session| session.id);
 
-                if let Some(target_sid) = target_session {
-                    if let Some((old_pid, old_sid)) = model.active {
+                if let Some(target_session_id) = target_session_id {
+                    if let Some(active) = model.active {
                         transitions.push(update(
                             model,
                             Msg::Terminal {
-                                project: old_pid,
-                                session: old_sid,
+                                project: active.project,
+                                worktree: active.worktree,
+                                session: active.session,
                                 msg: TerminalMsg::FocusLost,
                             },
                         ));
                     }
-                    model.select_session(project_id, target_sid);
+                    model.select_session(SessionKey {
+                        project: active.project,
+                        worktree: active.worktree,
+                        session: target_session_id,
+                    });
                     if model.focus == Focus::Terminal {
                         transitions.push(update(
                             model,
                             Msg::Terminal {
-                                project: project_id,
-                                session: target_sid,
+                                project: active.project,
+                                worktree: active.worktree,
+                                session: target_session_id,
                                 msg: TerminalMsg::FocusGained,
                             },
                         ));
@@ -798,24 +1025,26 @@ fn handle_action(
                 _ => None,
             };
 
-            if let Some((pid, sid)) = target {
-                if let Some((old_pid, old_sid)) = model.active {
+            if let Some(target) = target {
+                if let Some(active) = model.active {
                     transitions.push(update(
                         model,
                         Msg::Terminal {
-                            project: old_pid,
-                            session: old_sid,
+                            project: active.project,
+                            worktree: active.worktree,
+                            session: active.session,
                             msg: TerminalMsg::FocusLost,
                         },
                     ));
                 }
-                model.select_session(pid, sid);
+                model.select_session(target);
                 if model.focus == Focus::Terminal {
                     transitions.push(update(
                         model,
                         Msg::Terminal {
-                            project: pid,
-                            session: sid,
+                            project: target.project,
+                            worktree: target.worktree,
+                            session: target.session,
                             msg: TerminalMsg::FocusGained,
                         },
                     ));
@@ -835,19 +1064,26 @@ fn handle_action(
 fn create_session(
     model: &mut Model,
     project_id: ProjectId,
+    worktree: Option<WorktreeId>,
     transitions: &mut Vec<Transition<Msg>>,
 ) {
     let Some(project_index) = model.projects.iter().position(|p| p.id == project_id) else {
         return;
     };
 
-    let path = model.projects[project_index].path.clone();
-    let number = model.projects[project_index].next_session_number;
-
-    let id = SessionId(model.next_session_id);
-    model.next_session_id += 1;
-
-    let session = match Session::spawn(&path, number, id) {
+    let (path, number) = {
+        let project = &model.projects[project_index];
+        match worktree {
+            None => (project.path.clone(), project.next_session_number),
+            Some(wid) => {
+                let Some(worktree) = project.worktree(wid) else {
+                    return;
+                };
+                (worktree.path.clone(), worktree.next_session_number)
+            }
+        }
+    };
+    let session = match model.spawn_session(&path, number) {
         Ok(session) => session,
         Err(err) => {
             warn!(?err, "failed to create new session");
@@ -859,14 +1095,36 @@ fn create_session(
     };
 
     let sid = session.id;
-    model.projects[project_index].add_session(session);
+    model.projects[project_index].add_session(worktree, session);
 
     rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
-    model.select_session(project_id, sid);
+    model.select_session(SessionKey {
+        project: project_id,
+        worktree,
+        session: sid,
+    });
     model.set_focus(Focus::Terminal);
 
-    if let Some(receiver) = model.wakeup_for(&TreeId::Session(project_id, sid)) {
-        transitions.push(arm_wakeup(TreeId::Session(project_id, sid), receiver));
+    if let Some(receiver) = model.wakeup_for(&TreeId::Session(project_id, worktree, sid)) {
+        transitions.push(arm_wakeup(
+            TreeId::Session(project_id, worktree, sid),
+            receiver,
+        ));
+    }
+}
+
+fn copy_optional_files(from_dir: &std::path::Path, to_dir: &std::path::Path, status: &mut Option<StatusMessage>) {
+    for name in [".env", "config.yml"] {
+        let source = from_dir.join(name);
+        if !source.exists() {
+            continue;
+        }
+        let target = to_dir.join(name);
+        if let Err(err) = std::fs::copy(&source, &target) {
+            *status = Some(StatusMessage::error(format!(
+                "Failed to copy {name}: {err}"
+            )));
+        }
     }
 }
 
@@ -884,22 +1142,66 @@ fn delete_selected(model: &mut Model) {
             model.set_focus(Focus::Sidebar);
             model.save();
         }
-        TreeId::Session(pid, sid) => {
+        TreeId::Worktree(pid, wid) => {
+            let Some(project_idx) = model.projects.iter().position(|p| p.id == pid) else {
+                return;
+            };
+            let worktree_path = model.projects[project_idx]
+                .worktree(wid)
+                .map(|wt| wt.path.clone());
+            let Some(worktree_path) = worktree_path else {
+                model.status = Some(StatusMessage::error("Worktree no longer exists"));
+                return;
+            };
+            let repo_path = model.projects[project_idx].path.clone();
+            if let Err(err) = git::remove_worktree(&repo_path, &worktree_path) {
+                model.status = Some(StatusMessage::error(format!(
+                    "Failed to remove worktree: {err}"
+                )));
+                return;
+            }
+            model.projects[project_idx].remove_worktree(wid);
+            rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+            model.set_focus(Focus::Sidebar);
+        }
+        TreeId::Session(pid, worktree, sid) => {
             if let Some(project_idx) = model.projects.iter().position(|p| p.id == pid) {
                 let became_empty = {
                     let project = &mut model.projects[project_idx];
-                    project.remove_session(sid);
-                    project.sessions.is_empty()
+                    project.remove_session(worktree, sid);
+                    match worktree {
+                        None => project.sessions.is_empty(),
+                        Some(wid) => project
+                            .worktree(wid)
+                            .map(|wt| wt.sessions.is_empty())
+                            .unwrap_or(true),
+                    }
                 };
 
                 if became_empty {
-                    if let Ok(Some(TreeId::Session(new_pid, new_sid))) =
-                        model.ensure_project_has_session(project_idx)
+                    if let Ok(Some(TreeId::Session(new_pid, new_worktree, new_sid))) =
+                        model.ensure_container_has_session(project_idx, worktree)
                     {
-                        model.select_session(new_pid, new_sid);
+                        model.select_session(SessionKey {
+                            project: new_pid,
+                            worktree: new_worktree,
+                            session: new_sid,
+                        });
                     }
-                } else if let Some(next_session) = model.projects[project_idx].sessions.first() {
-                    model.select_session(pid, next_session.id);
+                } else {
+                    let next_session = match worktree {
+                        None => model.projects[project_idx].sessions.first(),
+                        Some(wid) => model.projects[project_idx]
+                            .worktree(wid)
+                            .and_then(|wt| wt.sessions.first()),
+                    };
+                    if let Some(next_session) = next_session {
+                        model.select_session(SessionKey {
+                            project: pid,
+                            worktree,
+                            session: next_session.id,
+                        });
+                    }
                 }
                 rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
                 model.set_focus(Focus::Sidebar);
@@ -910,6 +1212,7 @@ fn delete_selected(model: &mut Model) {
 
 fn terminal_pane(model: &Model) -> Node<Msg> {
     if let Some((project, session)) = model.active_session() {
+        let worktree = model.active.map(|active| active.worktree).unwrap_or(None);
         let pid = project.id;
         let sid = session.id;
         terminal(
@@ -918,6 +1221,7 @@ fn terminal_pane(model: &Model) -> Node<Msg> {
             model.focus == Focus::Terminal,
             move |msg| Msg::Terminal {
                 project: pid,
+                worktree,
                 session: sid,
                 msg,
             },
@@ -1014,7 +1318,9 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
-        let TreeId::Session(pid, sid) = model.tree.selected().cloned().expect("selected") else {
+        let TreeId::Session(pid, worktree, sid) =
+            model.tree.selected().cloned().expect("selected")
+        else {
             panic!("expected a session selected");
         };
 
@@ -1025,7 +1331,14 @@ mod tests {
         let new_session = &project.sessions[0];
         assert_ne!(new_session.id, sid);
         assert_eq!(new_session.number, 2);
-        assert_eq!(model.active, Some((pid, new_session.id)));
+        assert_eq!(
+            model.active,
+            Some(SessionKey {
+                project: pid,
+                worktree,
+                session: new_session.id
+            })
+        );
     }
 
     #[test]
@@ -1043,15 +1356,23 @@ mod tests {
             &mut model,
             Msg::Tree(TreeMsg::Activate(TreeId::Session(
                 project_id,
+                None,
                 second_session,
             ))),
         );
 
         assert_eq!(model.focus, Focus::Terminal);
-        assert_eq!(model.active, Some((project_id, second_session)));
+        assert_eq!(
+            model.active,
+            Some(SessionKey {
+                project: project_id,
+                worktree: None,
+                session: second_session
+            })
+        );
         assert_eq!(
             model.tree.selected(),
-            Some(&TreeId::Session(project_id, second_session))
+            Some(&TreeId::Session(project_id, None, second_session))
         );
     }
 
@@ -1066,7 +1387,11 @@ mod tests {
         let first_session = model.projects[0].sessions[0].id;
         let second_session = model.projects[0].sessions[1].id;
 
-        model.select_session(project_id, first_session);
+        model.select_session(SessionKey {
+            project: project_id,
+            worktree: None,
+            session: first_session,
+        });
         model.focus = Focus::Terminal;
 
         let mut key = Key::new(KeyCode::Down);
@@ -1074,10 +1399,17 @@ mod tests {
         update(&mut model, Msg::Key(key));
 
         assert_eq!(model.focus, Focus::Terminal);
-        assert_eq!(model.active, Some((project_id, second_session)));
+        assert_eq!(
+            model.active,
+            Some(SessionKey {
+                project: project_id,
+                worktree: None,
+                session: second_session
+            })
+        );
         assert_eq!(
             model.tree.selected(),
-            Some(&TreeId::Session(project_id, second_session))
+            Some(&TreeId::Session(project_id, None, second_session))
         );
     }
 
@@ -1092,7 +1424,11 @@ mod tests {
         let first_session = model.projects[0].sessions[0].id;
         let second_session = model.projects[0].sessions[1].id;
 
-        model.select_session(project_id, second_session);
+        model.select_session(SessionKey {
+            project: project_id,
+            worktree: None,
+            session: second_session,
+        });
         model.focus = Focus::Terminal;
 
         let mut key = Key::new(KeyCode::Up);
@@ -1100,10 +1436,17 @@ mod tests {
         update(&mut model, Msg::Key(key));
 
         assert_eq!(model.focus, Focus::Terminal);
-        assert_eq!(model.active, Some((project_id, first_session)));
+        assert_eq!(
+            model.active,
+            Some(SessionKey {
+                project: project_id,
+                worktree: None,
+                session: first_session
+            })
+        );
         assert_eq!(
             model.tree.selected(),
-            Some(&TreeId::Session(project_id, first_session))
+            Some(&TreeId::Session(project_id, None, first_session))
         );
     }
 
@@ -1118,7 +1461,11 @@ mod tests {
         let first_session = model.projects[0].sessions[0].id;
         let second_session = model.projects[0].sessions[1].id;
 
-        model.select_session(project_id, second_session);
+        model.select_session(SessionKey {
+            project: project_id,
+            worktree: None,
+            session: second_session,
+        });
         model.focus = Focus::Terminal;
 
         let mut key = Key::new(KeyCode::Char('1'));
@@ -1126,10 +1473,17 @@ mod tests {
         update(&mut model, Msg::Key(key));
 
         assert_eq!(model.focus, Focus::Terminal);
-        assert_eq!(model.active, Some((project_id, first_session)));
+        assert_eq!(
+            model.active,
+            Some(SessionKey {
+                project: project_id,
+                worktree: None,
+                session: first_session
+            })
+        );
         assert_eq!(
             model.tree.selected(),
-            Some(&TreeId::Session(project_id, first_session))
+            Some(&TreeId::Session(project_id, None, first_session))
         );
     }
 
@@ -1142,7 +1496,11 @@ mod tests {
         let project_id = model.projects[0].id;
         let active_session = model.projects[0].sessions[0].id;
 
-        model.select_session(project_id, active_session);
+        model.select_session(SessionKey {
+            project: project_id,
+            worktree: None,
+            session: active_session,
+        });
         model.focus = Focus::Terminal;
 
         let mut key = Key::new(KeyCode::Char('3'));
@@ -1150,10 +1508,17 @@ mod tests {
         update(&mut model, Msg::Key(key));
 
         assert_eq!(model.focus, Focus::Terminal);
-        assert_eq!(model.active, Some((project_id, active_session)));
+        assert_eq!(
+            model.active,
+            Some(SessionKey {
+                project: project_id,
+                worktree: None,
+                session: active_session
+            })
+        );
         assert_eq!(
             model.tree.selected(),
-            Some(&TreeId::Session(project_id, active_session))
+            Some(&TreeId::Session(project_id, None, active_session))
         );
     }
 
@@ -1162,10 +1527,15 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
-        let (project_id, session_id, initial_name) = {
+        let (project_id, worktree_id, session_id, initial_name) = {
             let (project, session) = model.active_session().expect("active session");
+            let worktree = model
+                .active
+                .map(|active| active.worktree)
+                .unwrap_or(None);
             (
                 project.id,
+                worktree,
                 session.id,
                 session
                     .custom_title
@@ -1179,17 +1549,19 @@ mod tests {
         key.ctrl = true;
         update(&mut model, Msg::Key(key));
 
-        let (target_project, target_session) = match model.modal.as_ref() {
+        let (target_project, target_worktree, target_session) = match model.modal.as_ref() {
             Some(ModalState::RenameSession {
                 project,
+                worktree,
                 session,
                 input,
                 ..
             }) => {
                 assert_eq!(*project, project_id);
+                assert_eq!(*worktree, worktree_id);
                 assert_eq!(*session, session_id);
                 assert_eq!(input.value(), initial_name);
-                (*project, *session)
+                (*project, *worktree, *session)
             }
             _ => panic!("expected rename modal to open"),
         };
@@ -1202,7 +1574,7 @@ mod tests {
 
         let session = model
             .project(target_project)
-            .and_then(|project| project.session(target_session))
+            .and_then(|project| project.session(target_worktree, target_session))
             .expect("session still present after rename");
         assert_eq!(session.display_name(), "custom session");
         assert!(model.modal.is_none());
@@ -1213,13 +1585,14 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
-        let TreeId::Session(pid, sid) = model.tree.selected().cloned().expect("selected session")
+        let TreeId::Session(pid, worktree, sid) =
+            model.tree.selected().cloned().expect("selected session")
         else {
             panic!("expected session selected");
         };
 
         if let Some(project) = model.project_mut(pid) {
-            if let Some(session) = project.session_mut(sid) {
+            if let Some(session) = project.session_mut(worktree, sid) {
                 session.bell = true;
             }
         }
@@ -1230,7 +1603,7 @@ mod tests {
             .tree
             .visible()
             .iter()
-            .find(|node| matches!(node.id, TreeId::Session(_, _)))
+            .find(|node| matches!(node.id, TreeId::Session(_, _, _)))
             .expect("session visible");
 
         let label = visible_session
@@ -1250,25 +1623,26 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
-        let TreeId::Session(pid, sid) = model.tree.selected().cloned().expect("selected session")
+        let TreeId::Session(pid, worktree, sid) =
+            model.tree.selected().cloned().expect("selected session")
         else {
             panic!("expected session selected");
         };
 
         if let Some(project) = model.project_mut(pid) {
-            if let Some(session) = project.session_mut(sid) {
+            if let Some(session) = project.session_mut(worktree, sid) {
                 session.bell = true;
             }
         }
 
-        model.sync_session_state(&TreeId::Session(pid, sid));
+        model.sync_session_state(&TreeId::Session(pid, worktree, sid));
         rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
 
         let visible_session = model
             .tree
             .visible()
             .iter()
-            .find(|node| matches!(node.id, TreeId::Session(_, _)))
+            .find(|node| matches!(node.id, TreeId::Session(_, _, _)))
             .expect("session visible");
 
         let label = visible_session
@@ -1294,7 +1668,11 @@ mod tests {
         let first_session = model.projects[0].sessions[0].id;
         let second_session = model.projects[0].sessions[1].id;
 
-        model.select_session(project_id, first_session);
+        model.select_session(SessionKey {
+            project: project_id,
+            worktree: None,
+            session: first_session,
+        });
         model.focus = Focus::Terminal;
 
         if let Some(session) = model
@@ -1307,7 +1685,7 @@ mod tests {
 
         update(
             &mut model,
-            Msg::SessionWake(TreeId::Session(project_id, second_session)),
+            Msg::SessionWake(TreeId::Session(project_id, None, second_session)),
         );
 
         let target = model
@@ -1317,7 +1695,8 @@ mod tests {
             .find(|node| {
                 matches!(
                     node.id,
-                    TreeId::Session(pid, sid) if pid == project_id && sid == second_session
+                    TreeId::Session(pid, worktree, sid)
+                        if pid == project_id && sid == second_session && worktree.is_none()
                 )
             })
             .expect("second session visible");
@@ -1350,7 +1729,11 @@ mod tests {
         let first_session = model.projects[0].sessions[0].id;
         let second_session = model.projects[0].sessions[1].id;
 
-        model.select_session(project_id, first_session);
+        model.select_session(SessionKey {
+            project: project_id,
+            worktree: None,
+            session: first_session,
+        });
 
         if let Some(session) = model
             .projects
@@ -1362,10 +1745,14 @@ mod tests {
 
         update(
             &mut model,
-            Msg::SessionWake(TreeId::Session(project_id, second_session)),
+            Msg::SessionWake(TreeId::Session(project_id, None, second_session)),
         );
 
-        model.select_session(project_id, second_session);
+        model.select_session(SessionKey {
+            project: project_id,
+            worktree: None,
+            session: second_session,
+        });
 
         let target = model
             .tree
@@ -1374,7 +1761,8 @@ mod tests {
             .find(|node| {
                 matches!(
                     node.id,
-                    TreeId::Session(pid, sid) if pid == project_id && sid == second_session
+                    TreeId::Session(pid, worktree, sid)
+                        if pid == project_id && sid == second_session && worktree.is_none()
                 )
             })
             .expect("second session visible");

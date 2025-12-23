@@ -2,7 +2,7 @@
 
 use std::rc::Rc;
 
-use super::project::ProjectId;
+use super::project::{ProjectId, WorktreeId};
 use super::session::SessionId;
 use chatui::ScrollMsg;
 use chatui::event::{Key, KeyCode};
@@ -16,10 +16,16 @@ pub enum ModalState {
         input: InputState,
         scroll: scroll::ScrollState,
     },
+    NewWorktree {
+        input: InputState,
+        scroll: scroll::ScrollState,
+        project: ProjectId,
+    },
     RenameSession {
         input: InputState,
         scroll: scroll::ScrollState,
         project: ProjectId,
+        worktree: Option<WorktreeId>,
         session: SessionId,
     },
 }
@@ -41,9 +47,15 @@ pub enum ModalResult {
     Cancelled,
     /// New project path was submitted.
     ProjectSubmitted(String),
+    /// New worktree name was submitted.
+    WorktreeSubmitted {
+        project: ProjectId,
+        name: String,
+    },
     /// Session rename was submitted.
     SessionRenamed {
         project: ProjectId,
+        worktree: Option<WorktreeId>,
         session: SessionId,
         name: String,
     },
@@ -78,9 +90,22 @@ pub fn modal_update(state: &mut ModalState, msg: ModalMsg) -> ModalResult {
                     ModalResult::ProjectSubmitted(trimmed.to_string())
                 }
             }
+            ModalState::NewWorktree { input, project, .. } => {
+                let value = input.value();
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    ModalResult::Cancelled
+                } else {
+                    ModalResult::WorktreeSubmitted {
+                        project: *project,
+                        name: trimmed.to_string(),
+                    }
+                }
+            }
             ModalState::RenameSession {
                 input,
                 project,
+                worktree,
                 session,
                 ..
             } => {
@@ -91,6 +116,7 @@ pub fn modal_update(state: &mut ModalState, msg: ModalMsg) -> ModalResult {
                 } else {
                     ModalResult::SessionRenamed {
                         project: *project,
+                        worktree: *worktree,
                         session: *session,
                         name: trimmed.to_string(),
                     }
@@ -98,13 +124,17 @@ pub fn modal_update(state: &mut ModalState, msg: ModalMsg) -> ModalResult {
             }
         },
         ModalMsg::Input(input_msg) => match state {
-            ModalState::NewProject { input, .. } | ModalState::RenameSession { input, .. } => {
+            ModalState::NewProject { input, .. }
+            | ModalState::NewWorktree { input, .. }
+            | ModalState::RenameSession { input, .. } => {
                 input.update(input_msg);
                 ModalResult::Continue
             }
         },
         ModalMsg::Scroll(input_msg) => match state {
-            ModalState::NewProject { scroll, .. } | ModalState::RenameSession { scroll, .. } => {
+            ModalState::NewProject { scroll, .. }
+            | ModalState::NewWorktree { scroll, .. }
+            | ModalState::RenameSession { scroll, .. } => {
                 scroll.update(input_msg);
                 ModalResult::Continue
             }
@@ -119,6 +149,7 @@ pub fn modal_view<Msg: Clone + 'static>(
 ) -> Node<Msg> {
     let (title, input_state, scroll) = match state {
         ModalState::NewProject { input, scroll } => ("Add project", input, scroll),
+        ModalState::NewWorktree { input, scroll, .. } => ("Add worktree", input, scroll),
         ModalState::RenameSession { input, scroll, .. } => ("Rename session", input, scroll),
     };
     let wrap_input = Rc::new(wrap_input);

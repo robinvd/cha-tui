@@ -25,6 +25,7 @@ pub enum Action {
     MoveItemDown,
     ActivateSelected,
     NewProject,
+    NewWorktree,
     NewSession,
     DeleteSelected,
     RenameSession,
@@ -421,6 +422,13 @@ pub static DEFAULT_BINDINGS: &[Binding] = &[
     },
     Binding {
         scope: Scope::Sidebar,
+        chord: KeyChord::new(KeyCode::Char('w')),
+        action: Action::NewWorktree,
+        description: "new worktree",
+        show_in_status: true,
+    },
+    Binding {
+        scope: Scope::Sidebar,
         chord: KeyChord::new(KeyCode::Char('n')),
         action: Action::NewSession,
         description: "new session",
@@ -535,10 +543,11 @@ impl Default for Keymap {
     }
 }
 
-const SIDEBAR_ACTIONS: [Action; 9] = [
+const SIDEBAR_ACTIONS: [Action; 10] = [
     Action::ToggleFocus,
     Action::Quit,
     Action::NewProject,
+    Action::NewWorktree,
     Action::NewSession,
     Action::RenameSession,
     Action::DeleteSelected,

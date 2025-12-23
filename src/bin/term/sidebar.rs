@@ -7,14 +7,15 @@ use chatui::{
 };
 use taffy::Dimension;
 
-use super::project::{Project, ProjectId};
+use super::project::{Project, ProjectId, SessionKey, WorktreeId};
 use super::session::SessionId;
 
 /// Identifier for tree nodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TreeId {
     Project(ProjectId),
-    Session(ProjectId, SessionId),
+    Worktree(ProjectId, WorktreeId),
+    Session(ProjectId, Option<WorktreeId>, SessionId),
 }
 
 /// Style configuration for the tree.
@@ -29,13 +30,13 @@ pub fn tree_style() -> TreeStyle {
 pub fn rebuild_tree(
     projects: &[Project],
     tree: &mut TreeState<TreeId>,
-    active: &mut Option<(ProjectId, SessionId)>,
+    active: &mut Option<SessionKey>,
 ) {
     *active = None;
     let prev_selected = tree
         .selected()
         .cloned()
-        .or_else(|| active.map(|(pid, sid)| TreeId::Session(pid, sid)));
+        .or_else(|| active.map(|key| TreeId::Session(key.project, key.worktree, key.session)));
 
     let selection_style = Style::bold()
         .with_bg(Color::PaletteFg)
@@ -43,23 +44,52 @@ pub fn rebuild_tree(
 
     let mut items = Vec::new();
     for project in projects {
-        let children = project
-            .sessions
-            .iter()
-            .map(|session| {
-                let row_style = Style::default();
+        let mut children = Vec::new();
 
-                let mut label_spans = vec![TextSpan::new(session.display_name(), Style::default())];
-                if session.has_unread_output && !session.bell {
-                    let dot_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
-                    label_spans.push(TextSpan::new(" •", dot_style));
-                }
+        for session in &project.sessions {
+            let row_style = Style::default();
 
-                TreeNode::leaf(TreeId::Session(project.id, session.id), label_spans)
+            let mut label_spans = vec![TextSpan::new(session.display_name(), Style::default())];
+            if session.has_unread_output && !session.bell {
+                let dot_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
+                label_spans.push(TextSpan::new(" •", dot_style));
+            }
+
+            children.push(
+                TreeNode::leaf(TreeId::Session(project.id, None, session.id), label_spans)
+                    .with_row_style(row_style)
+                    .with_selected_row_style(selection_style),
+            );
+        }
+
+        for worktree in &project.worktrees {
+            let wt_children = worktree
+                .sessions
+                .iter()
+                .map(|session| {
+                    let row_style = Style::default();
+                    let mut label_spans =
+                        vec![TextSpan::new(session.display_name(), Style::default())];
+                    if session.has_unread_output && !session.bell {
+                        let dot_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
+                        label_spans.push(TextSpan::new(" •", dot_style));
+                    }
+
+                    TreeNode::leaf(
+                        TreeId::Session(project.id, Some(worktree.id), session.id),
+                        label_spans,
+                    )
                     .with_row_style(row_style)
                     .with_selected_row_style(selection_style)
-            })
-            .collect::<Vec<_>>();
+                })
+                .collect::<Vec<_>>();
+
+            let label = vec![TextSpan::new(worktree.name.clone(), Style::default())];
+            children.push(
+                TreeNode::branch(TreeId::Worktree(project.id, worktree.id), label, wt_children)
+                    .with_selected_row_style(selection_style),
+            );
+        }
 
         let label = vec![TextSpan::new(project.name.clone(), Style::default())];
 
@@ -81,39 +111,67 @@ pub fn rebuild_tree(
     if tree.selected().is_none()
         && let Some(first) = first_session_id(projects)
     {
-        tree.select(TreeId::Session(first.0, first.1));
+        tree.select(TreeId::Session(first.project, first.worktree, first.session));
     }
 
-    if let Some(TreeId::Session(pid, sid)) = tree.selected().cloned() {
-        *active = Some((pid, sid));
+    if let Some(TreeId::Session(pid, worktree, sid)) = tree.selected().cloned() {
+        *active = Some(SessionKey {
+            project: pid,
+            worktree,
+            session: sid,
+        });
     }
 }
 
 /// Get the first session ID from projects.
-pub fn first_session_id(projects: &[Project]) -> Option<(ProjectId, SessionId)> {
-    projects
-        .first()
-        .and_then(|p| p.sessions.first().map(|s| (p.id, s.id)))
+pub fn first_session_id(projects: &[Project]) -> Option<SessionKey> {
+    for project in projects {
+        if let Some(session) = project.sessions.first() {
+            return Some(SessionKey {
+                project: project.id,
+                worktree: None,
+                session: session.id,
+            });
+        }
+        for worktree in &project.worktrees {
+            if let Some(session) = worktree.sessions.first() {
+                return Some(SessionKey {
+                    project: project.id,
+                    worktree: Some(worktree.id),
+                    session: session.id,
+                });
+            }
+        }
+    }
+    None
 }
 
 /// Get the next session in the tree order.
 pub fn next_session(
     tree: &TreeState<TreeId>,
-    active: Option<(ProjectId, SessionId)>,
-) -> Option<(ProjectId, SessionId)> {
-    let (active_pid, active_sid) = active?;
+    active: Option<SessionKey>,
+) -> Option<SessionKey> {
+    let active = active?;
     let mut seen_active = false;
     let mut first_session = None;
 
     for node in tree.visible() {
-        if let TreeId::Session(pid, sid) = node.id {
+        if let TreeId::Session(pid, worktree, sid) = node.id {
             if first_session.is_none() {
-                first_session = Some((pid, sid));
+                first_session = Some(SessionKey {
+                    project: pid,
+                    worktree,
+                    session: sid,
+                });
             }
             if seen_active {
-                return Some((pid, sid));
+                return Some(SessionKey {
+                    project: pid,
+                    worktree,
+                    session: sid,
+                });
             }
-            if pid == active_pid && sid == active_sid {
+            if pid == active.project && sid == active.session && worktree == active.worktree {
                 seen_active = true;
             }
         }
@@ -125,26 +183,38 @@ pub fn next_session(
 /// Get the previous session in the tree order.
 pub fn prev_session(
     tree: &TreeState<TreeId>,
-    active: Option<(ProjectId, SessionId)>,
-) -> Option<(ProjectId, SessionId)> {
-    let (active_pid, active_sid) = active?;
+    active: Option<SessionKey>,
+) -> Option<SessionKey> {
+    let active = active?;
     let mut previous = None;
 
     for node in tree.visible() {
-        if let TreeId::Session(pid, sid) = node.id {
-            if pid == active_pid && sid == active_sid && previous.is_none() {
+        if let TreeId::Session(pid, worktree, sid) = node.id {
+            if pid == active.project
+                && sid == active.session
+                && worktree == active.worktree
+                && previous.is_none()
+            {
                 let mut last_session = None;
                 for n in tree.visible() {
-                    if let TreeId::Session(p, s) = n.id {
-                        last_session = Some((p, s));
+                    if let TreeId::Session(p, w, s) = n.id {
+                        last_session = Some(SessionKey {
+                            project: p,
+                            worktree: w,
+                            session: s,
+                        });
                     }
                 }
                 return last_session;
             }
-            if pid == active_pid && sid == active_sid {
+            if pid == active.project && sid == active.session && worktree == active.worktree {
                 break;
             }
-            previous = Some((pid, sid));
+            previous = Some(SessionKey {
+                project: pid,
+                worktree,
+                session: sid,
+            });
         }
     }
 
