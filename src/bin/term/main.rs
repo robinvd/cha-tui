@@ -2,6 +2,7 @@
 
 mod focus;
 mod git;
+mod jj;
 mod keymap;
 mod modal;
 mod persistence;
@@ -9,6 +10,7 @@ mod project;
 mod session;
 mod sidebar;
 mod status;
+mod vcs;
 
 use std::io;
 use std::path::PathBuf;
@@ -37,6 +39,7 @@ use sidebar::{
     section_style, sidebar_view,
 };
 use status::{StatusMessage, status_bar_view};
+use vcs::VcsKind;
 
 #[cfg(test)]
 static TEST_MODEL_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -198,7 +201,8 @@ impl Model {
     }
 
     fn load_worktrees(&mut self, project: &mut Project) {
-        let worktrees = match git::list_worktrees(&project.path) {
+        let vcs = vcs::detect(&project.path);
+        let worktrees = match vcs::list_worktrees(&project.path, vcs) {
             Ok(worktrees) => worktrees,
             Err(err) => {
                 warn!(?err, "failed to load worktrees");
@@ -219,7 +223,12 @@ impl Model {
         }
     }
 
-    fn add_worktree(&mut self, project_id: ProjectId, name: String) -> Option<TreeId> {
+    fn add_worktree(
+        &mut self,
+        project_id: ProjectId,
+        name: String,
+        vcs: VcsKind,
+    ) -> Option<TreeId> {
         let project_index = self.projects.iter().position(|p| p.id == project_id)?;
         if self.projects[project_index].worktree_by_name(&name).is_some() {
             self.status = Some(StatusMessage::error("Worktree name already exists"));
@@ -227,7 +236,7 @@ impl Model {
         }
 
         let repo_path = self.projects[project_index].path.clone();
-        let path = match git::add_worktree(&repo_path, &name) {
+        let path = match vcs::add_worktree(&repo_path, &name, vcs) {
             Ok(path) => path,
             Err(err) => {
                 self.status = Some(StatusMessage::error(format!(
@@ -657,10 +666,15 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             model.set_focus(Focus::Sidebar);
         }
         Msg::OpenNewWorktree { project } => {
+            let vcs = model
+                .project(project)
+                .map(|project| vcs::detect(&project.path))
+                .unwrap_or(VcsKind::Git);
             model.modal = Some(ModalState::NewWorktree {
                 input: InputState::new(),
                 scroll: ScrollState::horizontal(),
                 project,
+                vcs,
             });
             model.set_focus(Focus::Sidebar);
         }
@@ -694,8 +708,8 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                         }
                         model.modal = None;
                     }
-                    ModalResult::WorktreeSubmitted { project, name } => {
-                        if let Some(tree_id) = model.add_worktree(project, name)
+                    ModalResult::WorktreeSubmitted { project, name, vcs } => {
+                        if let Some(tree_id) = model.add_worktree(project, name, vcs)
                             && let Some(receiver) = model.wakeup_for(&tree_id)
                         {
                             transitions.push(arm_wakeup(tree_id, receiver));
@@ -1169,7 +1183,8 @@ fn delete_selected(model: &mut Model) {
                 return;
             };
             let repo_path = model.projects[project_idx].path.clone();
-            if let Err(err) = git::remove_worktree(&repo_path, &worktree_path) {
+            let vcs = vcs::detect(&repo_path);
+            if let Err(err) = vcs::remove_worktree(&repo_path, &worktree_path, vcs) {
                 model.status = Some(StatusMessage::error(format!(
                     "Failed to remove worktree: {err}"
                 )));

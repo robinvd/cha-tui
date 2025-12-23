@@ -4,9 +4,14 @@ use std::rc::Rc;
 
 use super::project::{ProjectId, WorktreeId};
 use super::session::SessionId;
+use super::vcs::VcsKind;
 use chatui::ScrollMsg;
+use chatui::dom::Color;
 use chatui::event::{Key, KeyCode};
-use chatui::{InputMsg, InputState, InputStyle, Node, block_with_title, components::scroll, modal};
+use chatui::{
+    InputMsg, InputState, InputStyle, Node, block_with_title, column, components::scroll, modal,
+    text,
+};
 use taffy::Dimension;
 
 /// State for modal dialogs.
@@ -20,6 +25,7 @@ pub enum ModalState {
         input: InputState,
         scroll: scroll::ScrollState,
         project: ProjectId,
+        vcs: VcsKind,
     },
     RenameSession {
         input: InputState,
@@ -37,6 +43,7 @@ pub enum ModalMsg {
     Scroll(ScrollMsg),
     Submit,
     Cancel,
+    ToggleVcs,
 }
 
 /// Result of modal update.
@@ -51,6 +58,7 @@ pub enum ModalResult {
     WorktreeSubmitted {
         project: ProjectId,
         name: String,
+        vcs: VcsKind,
     },
     /// Session rename was submitted.
     SessionRenamed {
@@ -63,6 +71,9 @@ pub enum ModalResult {
 
 /// Handle a key event for the modal, returning a message if applicable.
 pub fn modal_handle_key(key: Key) -> Option<ModalMsg> {
+    if key.ctrl && matches!(key.code, KeyCode::Char('t')) {
+        return Some(ModalMsg::ToggleVcs);
+    }
     match key.code {
         KeyCode::Esc => Some(ModalMsg::Cancel),
         KeyCode::Enter => Some(ModalMsg::Submit),
@@ -90,7 +101,12 @@ pub fn modal_update(state: &mut ModalState, msg: ModalMsg) -> ModalResult {
                     ModalResult::ProjectSubmitted(trimmed.to_string())
                 }
             }
-            ModalState::NewWorktree { input, project, .. } => {
+            ModalState::NewWorktree {
+                input,
+                project,
+                vcs,
+                ..
+            } => {
                 let value = input.value();
                 let trimmed = value.trim();
                 if trimmed.is_empty() {
@@ -99,6 +115,7 @@ pub fn modal_update(state: &mut ModalState, msg: ModalMsg) -> ModalResult {
                     ModalResult::WorktreeSubmitted {
                         project: *project,
                         name: trimmed.to_string(),
+                        vcs: *vcs,
                     }
                 }
             }
@@ -139,6 +156,13 @@ pub fn modal_update(state: &mut ModalState, msg: ModalMsg) -> ModalResult {
                 ModalResult::Continue
             }
         },
+        ModalMsg::ToggleVcs => match state {
+            ModalState::NewWorktree { vcs, .. } => {
+                *vcs = vcs.toggle();
+                ModalResult::Continue
+            }
+            _ => ModalResult::Continue,
+        },
     }
 }
 
@@ -147,19 +171,23 @@ pub fn modal_view<Msg: Clone + 'static>(
     state: &ModalState,
     wrap_input: impl Fn(ModalMsg) -> Msg + 'static,
 ) -> Node<Msg> {
-    let (title, input_state, scroll) = match state {
-        ModalState::NewProject { input, scroll } => ("Add project", input, scroll),
-        ModalState::NewWorktree { input, scroll, .. } => ("Add worktree", input, scroll),
-        ModalState::RenameSession { input, scroll, .. } => ("Rename session", input, scroll),
+    let (title, input_state, scroll, vcs_label) = match state {
+        ModalState::NewProject { input, scroll } => ("Add project", input, scroll, None),
+        ModalState::NewWorktree {
+            input, scroll, vcs, ..
+        } => ("Add worktree", input, scroll, Some(*vcs)),
+        ModalState::RenameSession { input, scroll, .. } => ("Rename session", input, scroll, None),
     };
     let wrap_input = Rc::new(wrap_input);
 
-    let input_style = InputStyle::default();
+    let mut input_style = InputStyle::default();
+    input_style.text.bg = Some(Color::BrightBlack);
     let field = chatui::input::<Msg>(title, input_state, &input_style, {
         let wrap_input = Rc::clone(&wrap_input);
         move |e| wrap_input(ModalMsg::Input(e))
     })
     .with_height(Dimension::length(1.));
+
     let item = scroll::scrollable_content(
         "modal_scoll",
         scroll,
@@ -171,7 +199,15 @@ pub fn modal_view<Msg: Clone + 'static>(
         field,
     );
 
-    let modal_node = block_with_title(title, vec![item])
+    let content = if let Some(vcs) = vcs_label {
+        let label = text::<Msg>(format!("using {} (Ctrl+T to toggle)", vcs.label()))
+            .with_height(Dimension::length(2.));
+        column(vec![label, item])
+    } else {
+        item
+    };
+
+    let modal_node = block_with_title(title, vec![content])
         .with_min_width(Dimension::length(32.))
         .with_max_width(Dimension::length(64.));
     modal(vec![modal_node])
