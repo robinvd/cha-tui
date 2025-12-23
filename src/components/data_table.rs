@@ -642,9 +642,7 @@ fn get_cell_style(ctx: CellStyleContext) -> Style {
             if Some(ctx.row_idx) == ctx.selected_row {
                 ctx.style.selected_row_style
             } else if ctx.is_alternate {
-                ctx.style
-                    .alternate_row_style
-                    .unwrap_or(ctx.style.row_style)
+                ctx.style.alternate_row_style.unwrap_or(ctx.style.row_style)
             } else {
                 ctx.style.row_style
             }
@@ -653,9 +651,7 @@ fn get_cell_style(ctx: CellStyleContext) -> Style {
             if Some(CellPosition::new(ctx.row_idx, ctx.col_idx)) == ctx.selected_cell {
                 ctx.style.selected_cell_style
             } else if ctx.is_alternate {
-                ctx.style
-                    .alternate_row_style
-                    .unwrap_or(ctx.style.row_style)
+                ctx.style.alternate_row_style.unwrap_or(ctx.style.row_style)
             } else {
                 ctx.style.row_style
             }

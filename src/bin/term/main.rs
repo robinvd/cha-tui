@@ -1,6 +1,7 @@
 //! Session manager demo with a sidebar tree and a single terminal pane.
 
 mod focus;
+mod keymap;
 mod modal;
 mod persistence;
 mod project;
@@ -16,7 +17,7 @@ use once_cell::sync::Lazy;
 #[cfg(test)]
 use std::sync::Mutex;
 
-use chatui::event::{Event, Key, KeyCode};
+use chatui::event::{Event, Key};
 use chatui::{
     InputMsg, InputState, Node, Program, TerminalMsg, Transition, TreeMsg, TreeState,
     block_with_title, column, default_terminal_keybindings, row, terminal, text,
@@ -25,6 +26,7 @@ use smol::channel::Receiver;
 use tracing::warn;
 
 use focus::Focus;
+use keymap::{Action, Keymap, Scope};
 use modal::{ModalMsg, ModalResult, ModalState, modal_handle_key, modal_update, modal_view};
 use persistence::{load_projects, save_projects};
 use project::{Project, ProjectId};
@@ -52,6 +54,7 @@ struct Model {
     /// When true, skip writing to the config file (used in tests).
     skip_persist: bool,
     status: Option<StatusMessage>,
+    keymap: Keymap,
     #[cfg(test)]
     _test_guard: Option<std::sync::MutexGuard<'static, ()>>,
 }
@@ -87,6 +90,7 @@ impl Model {
             next_session_id: 1,
             skip_persist,
             status: None,
+            keymap: Keymap::default(),
             #[cfg(test)]
             _test_guard: test_guard,
         };
@@ -208,6 +212,10 @@ impl Model {
         }
     }
 
+    fn set_focus(&mut self, focus: Focus) {
+        self.focus = focus;
+    }
+
     fn sync_active_from_tree_selection(&mut self) {
         if let Some(TreeId::Session(pid, sid)) = self.tree.selected().cloned() {
             let mut cleared_bell = false;
@@ -312,7 +320,6 @@ enum Msg {
     OpenNewProject,
     Modal(ModalMsg),
     NewSession,
-    DeleteSelected,
     ModalInput(InputMsg),
 }
 
@@ -331,19 +338,10 @@ fn clear_status_on_input(model: &mut Model, msg: &Msg) {
             | Msg::Modal(_)
             | Msg::ModalInput(_)
             | Msg::FocusSidebar
-            | Msg::OpenNewProject
-            | Msg::NewSession
-            | Msg::DeleteSelected
+        | Msg::OpenNewProject
+        | Msg::NewSession
     ) {
         model.status = None;
-    }
-}
-
-fn session_index_from_digit(ch: char) -> Option<usize> {
-    match ch {
-        '1'..='9' => ch.to_digit(10).map(|n| n as usize),
-        '0' => Some(10),
-        _ => None,
     }
 }
 
@@ -378,35 +376,10 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                     },
                 ));
             }
-            model.focus = Focus::Sidebar;
+            model.set_focus(Focus::Sidebar);
         }
         Msg::Key(key) => {
-            if key.ctrl && key.code == KeyCode::Char('b') {
-                let old_focus = model.focus;
-                model.focus = model.focus.toggle();
-
-                if old_focus != model.focus
-                    && let Some((pid, sid)) = model.active
-                {
-                    let msg = match model.focus {
-                        Focus::Terminal => TerminalMsg::FocusGained,
-                        Focus::Sidebar => TerminalMsg::FocusLost,
-                    };
-                    transitions.push(update(
-                        model,
-                        Msg::Terminal {
-                            project: pid,
-                            session: sid,
-                            msg,
-                        },
-                    ));
-                }
-
-                transitions.push(Transition::Continue);
-                return Transition::Multiple(transitions);
-            }
-
-            // Modal key handling
+            // Modal key handling takes precedence
             if model.modal.is_some() {
                 if let Some(modal_msg) = modal_handle_key(key) {
                     return update(model, Msg::Modal(modal_msg));
@@ -415,272 +388,42 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 return Transition::Multiple(transitions);
             }
 
-            if model.focus == Focus::Terminal {
-                if key.ctrl && key.code == KeyCode::Char('g') {
-                    model.terminal_locked = !model.terminal_locked;
-                    return Transition::Continue;
-                }
-                if model.terminal_locked {
-                    if let Some((pid, sid)) = model.active
-                        && let Some((_, session)) = model.active_session()
-                        && let Some(msg) = default_terminal_keybindings(
-                            key,
-                            session.terminal.mode(),
-                            move |term_msg| Msg::Terminal {
-                                project: pid,
-                                session: sid,
-                                msg: term_msg,
-                            },
-                        )
-                    {
-                        return update(model, msg);
-                    }
-                    return Transition::Continue;
-                }
+            // Determine scopes in priority order
+            let scopes = if model.focus == Focus::Terminal && model.terminal_locked {
+                vec![Scope::TerminalLocked]
+            } else if model.focus == Focus::Terminal {
+                vec![Scope::Terminal, Scope::Global]
+            } else {
+                vec![Scope::Sidebar, Scope::Global]
+            };
+
+            if let Some(action) = model.keymap.resolve(&scopes, key) {
+                return handle_action(model, action, key, transitions);
             }
 
-            if key.ctrl && key.code == KeyCode::Char(',') {
-                let Some(TreeId::Session(pid, sid)) = model.tree.selected().cloned() else {
-                    model.status = Some(StatusMessage::error("Select a session to rename"));
-                    return Transition::Continue;
-                };
-
-                let Some(session_name) = model
-                    .project(pid)
-                    .and_then(|project| project.session(sid))
-                    .map(|session| {
-                        session
-                            .custom_title
-                            .clone()
-                            .or_else(|| session.title.clone())
-                            .unwrap_or_else(|| format!("session{}", session.number))
+            // Fallback: when terminal focused, send to terminal
+            if model.focus == Focus::Terminal
+                && let Some((pid, sid)) = model.active
+                && let Some((_, session)) = model.active_session()
+                && let Some(msg) =
+                    default_terminal_keybindings(key, session.terminal.mode(), move |term_msg| {
+                        Msg::Terminal {
+                            project: pid,
+                            session: sid,
+                            msg: term_msg,
+                        }
                     })
-                else {
-                    model.status = Some(StatusMessage::error("Session no longer exists"));
-                    return Transition::Continue;
-                };
-
-                model.modal = Some(ModalState::RenameSession {
-                    input: InputState::with_value(session_name),
-                    project: pid,
-                    session: sid,
-                });
-                return Transition::Continue;
-            }
-
-            if (key.ctrl || key.super_key)
-                && let KeyCode::Char(ch) = key.code
-                && let Some(target_index) = session_index_from_digit(ch)
             {
-                if let Some((project_id, _)) = model.active {
-                    let target_session = model
-                        .project(project_id)
-                        .and_then(|project| project.sessions.get(target_index - 1))
-                        .map(|session| session.id);
-
-                    if let Some(target_sid) = target_session {
-                        if let Some((old_pid, old_sid)) = model.active {
-                            transitions.push(update(
-                                model,
-                                Msg::Terminal {
-                                    project: old_pid,
-                                    session: old_sid,
-                                    msg: TerminalMsg::FocusLost,
-                                },
-                            ));
-                        }
-                        model.select_session(project_id, target_sid);
-                        if model.focus == Focus::Terminal {
-                            transitions.push(update(
-                                model,
-                                Msg::Terminal {
-                                    project: project_id,
-                                    session: target_sid,
-                                    msg: TerminalMsg::FocusGained,
-                                },
-                            ));
-                        }
-                        return Transition::Multiple(transitions);
-                    }
-                }
-                return Transition::Continue;
+                return update(model, msg);
             }
 
-            // Session navigation with Ctrl+Up/Down
-            if (key.ctrl || key.super_key)
-                && key.code == KeyCode::Up
-                && let Some((pid, sid)) = prev_session(&model.tree, model.active)
-            {
-                if let Some((old_pid, old_sid)) = model.active {
-                    transitions.push(update(
-                        model,
-                        Msg::Terminal {
-                            project: old_pid,
-                            session: old_sid,
-                            msg: TerminalMsg::FocusLost,
-                        },
-                    ));
-                }
-                model.select_session(pid, sid);
-                if model.focus == Focus::Terminal {
-                    transitions.push(update(
-                        model,
-                        Msg::Terminal {
-                            project: pid,
-                            session: sid,
-                            msg: TerminalMsg::FocusGained,
-                        },
-                    ));
-                }
-                return Transition::Multiple(transitions);
-            }
-            if (key.ctrl || key.super_key)
-                && key.code == KeyCode::Down
-                && let Some((pid, sid)) = next_session(&model.tree, model.active)
-            {
-                if let Some((old_pid, old_sid)) = model.active {
-                    transitions.push(update(
-                        model,
-                        Msg::Terminal {
-                            project: old_pid,
-                            session: old_sid,
-                            msg: TerminalMsg::FocusLost,
-                        },
-                    ));
-                }
-                model.select_session(pid, sid);
-                if model.focus == Focus::Terminal {
-                    transitions.push(update(
-                        model,
-                        Msg::Terminal {
-                            project: pid,
-                            session: sid,
-                            msg: TerminalMsg::FocusGained,
-                        },
-                    ));
-                }
-                return Transition::Multiple(transitions);
-            }
-
-            match model.focus {
-                Focus::Sidebar => match key.code {
-                    KeyCode::Char('q') if key.ctrl => {
-                        return Transition::Quit;
-                    }
-                    KeyCode::Char('h') => {
-                        model.auto_hide = !model.auto_hide;
-                        return Transition::Continue;
-                    }
-                    KeyCode::Right if key.ctrl => {
-                        model.focus = Focus::Terminal;
-                        if let Some((pid, sid)) = model.active {
-                            transitions.push(update(
-                                model,
-                                Msg::Terminal {
-                                    project: pid,
-                                    session: sid,
-                                    msg: TerminalMsg::FocusGained,
-                                },
-                            ));
-                        }
-                        return Transition::Multiple(transitions);
-                    }
-                    KeyCode::Up if key.shift => {
-                        if let Some(selected) = model.tree.selected().cloned() {
-                            let moved = match selected {
-                                TreeId::Project(pid) => move_project_up(&mut model.projects, pid),
-                                TreeId::Session(pid, sid) => {
-                                    if let Some(project) = model.project_mut(pid) {
-                                        project.move_session_up(sid)
-                                    } else {
-                                        false
-                                    }
-                                }
-                            };
-                            if moved {
-                                rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
-                                model.tree.select(selected);
-                            }
-                        }
-                        return Transition::Continue;
-                    }
-                    KeyCode::Down if key.shift => {
-                        if let Some(selected) = model.tree.selected().cloned() {
-                            let moved = match selected {
-                                TreeId::Project(pid) => move_project_down(&mut model.projects, pid),
-                                TreeId::Session(pid, sid) => {
-                                    if let Some(project) = model.project_mut(pid) {
-                                        project.move_session_down(sid)
-                                    } else {
-                                        false
-                                    }
-                                }
-                            };
-                            if moved {
-                                rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
-                                model.tree.select(selected);
-                            }
-                        }
-                        return Transition::Continue;
-                    }
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        model.tree.ensure_selected();
-                        model.tree.select_prev();
-                        model.sync_active_from_tree_selection();
-                        return Transition::Continue;
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        model.tree.ensure_selected();
-                        model.tree.select_next();
-                        model.sync_active_from_tree_selection();
-                        return Transition::Continue;
-                    }
-                    KeyCode::Enter => {
-                        if let Some(selected) = model.tree.selected().cloned() {
-                            match selected {
-                                TreeId::Project(pid) => {
-                                    model.tree.toggle_expanded(&selected);
-                                    if let Some(project) = model.project(pid)
-                                        && let Some(session) = project.sessions.first()
-                                    {
-                                        model.select_session(pid, session.id);
-                                    }
-                                }
-                                TreeId::Session(pid, sid) => {
-                                    model.select_session(pid, sid);
-                                    model.focus = Focus::Terminal;
-                                }
-                            }
-                            return Transition::Continue;
-                        }
-                    }
-                    KeyCode::Char('p') => return update(model, Msg::OpenNewProject),
-                    KeyCode::Char('n') => return update(model, Msg::NewSession),
-                    KeyCode::Char('d') => return update(model, Msg::DeleteSelected),
-                    _ => {}
-                },
-                Focus::Terminal => {
-                    if let Some((pid, sid)) = model.active
-                        && let Some((_, session)) = model.active_session()
-                        && let Some(msg) = default_terminal_keybindings(
-                            key,
-                            session.terminal.mode(),
-                            move |term_msg| Msg::Terminal {
-                                project: pid,
-                                session: sid,
-                                msg: term_msg,
-                            },
-                        )
-                    {
-                        return update(model, msg);
-                    }
-                }
-            }
+            transitions.push(Transition::Continue);
+            return Transition::Multiple(transitions);
         }
         Msg::Tree(tree_msg) => match tree_msg {
             TreeMsg::ToggleExpand(id) => {
                 model.tree.toggle_expanded(&id);
-                model.focus = Focus::Sidebar;
+                model.set_focus(Focus::Sidebar);
             }
             TreeMsg::Activate(TreeId::Session(pid, sid))
             | TreeMsg::DoubleClick(TreeId::Session(pid, sid)) => {
@@ -695,7 +438,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                     ));
                 }
                 model.select_session(pid, sid);
-                model.focus = Focus::Terminal;
+                model.set_focus(Focus::Terminal);
                 transitions.push(update(
                     model,
                     Msg::Terminal {
@@ -765,7 +508,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             model.modal = Some(ModalState::NewProject {
                 input: InputState::new(),
             });
-            model.focus = Focus::Sidebar;
+            model.set_focus(Focus::Sidebar);
         }
         Msg::Modal(modal_msg) => {
             if let Some(mut modal_state) = model.modal.take() {
@@ -821,76 +564,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 TreeId::Session(pid, _) => pid,
             };
 
-            let Some(project_index) = model.projects.iter().position(|p| p.id == project_id) else {
-                return Transition::Continue;
-            };
-
-            let path = model.projects[project_index].path.clone();
-            let number = model.projects[project_index].next_session_number;
-
-            let id = SessionId(model.next_session_id);
-            model.next_session_id += 1;
-
-            let session = match Session::spawn(&path, number, id) {
-                Ok(session) => session,
-                Err(err) => {
-                    warn!(?err, "failed to create new session");
-                    model.status = Some(StatusMessage::error(format!(
-                        "Failed to create session: {err}"
-                    )));
-                    return Transition::Continue;
-                }
-            };
-
-            let sid = session.id;
-            model.projects[project_index].add_session(session);
-
-            rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
-            model.select_session(project_id, sid);
-            model.focus = Focus::Terminal;
-
-            if let Some(receiver) = model.wakeup_for(&TreeId::Session(project_id, sid)) {
-                transitions.push(arm_wakeup(TreeId::Session(project_id, sid), receiver));
-            }
-        }
-        Msg::DeleteSelected => {
-            let Some(selected) = model.tree.selected().cloned() else {
-                return Transition::Continue;
-            };
-
-            match selected {
-                TreeId::Project(pid) => {
-                    if let Some(pos) = model.projects.iter().position(|p| p.id == pid) {
-                        model.projects.remove(pos);
-                    }
-                    rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
-                    model.focus = Focus::Sidebar;
-                    model.save();
-                }
-                TreeId::Session(pid, sid) => {
-                    if let Some(project_idx) = model.projects.iter().position(|p| p.id == pid) {
-                        let became_empty = {
-                            let project = &mut model.projects[project_idx];
-                            project.remove_session(sid);
-                            project.sessions.is_empty()
-                        };
-
-                        if became_empty {
-                            if let Ok(Some(TreeId::Session(new_pid, new_sid))) =
-                                model.ensure_project_has_session(project_idx)
-                            {
-                                model.select_session(new_pid, new_sid);
-                            }
-                        } else if let Some(next_session) =
-                            model.projects[project_idx].sessions.first()
-                        {
-                            model.select_session(pid, next_session.id);
-                        }
-                        rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
-                        model.focus = Focus::Sidebar;
-                    }
-                }
-            }
+            create_session(model, project_id, &mut transitions);
         }
         Msg::ModalInput(input_msg) => {
             match model.modal.as_mut() {
@@ -909,6 +583,337 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         transitions.pop().unwrap()
     } else {
         Transition::Multiple(transitions)
+    }
+}
+
+fn handle_action(
+    model: &mut Model,
+    action: Action,
+    _key: Key,
+    mut transitions: Vec<Transition<Msg>>,
+) -> Transition<Msg> {
+    match action {
+        Action::ToggleFocus => {
+            let old_focus = model.focus;
+            let new_focus = model.focus.toggle();
+            model.set_focus(new_focus);
+
+            if old_focus != new_focus
+                && let Some((pid, sid)) = model.active
+            {
+                let msg = match new_focus {
+                    Focus::Terminal => TerminalMsg::FocusGained,
+                    Focus::Sidebar => TerminalMsg::FocusLost,
+                };
+                transitions.push(update(
+                    model,
+                    Msg::Terminal {
+                        project: pid,
+                        session: sid,
+                        msg,
+                    },
+                ));
+            }
+            transitions.push(Transition::Continue);
+            Transition::Multiple(transitions)
+        }
+        Action::Quit => Transition::Quit,
+        Action::ToggleAutoHide => {
+            model.auto_hide = !model.auto_hide;
+            Transition::Continue
+        }
+        Action::FocusTerminal => {
+            if model.focus != Focus::Terminal
+                && let Some((pid, sid)) = model.active
+            {
+                model.set_focus(Focus::Terminal);
+                transitions.push(update(
+                    model,
+                    Msg::Terminal {
+                        project: pid,
+                        session: sid,
+                        msg: TerminalMsg::FocusGained,
+                    },
+                ));
+                Transition::Multiple(transitions)
+            } else {
+                model.set_focus(Focus::Terminal);
+                Transition::Continue
+            }
+        }
+        Action::MoveSelectionUp => {
+            model.tree.ensure_selected();
+            model.tree.select_prev();
+            model.sync_active_from_tree_selection();
+            Transition::Continue
+        }
+        Action::MoveSelectionDown => {
+            model.tree.ensure_selected();
+            model.tree.select_next();
+            model.sync_active_from_tree_selection();
+            Transition::Continue
+        }
+        Action::MoveItemUp => {
+            if let Some(selected) = model.tree.selected().cloned() {
+                let moved = match selected {
+                    TreeId::Project(pid) => move_project_up(&mut model.projects, pid),
+                    TreeId::Session(pid, sid) => {
+                        if let Some(project) = model.project_mut(pid) {
+                            project.move_session_up(sid)
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if moved {
+                    rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+                    model.tree.select(selected);
+                }
+            }
+            Transition::Continue
+        }
+        Action::MoveItemDown => {
+            if let Some(selected) = model.tree.selected().cloned() {
+                let moved = match selected {
+                    TreeId::Project(pid) => move_project_down(&mut model.projects, pid),
+                    TreeId::Session(pid, sid) => {
+                        if let Some(project) = model.project_mut(pid) {
+                            project.move_session_down(sid)
+                        } else {
+                            false
+                        }
+                    }
+                };
+                if moved {
+                    rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+                    model.tree.select(selected);
+                }
+            }
+            Transition::Continue
+        }
+        Action::ActivateSelected => {
+            if let Some(selected) = model.tree.selected().cloned() {
+                match selected {
+                    TreeId::Project(pid) => {
+                        model.tree.toggle_expanded(&selected);
+                        if let Some(project) = model.project(pid)
+                            && let Some(session) = project.sessions.first()
+                        {
+                            model.select_session(pid, session.id);
+                        }
+                        Transition::Continue
+                    }
+                    TreeId::Session(pid, sid) => {
+                        if let Some((old_pid, old_sid)) = model.active {
+                            transitions.push(update(
+                                model,
+                                Msg::Terminal {
+                                    project: old_pid,
+                                    session: old_sid,
+                                    msg: TerminalMsg::FocusLost,
+                                },
+                            ));
+                        }
+                        model.select_session(pid, sid);
+                        model.set_focus(Focus::Terminal);
+                        transitions.push(update(
+                            model,
+                            Msg::Terminal {
+                                project: pid,
+                                session: sid,
+                                msg: TerminalMsg::FocusGained,
+                            },
+                        ));
+                        Transition::Multiple(transitions)
+                    }
+                }
+            } else {
+                Transition::Continue
+            }
+        }
+        Action::NewProject => update(model, Msg::OpenNewProject),
+        Action::NewSession => update(model, Msg::NewSession),
+        Action::DeleteSelected => {
+            delete_selected(model);
+            Transition::Continue
+        }
+        Action::RenameSession => {
+            if let Some(TreeId::Session(pid, sid)) = model.tree.selected().cloned() {
+                if let Some(session_name) = model
+                    .project(pid)
+                    .and_then(|project| project.session(sid))
+                    .map(|session| {
+                        session
+                            .custom_title
+                            .clone()
+                            .or_else(|| session.title.clone())
+                            .unwrap_or_else(|| format!("session{}", session.number))
+                    })
+                {
+                    model.modal = Some(ModalState::RenameSession {
+                        input: InputState::with_value(session_name),
+                        project: pid,
+                        session: sid,
+                    });
+                } else {
+                    model.status = Some(StatusMessage::error("Session no longer exists"));
+                }
+            } else {
+                model.status = Some(StatusMessage::error("Select a session to rename"));
+            }
+            Transition::Continue
+        }
+        Action::SessionByIndex(target_index) => {
+            if let Some((project_id, _)) = model.active {
+                let target_session = model
+                    .project(project_id)
+                    .and_then(|project| project.sessions.get(target_index - 1))
+                    .map(|session| session.id);
+
+                if let Some(target_sid) = target_session {
+                    if let Some((old_pid, old_sid)) = model.active {
+                        transitions.push(update(
+                            model,
+                            Msg::Terminal {
+                                project: old_pid,
+                                session: old_sid,
+                                msg: TerminalMsg::FocusLost,
+                            },
+                        ));
+                    }
+                    model.select_session(project_id, target_sid);
+                    if model.focus == Focus::Terminal {
+                        transitions.push(update(
+                            model,
+                            Msg::Terminal {
+                                project: project_id,
+                                session: target_sid,
+                                msg: TerminalMsg::FocusGained,
+                            },
+                        ));
+                    }
+                    Transition::Multiple(transitions)
+                } else {
+                    Transition::Continue
+                }
+            } else {
+                Transition::Continue
+            }
+        }
+        Action::NextSession | Action::PrevSession => {
+            let target = match action {
+                Action::NextSession => next_session(&model.tree, model.active),
+                Action::PrevSession => prev_session(&model.tree, model.active),
+                _ => None,
+            };
+
+            if let Some((pid, sid)) = target {
+                if let Some((old_pid, old_sid)) = model.active {
+                    transitions.push(update(
+                        model,
+                        Msg::Terminal {
+                            project: old_pid,
+                            session: old_sid,
+                            msg: TerminalMsg::FocusLost,
+                        },
+                    ));
+                }
+                model.select_session(pid, sid);
+                if model.focus == Focus::Terminal {
+                    transitions.push(update(
+                        model,
+                        Msg::Terminal {
+                            project: pid,
+                            session: sid,
+                            msg: TerminalMsg::FocusGained,
+                        },
+                    ));
+                }
+                Transition::Multiple(transitions)
+            } else {
+                Transition::Continue
+            }
+        }
+        Action::ToggleTerminalLock => {
+            model.terminal_locked = !model.terminal_locked;
+            Transition::Continue
+        }
+    }
+}
+
+fn create_session(
+    model: &mut Model,
+    project_id: ProjectId,
+    transitions: &mut Vec<Transition<Msg>>,
+) {
+    let Some(project_index) = model.projects.iter().position(|p| p.id == project_id) else {
+        return;
+    };
+
+    let path = model.projects[project_index].path.clone();
+    let number = model.projects[project_index].next_session_number;
+
+    let id = SessionId(model.next_session_id);
+    model.next_session_id += 1;
+
+    let session = match Session::spawn(&path, number, id) {
+        Ok(session) => session,
+        Err(err) => {
+            warn!(?err, "failed to create new session");
+            model.status = Some(StatusMessage::error(format!(
+                "Failed to create session: {err}"
+            )));
+            return;
+        }
+    };
+
+    let sid = session.id;
+    model.projects[project_index].add_session(session);
+
+    rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+    model.select_session(project_id, sid);
+    model.set_focus(Focus::Terminal);
+
+    if let Some(receiver) = model.wakeup_for(&TreeId::Session(project_id, sid)) {
+        transitions.push(arm_wakeup(TreeId::Session(project_id, sid), receiver));
+    }
+}
+
+fn delete_selected(model: &mut Model) {
+    let Some(selected) = model.tree.selected().cloned() else {
+        return;
+    };
+
+    match selected {
+        TreeId::Project(pid) => {
+            if let Some(pos) = model.projects.iter().position(|p| p.id == pid) {
+                model.projects.remove(pos);
+            }
+            rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+            model.set_focus(Focus::Sidebar);
+            model.save();
+        }
+        TreeId::Session(pid, sid) => {
+            if let Some(project_idx) = model.projects.iter().position(|p| p.id == pid) {
+                let became_empty = {
+                    let project = &mut model.projects[project_idx];
+                    project.remove_session(sid);
+                    project.sessions.is_empty()
+                };
+
+                if became_empty {
+                    if let Ok(Some(TreeId::Session(new_pid, new_sid))) =
+                        model.ensure_project_has_session(project_idx)
+                    {
+                        model.select_session(new_pid, new_sid);
+                    }
+                } else if let Some(next_session) = model.projects[project_idx].sessions.first() {
+                    model.select_session(pid, next_session.id);
+                }
+                rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+                model.set_focus(Focus::Sidebar);
+            }
+        }
     }
 }
 
@@ -955,6 +960,7 @@ fn view(model: &Model) -> Node<Msg> {
         model.auto_hide,
         model.active_session(),
         model.terminal_locked,
+        &model.keymap,
     );
 
     let mut nodes = vec![content, status];
@@ -997,7 +1003,7 @@ mod tests {
     use super::*;
     use chatui::buffer::DoubleBuffer;
     use chatui::dom::rounding::round_layout;
-    use chatui::event::Size;
+    use chatui::event::{KeyCode, Size};
     use chatui::palette::Palette;
     use chatui::render::Renderer;
     use taffy::compute_root_layout;
@@ -1021,7 +1027,7 @@ mod tests {
             panic!("expected a session selected");
         };
 
-        update(&mut model, Msg::DeleteSelected);
+        delete_selected(&mut model);
 
         let project = model.projects.first().expect("project present");
         assert_eq!(project.sessions.len(), 1);

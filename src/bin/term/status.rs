@@ -1,11 +1,11 @@
 //! Status bar component.
 
 use chatui::dom::Color;
-use chatui::event::{Key, KeyCode};
 use chatui::{Node, Style, TextSpan, rich_text, row};
 
 use super::Msg;
 use super::focus::Focus;
+use super::keymap::{Keymap, Shortcut};
 use super::project::Project;
 use super::session::Session;
 
@@ -39,6 +39,7 @@ pub fn status_bar_view(
     auto_hide: bool,
     active_session: Option<(&Project, &Session)>,
     terminal_locked: bool,
+    keymap: &Keymap,
 ) -> Node<Msg> {
     let base_style = Style::default();
     let key_style = Style::bold();
@@ -54,10 +55,9 @@ pub fn status_bar_view(
     );
 
     left_items.extend(shortcut_buttons(
-        focus,
+        keymap.status_shortcuts(focus == Focus::Terminal, terminal_locked),
         &key_style,
         &base_style,
-        terminal_locked,
     ));
 
     if auto_hide && let Some((project, session)) = active_session {
@@ -91,163 +91,28 @@ pub fn status_bar_view(
     ])
 }
 
-fn shortcut_buttons(
-    focus: Focus,
-    key_style: &Style,
-    text_style: &Style,
-    terminal_locked: bool,
-) -> Vec<Node<Msg>> {
+fn shortcut_buttons(shortcuts: &[Shortcut], key_style: &Style, text_style: &Style) -> Vec<Node<Msg>> {
     let mut items = Vec::new();
-    let mut idx = 0;
 
-    if matches!(focus, Focus::Terminal) && terminal_locked {
+    for (idx, shortcut) in shortcuts.iter().enumerate() {
+        let chord = shortcut.chord;
+        let label = chord.label();
+        let description = shortcut.description;
         items.push(shortcut_button(
-            "C+G",
-            "unlock",
-            idx,
+            label,
+            description,
+            idx as u64,
             key_style,
             text_style,
-            || Msg::Key(ctrl_key(KeyCode::Char('g'))),
+            move || Msg::Key(chord.to_key()),
         ));
-        return items;
-    }
-
-    match focus {
-        Focus::Sidebar => {
-            items.push(shortcut_button(
-                "C+B",
-                "switch focus",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(ctrl_key(KeyCode::Char('b'))),
-            ));
-            idx += 1;
-            items.push(shortcut_button(
-                "C+Q",
-                "quit",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(ctrl_key(KeyCode::Char('q'))),
-            ));
-            idx += 1;
-            items.push(shortcut_button(
-                "p",
-                "new project",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(Key::new(KeyCode::Char('p'))),
-            ));
-            idx += 1;
-            items.push(shortcut_button(
-                "n",
-                "new session",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(Key::new(KeyCode::Char('n'))),
-            ));
-            idx += 1;
-            items.push(shortcut_button(
-                "C+,",
-                "rename session",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(ctrl_key(KeyCode::Char(','))),
-            ));
-            idx += 1;
-            items.push(shortcut_button(
-                "d",
-                "delete",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(Key::new(KeyCode::Char('d'))),
-            ));
-            idx += 1;
-            items.push(shortcut_button(
-                "j",
-                "next",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(Key::new(KeyCode::Char('j'))),
-            ));
-            idx += 1;
-            items.push(shortcut_button(
-                "k",
-                "previous",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(Key::new(KeyCode::Char('k'))),
-            ));
-            idx += 1;
-            items.push(shortcut_button(
-                "⏎",
-                "select",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(Key::new(KeyCode::Enter)),
-            ));
-        }
-        Focus::Terminal => {
-            items.push(shortcut_button(
-                "C+B",
-                "switch focus",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(ctrl_key(KeyCode::Char('b'))),
-            ));
-            idx += 1;
-            items.push(shortcut_button(
-                "C+↑",
-                "previous session",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(ctrl_key(KeyCode::Up)),
-            ));
-            idx += 1;
-            items.push(shortcut_button(
-                "C+↓",
-                "next session",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(ctrl_key(KeyCode::Down)),
-            ));
-            idx += 1;
-            items.push(shortcut_button(
-                "C+,",
-                "rename session",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(ctrl_key(KeyCode::Char(','))),
-            ));
-            idx += 1;
-            items.push(shortcut_button(
-                "C+G",
-                "lock terminal",
-                idx,
-                key_style,
-                text_style,
-                || Msg::Key(ctrl_key(KeyCode::Char('g'))),
-            ));
-        }
     }
 
     items
 }
 
 fn shortcut_button(
-    label: &'static str,
+    label: impl Into<String>,
     description: &'static str,
     idx: u64,
     key_style: &Style,
@@ -264,10 +129,4 @@ fn shortcut_button(
         .with_padding_2d(1, 0)
         .with_id_mixin("status-shortcut", idx)
         .on_click(on_click)
-}
-
-fn ctrl_key(code: KeyCode) -> Key {
-    let mut key = Key::new(code);
-    key.ctrl = true;
-    key
 }

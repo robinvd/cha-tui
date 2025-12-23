@@ -55,7 +55,7 @@ pub struct MouseButtons {
     pub wheel_positive: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum KeyCode {
     Char(char),
     Enter,
@@ -94,7 +94,7 @@ pub enum KeyCode {
 }
 
 /// Modifier key codes for the kitty keyboard protocol.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ModifierKeyCode {
     LeftShift,
     LeftControl,
@@ -111,7 +111,7 @@ pub enum ModifierKeyCode {
 }
 
 /// Media key codes for the kitty keyboard protocol.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MediaKeyCode {
     Play,
     Pause,
