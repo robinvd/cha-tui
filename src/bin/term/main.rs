@@ -19,7 +19,7 @@ use std::sync::Mutex;
 
 use chatui::event::{Event, Key};
 use chatui::{
-    InputMsg, InputState, Node, Program, TerminalMsg, Transition, TreeMsg, TreeState,
+    InputState, Node, Program, ScrollState, TerminalMsg, Transition, TreeMsg, TreeState,
     block_with_title, column, default_terminal_keybindings, row, terminal, text,
 };
 use smol::channel::Receiver;
@@ -266,7 +266,7 @@ impl Model {
 
         let mut changed = false;
         changed |= session.sync_title();
-        changed |= session.sync_bell();
+        changed |= session.sync_bell(is_active);
         changed |= session.sync_exited();
         changed |= session.sync_activity(is_active);
         changed
@@ -320,7 +320,6 @@ enum Msg {
     OpenNewProject,
     Modal(ModalMsg),
     NewSession,
-    ModalInput(InputMsg),
 }
 
 fn arm_wakeup(tree_id: TreeId, receiver: Receiver<()>) -> Transition<Msg> {
@@ -336,7 +335,6 @@ fn clear_status_on_input(model: &mut Model, msg: &Msg) {
         Msg::Key(_)
             | Msg::Tree(_)
             | Msg::Modal(_)
-            | Msg::ModalInput(_)
             | Msg::FocusSidebar
             | Msg::OpenNewProject
             | Msg::NewSession
@@ -507,6 +505,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         Msg::OpenNewProject => {
             model.modal = Some(ModalState::NewProject {
                 input: InputState::new(),
+                scroll: ScrollState::horizontal(),
             });
             model.set_focus(Focus::Sidebar);
         }
@@ -565,15 +564,6 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             };
 
             create_session(model, project_id, &mut transitions);
-        }
-        Msg::ModalInput(input_msg) => {
-            match model.modal.as_mut() {
-                Some(ModalState::NewProject { input })
-                | Some(ModalState::RenameSession { input, .. }) => {
-                    input.update(input_msg);
-                }
-                None => {}
-            };
         }
     }
 
@@ -754,6 +744,7 @@ fn handle_action(
                         input: InputState::with_value(session_name),
                         project: pid,
                         session: sid,
+                        scroll: ScrollState::horizontal(),
                     });
                 } else {
                     model.status = Some(StatusMessage::error("Session no longer exists"));
@@ -966,7 +957,7 @@ fn view(model: &Model) -> Node<Msg> {
     let mut nodes = vec![content, status];
 
     if let Some(modal_state) = &model.modal {
-        nodes.push(modal_view(modal_state, Msg::ModalInput));
+        nodes.push(modal_view(modal_state, Msg::Modal));
     }
 
     column(nodes).with_fill()
@@ -1193,6 +1184,7 @@ mod tests {
                 project,
                 session,
                 input,
+                ..
             }) => {
                 assert_eq!(*project, project_id);
                 assert_eq!(*session, session_id);
@@ -1250,6 +1242,44 @@ mod tests {
         assert!(
             label.is_some(),
             "session label should contain bell indicator when bell is set"
+        );
+    }
+
+    #[test]
+    fn active_session_clears_bell_indicator() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        let TreeId::Session(pid, sid) = model.tree.selected().cloned().expect("selected session")
+        else {
+            panic!("expected session selected");
+        };
+
+        if let Some(project) = model.project_mut(pid) {
+            if let Some(session) = project.session_mut(sid) {
+                session.bell = true;
+            }
+        }
+
+        model.sync_session_state(&TreeId::Session(pid, sid));
+        rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+
+        let visible_session = model
+            .tree
+            .visible()
+            .iter()
+            .find(|node| matches!(node.id, TreeId::Session(_, _)))
+            .expect("session visible");
+
+        let label = visible_session
+            .label
+            .iter()
+            .find(|span| span.content.contains('🔔'))
+            .map(|span| span.content.clone());
+
+        assert!(
+            label.is_none(),
+            "active session label should not contain bell indicator"
         );
     }
 
