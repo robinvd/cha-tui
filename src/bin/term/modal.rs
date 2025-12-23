@@ -2,9 +2,9 @@
 
 use super::project::ProjectId;
 use super::session::SessionId;
-use chatui::dom::Color;
 use chatui::event::{Key, KeyCode};
-use chatui::{InputMsg, InputState, InputStyle, Node, Style, block_with_title, modal, row, text};
+use chatui::{InputMsg, InputState, InputStyle, Node, block_with_title, modal};
+use taffy::Dimension;
 
 /// State for modal dialogs.
 #[derive(Clone)]
@@ -104,29 +104,17 @@ pub fn modal_view<Msg: Clone + 'static>(
     state: &ModalState,
     wrap_input: impl Fn(InputMsg) -> Msg + 'static,
 ) -> Node<Msg> {
-    match state {
-        ModalState::NewProject { input } => {
-            let mut input_style = InputStyle::default();
-            input_style.cursor.bg = Some(Color::rgb(100, 200, 255));
-            let prompt = text::<Msg>("Directory: ").with_style(Style::bold());
-            let field = chatui::input::<Msg>("project-input", input, &input_style, wrap_input)
-                .with_flex_grow(1.0);
-            let inner = row(vec![prompt, field]).with_min_width(taffy::Dimension::length(40.0));
+    let (title, input_state) = match state {
+        ModalState::NewProject { input } => ("Add project", input),
+        ModalState::RenameSession { input, .. } => ("Rename session", input),
+    };
 
-            let modal_node = block_with_title("Add project", vec![inner.with_fill()]).with_fill();
-            modal(vec![modal_node])
-        }
-        ModalState::RenameSession { input, .. } => {
-            let mut input_style = InputStyle::default();
-            input_style.cursor.bg = Some(Color::rgb(100, 200, 255));
-            let prompt = text::<Msg>("Session name: ").with_style(Style::bold());
-            let field = chatui::input::<Msg>("rename-session", input, &input_style, wrap_input)
-                .with_flex_grow(1.0);
-            let inner = row(vec![prompt, field]).with_min_width(taffy::Dimension::length(32.0));
+    let input_style = InputStyle::default();
+    let field = chatui::input::<Msg>(title, input_state, &input_style, wrap_input)
+        .with_height(Dimension::length(1.));
 
-            let modal_node =
-                block_with_title("Rename session", vec![inner.with_fill()]).with_fill();
-            modal(vec![modal_node])
-        }
-    }
+    let modal_node = block_with_title(title, vec![field])
+        .with_min_width(Dimension::length(32.))
+        .with_max_width(Dimension::length(64.));
+    modal(vec![modal_node])
 }
