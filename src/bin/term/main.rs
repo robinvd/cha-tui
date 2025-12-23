@@ -726,13 +726,15 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             let Some(selected) = model.tree.selected().cloned() else {
                 return Transition::Continue;
             };
-            let (project_id, worktree) = match selected {
-                TreeId::Project(pid) => (pid, None),
-                TreeId::Worktree(pid, wid) => (pid, Some(wid)),
-                TreeId::Session(pid, worktree, _) => (pid, worktree),
+            let (project_id, worktree, insert_position) = match selected {
+                TreeId::Project(pid) => (pid, None, InsertPosition::Top),
+                TreeId::Worktree(pid, wid) => (pid, Some(wid), InsertPosition::Top),
+                TreeId::Session(pid, worktree, sid) => {
+                    (pid, worktree, InsertPosition::After(sid))
+                }
             };
 
-            create_session(model, project_id, worktree, &mut transitions);
+            create_session(model, project_id, worktree, insert_position, &mut transitions);
         }
     }
 
@@ -1061,10 +1063,16 @@ fn handle_action(
     }
 }
 
+enum InsertPosition {
+    Top,
+    After(SessionId),
+}
+
 fn create_session(
     model: &mut Model,
     project_id: ProjectId,
     worktree: Option<WorktreeId>,
+    insert_position: InsertPosition,
     transitions: &mut Vec<Transition<Msg>>,
 ) {
     let Some(project_index) = model.projects.iter().position(|p| p.id == project_id) else {
@@ -1095,7 +1103,14 @@ fn create_session(
     };
 
     let sid = session.id;
-    model.projects[project_index].add_session(worktree, session);
+    match insert_position {
+        InsertPosition::Top => {
+            model.projects[project_index].add_session_at_start(worktree, session);
+        }
+        InsertPosition::After(target_sid) => {
+            model.projects[project_index].add_session_after(worktree, session, Some(target_sid));
+        }
+    }
 
     rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
     model.select_session(SessionKey {
@@ -1821,7 +1836,8 @@ mod tests {
             .map(|s| s.to_owned())
             .collect();
 
-        let project_line = format!("│v {:<18}│", project_name);
+        let project_label: String = project_name.chars().take(18).collect();
+        let project_line = format!("│v {:<18}│", project_label);
         let top = "┌Sessions────────────┐".to_string();
         let bottom = "└────────────────────┘".to_string();
         let session_lines: Vec<String> = model.projects[0]

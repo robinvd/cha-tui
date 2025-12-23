@@ -81,6 +81,24 @@ impl Worktree {
         self.next_session_number += 1;
     }
 
+    /// Add a session after another session if present, otherwise append it.
+    pub fn add_session_after(&mut self, session: Session, after: Option<SessionId>) {
+        if let Some(after) = after
+            && let Some(idx) = self.sessions.iter().position(|s| s.id == after)
+        {
+            self.sessions.insert(idx + 1, session);
+            self.next_session_number += 1;
+            return;
+        }
+        self.add_session(session);
+    }
+
+    /// Add a session at the start of the list.
+    pub fn add_session_at_start(&mut self, session: Session) {
+        self.sessions.insert(0, session);
+        self.next_session_number += 1;
+    }
+
     /// Remove a session by ID. Returns true if removed.
     pub fn remove_session(&mut self, sid: SessionId) -> bool {
         let len_before = self.sessions.len();
@@ -199,6 +217,51 @@ impl Project {
             Some(wid) => {
                 if let Some(worktree) = self.worktree_mut(wid) {
                     worktree.add_session(session);
+                }
+            }
+        }
+    }
+
+    /// Add a session after another session if present, otherwise append it.
+    pub fn add_session_after(
+        &mut self,
+        worktree: Option<WorktreeId>,
+        session: Session,
+        after: Option<SessionId>,
+    ) {
+        match worktree {
+            None => {
+                if let Some(after) = after
+                    && let Some(idx) = self.sessions.iter().position(|s| s.id == after)
+                {
+                    self.sessions.insert(idx + 1, session);
+                    self.next_session_number += 1;
+                    return;
+                }
+                self.add_session(None, session);
+            }
+            Some(wid) => {
+                if let Some(worktree) = self.worktree_mut(wid) {
+                    worktree.add_session_after(session, after);
+                }
+            }
+        }
+    }
+
+    /// Add a session at the start of the list.
+    pub fn add_session_at_start(
+        &mut self,
+        worktree: Option<WorktreeId>,
+        session: Session,
+    ) {
+        match worktree {
+            None => {
+                self.sessions.insert(0, session);
+                self.next_session_number += 1;
+            }
+            Some(wid) => {
+                if let Some(worktree) = self.worktree_mut(wid) {
+                    worktree.add_session_at_start(session);
                 }
             }
         }
