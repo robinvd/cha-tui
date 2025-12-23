@@ -475,12 +475,21 @@ impl Keymap {
                 .entry(binding.chord)
                 .or_insert(binding.action);
         }
-        let sidebar_shortcuts =
-            build_shortcuts(&bindings, &SIDEBAR_ACTIONS, &[Scope::Sidebar, Scope::Global]);
-        let terminal_shortcuts =
-            build_shortcuts(&bindings, &TERMINAL_ACTIONS, &[Scope::Terminal, Scope::Global]);
-        let terminal_locked_shortcuts =
-            build_shortcuts(&bindings, &TERMINAL_LOCKED_ACTIONS, &[Scope::TerminalLocked]);
+        let sidebar_shortcuts = build_shortcuts(
+            &bindings,
+            &SIDEBAR_ACTIONS,
+            &[Scope::Sidebar, Scope::Global],
+        );
+        let terminal_shortcuts = build_shortcuts(
+            &bindings,
+            &TERMINAL_ACTIONS,
+            &[Scope::Terminal, Scope::Global],
+        );
+        let terminal_locked_shortcuts = build_shortcuts(
+            &bindings,
+            &TERMINAL_LOCKED_ACTIONS,
+            &[Scope::TerminalLocked],
+        );
 
         Self {
             lookup,

@@ -338,8 +338,8 @@ fn clear_status_on_input(model: &mut Model, msg: &Msg) {
             | Msg::Modal(_)
             | Msg::ModalInput(_)
             | Msg::FocusSidebar
-        | Msg::OpenNewProject
-        | Msg::NewSession
+            | Msg::OpenNewProject
+            | Msg::NewSession
     ) {
         model.status = None;
     }

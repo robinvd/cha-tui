@@ -91,7 +91,11 @@ pub fn status_bar_view(
     ])
 }
 
-fn shortcut_buttons(shortcuts: &[Shortcut], key_style: &Style, text_style: &Style) -> Vec<Node<Msg>> {
+fn shortcut_buttons(
+    shortcuts: &[Shortcut],
+    key_style: &Style,
+    text_style: &Style,
+) -> Vec<Node<Msg>> {
     let mut items = Vec::new();
 
     for (idx, shortcut) in shortcuts.iter().enumerate() {
