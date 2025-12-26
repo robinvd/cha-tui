@@ -686,7 +686,7 @@ where
 
 /// Legacy key to input encoding (internal use only).
 /// Used as fallback when kitty protocol is not enabled.
-fn legacy_key_to_input(key: Key) -> Option<Vec<u8>> {
+fn legacy_key_to_input(key: Key, app_cursor: bool) -> Option<Vec<u8>> {
     let modifier_code = |key: &Key| {
         let mut code = 1;
         if key.shift {
@@ -741,6 +741,8 @@ fn legacy_key_to_input(key: Key) -> Option<Vec<u8>> {
                 vec![0x1b, b'[', b'1', b';', b'3', b'A']
             } else if key.shift {
                 vec![0x1b, b'[', b'1', b';', b'2', b'A']
+            } else if app_cursor {
+                vec![0x1b, b'O', b'A']
             } else {
                 vec![0x1b, b'[', b'A']
             }
@@ -752,6 +754,8 @@ fn legacy_key_to_input(key: Key) -> Option<Vec<u8>> {
                 vec![0x1b, b'[', b'1', b';', b'3', b'B']
             } else if key.shift {
                 vec![0x1b, b'[', b'1', b';', b'2', b'B']
+            } else if app_cursor {
+                vec![0x1b, b'O', b'B']
             } else {
                 vec![0x1b, b'[', b'B']
             }
@@ -763,6 +767,8 @@ fn legacy_key_to_input(key: Key) -> Option<Vec<u8>> {
                 vec![0x1b, b'[', b'1', b';', b'3', b'C']
             } else if key.shift {
                 vec![0x1b, b'[', b'1', b';', b'2', b'C']
+            } else if app_cursor {
+                vec![0x1b, b'O', b'C']
             } else {
                 vec![0x1b, b'[', b'C']
             }
@@ -774,6 +780,8 @@ fn legacy_key_to_input(key: Key) -> Option<Vec<u8>> {
                 vec![0x1b, b'[', b'1', b';', b'3', b'D']
             } else if key.shift {
                 vec![0x1b, b'[', b'1', b';', b'2', b'D']
+            } else if app_cursor {
+                vec![0x1b, b'O', b'D']
             } else {
                 vec![0x1b, b'[', b'D']
             }
@@ -1035,6 +1043,7 @@ pub fn key_to_input(key: Key, mode: TermMode) -> Option<Vec<u8>> {
             | TermMode::DISAMBIGUATE_ESC_CODES
             | TermMode::REPORT_EVENT_TYPES,
     );
+    let app_cursor = mode.contains(TermMode::APP_CURSOR);
 
     // If kitty protocol is not enabled, use legacy encoding
     // But only for key press events - releases should be ignored in legacy mode
@@ -1042,7 +1051,7 @@ pub fn key_to_input(key: Key, mode: TermMode) -> Option<Vec<u8>> {
         if key.kind != KeyEventKind::Press {
             return None;
         }
-        return legacy_key_to_input(key);
+        return legacy_key_to_input(key, app_cursor);
     }
 
     let kitty_encode_all = mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC);
@@ -1057,7 +1066,7 @@ pub fn key_to_input(key: Key, mode: TermMode) -> Option<Vec<u8>> {
         if key.kind != KeyEventKind::Press {
             return None;
         }
-        return legacy_key_to_input(key);
+        return legacy_key_to_input(key, app_cursor);
     }
 
     // Build the kitty sequence
@@ -2374,6 +2383,14 @@ mod tests {
         let input = key_to_input(key, mode);
         // Arrow keys use legacy terminator for compatibility
         assert_eq!(input, Some(b"\x1b[1A".to_vec()));
+    }
+
+    #[test]
+    fn app_cursor_mode_uses_ss3_for_arrow_keys() {
+        let key = Key::new(KeyCode::Up);
+        let mode = TermMode::APP_CURSOR;
+        let input = key_to_input(key, mode);
+        assert_eq!(input, Some(b"\x1bOA".to_vec()));
     }
 
     #[test]
