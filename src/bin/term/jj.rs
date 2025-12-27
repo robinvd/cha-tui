@@ -1,5 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use smol::process::Command as AsyncCommand;
 use std::process::Command;
 
 #[derive(Clone, Debug)]
@@ -18,16 +19,27 @@ pub fn root(repo_path: &Path) -> io::Result<PathBuf> {
     }
 }
 
-pub fn list_workspaces(repo_path: &Path) -> io::Result<Vec<JjWorkspace>> {
-    let repo_root = root(repo_path)?;
+pub async fn root_async(repo_path: &Path) -> io::Result<PathBuf> {
+    let output = jj_output_async(repo_path, &["root"]).await?;
+    let root = output.lines().next().unwrap_or("").trim();
+    if root.is_empty() {
+        Err(io::Error::other("jj root returned empty output"))
+    } else {
+        Ok(PathBuf::from(root))
+    }
+}
+
+pub async fn list_workspaces_async(repo_path: &Path) -> io::Result<Vec<JjWorkspace>> {
+    let repo_root = root_async(repo_path).await?;
     let repo_root = repo_root
         .canonicalize()
         .unwrap_or_else(|_| repo_root.to_path_buf());
     let worktrees_dir = repo_root.join(".worktrees");
-    let output = jj_output(
+    let output = jj_output_async(
         &repo_root,
         &["--no-pager", "workspace", "list", "-T", "name ++ \"\\n\""],
-    )?;
+    )
+    .await?;
     let mut worktrees = Vec::new();
 
     for name in output.lines().map(str::trim).filter(|name| !name.is_empty()) {
@@ -101,8 +113,26 @@ fn run_jj(repo_path: &Path, args: &[&str]) -> io::Result<std::process::Output> {
     Command::new("jj").current_dir(repo_path).args(args).output()
 }
 
+async fn run_jj_async(repo_path: &Path, args: &[&str]) -> io::Result<std::process::Output> {
+    AsyncCommand::new("jj")
+        .current_dir(repo_path)
+        .args(args)
+        .output()
+        .await
+}
+
 fn jj_output(repo_path: &Path, args: &[&str]) -> io::Result<String> {
     let output = run_jj(repo_path, args)?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(io::Error::other(stderr.trim().to_string()));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout.to_string())
+}
+
+async fn jj_output_async(repo_path: &Path, args: &[&str]) -> io::Result<String> {
+    let output = run_jj_async(repo_path, args).await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(io::Error::other(stderr.trim().to_string()));

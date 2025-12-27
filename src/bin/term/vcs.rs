@@ -38,9 +38,17 @@ pub fn detect(repo_path: &Path) -> VcsKind {
     }
 }
 
-pub fn list_worktrees(repo_path: &Path, vcs: VcsKind) -> io::Result<Vec<Worktree>> {
+pub async fn detect_async(repo_path: &Path) -> VcsKind {
+    if jj::root_async(repo_path).await.is_ok() {
+        VcsKind::Jj
+    } else {
+        VcsKind::Git
+    }
+}
+
+pub async fn list_worktrees_async(repo_path: &Path, vcs: VcsKind) -> io::Result<Vec<Worktree>> {
     match vcs {
-        VcsKind::Git => git::list_worktrees(repo_path).map(|trees| {
+        VcsKind::Git => git::list_worktrees_async(repo_path).await.map(|trees| {
             trees
                 .into_iter()
                 .map(|tree| Worktree {
@@ -49,7 +57,7 @@ pub fn list_worktrees(repo_path: &Path, vcs: VcsKind) -> io::Result<Vec<Worktree
                 })
                 .collect()
         }),
-        VcsKind::Jj => jj::list_workspaces(repo_path).map(|trees| {
+        VcsKind::Jj => jj::list_workspaces_async(repo_path).await.map(|trees| {
             trees
                 .into_iter()
                 .map(|tree| Worktree {

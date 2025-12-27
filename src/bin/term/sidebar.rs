@@ -91,7 +91,11 @@ pub fn rebuild_tree(
             );
         }
 
-        let label = vec![TextSpan::new(project.name.clone(), Style::default())];
+        let mut label = vec![TextSpan::new(project.name.clone(), Style::default())];
+        if !project.worktrees_loaded {
+            let loading_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
+            label.push(TextSpan::new(" ⟳", loading_style));
+        }
 
         items.push(
             TreeNode::branch(TreeId::Project(project.id), label, children)

@@ -2,6 +2,7 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use smol::process::Command as AsyncCommand;
 use std::process::Command;
 
 #[derive(Clone, Debug)]
@@ -18,8 +19,17 @@ fn run_git(repo_path: &Path, args: &[&str]) -> io::Result<std::process::Output> 
         .output()
 }
 
-fn git_output(repo_path: &Path, args: &[&str]) -> io::Result<String> {
-    let output = run_git(repo_path, args)?;
+async fn run_git_async(repo_path: &Path, args: &[&str]) -> io::Result<std::process::Output> {
+    AsyncCommand::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(args)
+        .output()
+        .await
+}
+
+async fn git_output_async(repo_path: &Path, args: &[&str]) -> io::Result<String> {
+    let output = run_git_async(repo_path, args).await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(io::Error::other(stderr.trim().to_string()));
@@ -28,12 +38,12 @@ fn git_output(repo_path: &Path, args: &[&str]) -> io::Result<String> {
     Ok(stdout.to_string())
 }
 
-pub fn list_worktrees(repo_path: &Path) -> io::Result<Vec<GitWorktree>> {
+pub async fn list_worktrees_async(repo_path: &Path) -> io::Result<Vec<GitWorktree>> {
     let repo_path = repo_path
         .canonicalize()
         .unwrap_or_else(|_| repo_path.to_path_buf());
     let worktrees_dir = repo_path.join(".worktrees");
-    let output = git_output(&repo_path, &["worktree", "list", "--porcelain"])?;
+    let output = git_output_async(&repo_path, &["worktree", "list", "--porcelain"]).await?;
 
     let mut worktrees = Vec::new();
     let mut current_path: Option<PathBuf> = None;

@@ -116,6 +116,8 @@ pub struct Project {
     pub worktrees: Vec<Worktree>,
     pub next_session_number: usize,
     pub next_worktree_id: u64,
+    pub worktrees_loaded: bool,
+    pub worktrees_loading: bool,
 }
 
 impl Project {
@@ -129,6 +131,8 @@ impl Project {
             worktrees: Vec::new(),
             next_session_number: 1,
             next_worktree_id: 1,
+            worktrees_loaded: false,
+            worktrees_loading: false,
         }
     }
 

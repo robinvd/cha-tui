@@ -157,11 +157,9 @@ impl Model {
         self.next_project_id += 1;
 
         let mut project = Project::new(project_id, name, path);
+        project.worktrees_loaded = self.skip_worktrees;
         let session = self.spawn_session_for(&project, None)?;
         project.add_session(None, session);
-        if !self.skip_worktrees {
-            self.load_worktrees(&mut project);
-        }
 
         self.projects.push(project);
         rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
@@ -200,27 +198,69 @@ impl Model {
         }
     }
 
-    fn load_worktrees(&mut self, project: &mut Project) {
-        let vcs = vcs::detect(&project.path);
-        let worktrees = match vcs::list_worktrees(&project.path, vcs) {
+    fn start_worktree_load(&mut self, project_id: ProjectId) -> Option<Transition<Msg>> {
+        if self.skip_worktrees {
+            return None;
+        }
+        let project = self.project_mut(project_id)?;
+        if project.worktrees_loaded || project.worktrees_loading {
+            return None;
+        }
+        project.worktrees_loading = true;
+        let path = project.path.clone();
+        Some(Transition::Task(Box::pin(async move {
+            let vcs = vcs::detect_async(&path).await;
+            let result = vcs::list_worktrees_async(&path, vcs)
+                .await
+                .map_err(|err| err.to_string());
+            Msg::WorktreesLoaded {
+                project: project_id,
+                result,
+            }
+        })))
+    }
+
+    fn apply_worktrees_loaded(
+        &mut self,
+        project_id: ProjectId,
+        result: Result<Vec<vcs::Worktree>, String>,
+        transitions: &mut Vec<Transition<Msg>>,
+    ) {
+        let Some(project_index) = self.projects.iter().position(|p| p.id == project_id) else {
+            return;
+        };
+        self.projects[project_index].worktrees_loading = false;
+        let worktrees = match result {
             Ok(worktrees) => worktrees,
             Err(err) => {
                 warn!(?err, "failed to load worktrees");
-                Vec::new()
+                return;
             }
         };
 
+        self.projects[project_index].worktrees_loaded = true;
         for worktree in worktrees {
-            let wid = project.add_worktree(worktree.name, worktree.path);
-            let session = match self.spawn_session_for(project, Some(wid)) {
+            let path = worktree.path.clone();
+            let wid = self.projects[project_index].add_worktree(worktree.name, worktree.path);
+            let number = self.projects[project_index]
+                .worktree(wid)
+                .map(|wt| wt.next_session_number)
+                .unwrap_or(1);
+            let session = match self.spawn_session(&path, number) {
                 Ok(session) => session,
                 Err(err) => {
                     warn!(?err, "failed to create worktree session");
                     continue;
                 }
             };
-            project.add_session(Some(wid), session);
+            let tree_id = TreeId::Session(project_id, Some(wid), session.id);
+            self.projects[project_index].add_session(Some(wid), session);
+            if let Some(receiver) = self.wakeup_for(&tree_id) {
+                transitions.push(arm_wakeup(tree_id, receiver));
+            }
         }
+
+        rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
     }
 
     fn add_worktree(
@@ -444,6 +484,10 @@ enum Msg {
     SessionWake(TreeId),
     FocusGained,
     FocusLost,
+    WorktreesLoaded {
+        project: ProjectId,
+        result: Result<Vec<vcs::Worktree>, String>,
+    },
     OpenNewProject,
     OpenNewWorktree {
         project: ProjectId,
@@ -496,6 +540,12 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                         session.wakeup.clone(),
                     ));
                 }
+            }
+        }
+        let project_ids = model.projects.iter().map(|project| project.id).collect::<Vec<_>>();
+        for project_id in project_ids {
+            if let Some(transition) = model.start_worktree_load(project_id) {
+                transitions.push(transition);
             }
         }
     }
@@ -686,6 +736,9 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 );
             }
         }
+        Msg::WorktreesLoaded { project, result } => {
+            model.apply_worktrees_loaded(project, result, &mut transitions);
+        }
         Msg::OpenNewProject => {
             model.modal = Some(ModalState::NewProject {
                 input: InputState::new(),
@@ -725,14 +778,20 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
 
                         if let Err(err) = model.add_project(path, name) {
                             warn!(?err, "failed to add project");
-                        } else if let Some(project) = model.projects.last()
-                            && let Some(session) = project.sessions.first()
-                        {
-                            model.select_session(SessionKey {
-                                project: project.id,
-                                worktree: None,
-                                session: session.id,
-                            });
+                        } else if let Some(project_id) = model.projects.last().map(|p| p.id) {
+                            if let Some(transition) = model.start_worktree_load(project_id) {
+                                transitions.push(transition);
+                            }
+                            if let Some(session) = model
+                                .project(project_id)
+                                .and_then(|project| project.sessions.first())
+                            {
+                                model.select_session(SessionKey {
+                                    project: project_id,
+                                    worktree: None,
+                                    session: session.id,
+                                });
+                            }
                         }
                         model.modal = None;
                     }
