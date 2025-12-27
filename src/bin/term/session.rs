@@ -26,7 +26,7 @@ pub struct Session {
     /// Whether the session has unseen output.
     pub has_unread_output: bool,
     /// Last terminal content version that was observed.
-    pub last_seen_version: u64,
+    pub last_seen_content_version: u64,
 }
 
 impl Session {
@@ -58,9 +58,9 @@ impl Session {
             wakeup,
             cached_display_name: String::new(),
             has_unread_output: false,
-            last_seen_version: 0,
+            last_seen_content_version: 0,
         };
-        session.last_seen_version = session.terminal.version();
+        session.last_seen_content_version = session.terminal.content_version();
         session.cached_display_name = session.display_name();
         Ok(session)
     }
@@ -152,7 +152,7 @@ impl Session {
     /// Update activity tracking for background sessions.
     /// Returns true if unread indicator changed.
     pub fn sync_activity(&mut self, is_active: bool) -> bool {
-        let version = self.terminal.version();
+        let version = self.terminal.content_version();
         let mut changed = false;
 
         if is_active {
@@ -160,11 +160,11 @@ impl Session {
                 self.has_unread_output = false;
                 changed = true;
             }
-            if self.last_seen_version != version {
-                self.last_seen_version = version;
+            if self.last_seen_content_version != version {
+                self.last_seen_content_version = version;
             }
-        } else if version > self.last_seen_version {
-            self.last_seen_version = version;
+        } else if version > self.last_seen_content_version {
+            self.last_seen_content_version = version;
             if !self.has_unread_output {
                 self.has_unread_output = true;
                 changed = true;
@@ -177,7 +177,7 @@ impl Session {
     /// Mark session as seen (clears unread indicator).
     /// Returns true if state changed.
     pub fn mark_seen(&mut self) -> bool {
-        let version = self.terminal.version();
+        let version = self.terminal.content_version();
         let mut changed = false;
 
         if self.has_unread_output {
@@ -185,8 +185,8 @@ impl Session {
             changed = true;
         }
 
-        if self.last_seen_version != version {
-            self.last_seen_version = version;
+        if self.last_seen_content_version != version {
+            self.last_seen_content_version = version;
         }
 
         changed

@@ -19,6 +19,8 @@ pub use alacritty_terminal::term::TermMode;
 use once_cell::sync::Lazy;
 use std::any::Any;
 use std::borrow::Cow;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 use std::io;
 #[cfg(unix)]
 use std::os::fd::{AsRawFd, OwnedFd, RawFd};
@@ -131,6 +133,8 @@ struct TerminalEventListener {
     wakeup_sender: Sender<()>,
     /// Channel carrying terminal events to the state.
     event_sender: Sender<TermEvent>,
+    /// Marks that the terminal content may have changed.
+    content_dirty: Arc<AtomicBool>,
 }
 
 impl TerminalEventListener {
@@ -138,11 +142,13 @@ impl TerminalEventListener {
         version: Arc<AtomicU64>,
         wakeup_sender: Sender<()>,
         event_sender: Sender<TermEvent>,
+        content_dirty: Arc<AtomicBool>,
     ) -> Self {
         Self {
             version,
             wakeup_sender,
             event_sender,
+            content_dirty,
         }
     }
 }
@@ -151,8 +157,8 @@ impl EventListener for TerminalEventListener {
     fn send_event(&self, event: TermEvent) {
         if matches!(&event, TermEvent::Wakeup) {
             self.version.fetch_add(1, Ordering::Relaxed);
-            let result = self.wakeup_sender.try_send(());
-            tracing::info!("Wakeup event sent: {:?}", result);
+            self.content_dirty.store(true, Ordering::Relaxed);
+            let _ = self.wakeup_sender.try_send(());
             return;
         }
 
@@ -189,6 +195,10 @@ pub struct TerminalState {
     title: Arc<Mutex<Option<String>>>,
     /// Whether a bell has been emitted since the last check.
     bell: Arc<AtomicBool>,
+    /// Tracks changes to the visible terminal content (excluding cursor state).
+    content_tracker: Mutex<ContentTracker>,
+    /// Marks when content should be rehashed.
+    content_dirty: Arc<AtomicBool>,
     /// Cloned PTY master fd for querying foreground process.
     #[cfg(unix)]
     pty_fd: OwnedFd,
@@ -197,6 +207,12 @@ pub struct TerminalState {
     join_handle: Option<EventLoopHandle>,
     #[cfg(test)]
     _test_permit: TerminalTestPermit,
+}
+
+#[derive(Default)]
+struct ContentTracker {
+    hash: u64,
+    version: u64,
 }
 
 impl std::fmt::Debug for TerminalState {
@@ -348,12 +364,14 @@ impl TerminalState {
         let exited_shared = Arc::new(AtomicBool::new(false));
         let title_shared = Arc::new(Mutex::new(None));
         let bell_shared = Arc::new(AtomicBool::new(false));
+        let content_dirty = Arc::new(AtomicBool::new(true));
         let (wakeup_sender, wakeup_receiver) = channel::unbounded();
         let (event_sender, event_receiver) = channel::unbounded();
         let event_listener = TerminalEventListener::new(
             version.clone(),
             wakeup_sender.clone(),
             event_sender.clone(),
+            content_dirty.clone(),
         );
         let config = TermConfig {
             kitty_keyboard: true,
@@ -381,6 +399,8 @@ impl TerminalState {
             exited_shared: exited_shared.clone(),
             title: title_shared.clone(),
             bell: bell_shared.clone(),
+            content_tracker: Mutex::new(ContentTracker::default()),
+            content_dirty: content_dirty.clone(),
             #[cfg(unix)]
             pty_fd: pty_fd.into(),
             cols,
@@ -543,6 +563,35 @@ impl TerminalState {
         self.version.load(Ordering::Relaxed)
     }
 
+    /// Get the version for visible content changes (excluding cursor updates).
+    pub fn content_version(&self) -> u64 {
+        let mut tracker = self
+            .content_tracker
+            .lock()
+            .expect("terminal content tracker poisoned");
+        if self.content_dirty.swap(false, Ordering::Relaxed) {
+            let hash = self.compute_content_hash();
+            if tracker.hash != hash {
+                tracker.hash = hash;
+                tracker.version = tracker.version.wrapping_add(1);
+            }
+        }
+        tracker.version
+    }
+
+    fn compute_content_hash(&self) -> u64 {
+        let term = self.term.lock();
+        let content = term.renderable_content();
+        let mut hasher = DefaultHasher::new();
+        for cell in content.display_iter {
+            cell.c.hash(&mut hasher);
+            hash_ansi_color(cell.fg, &mut hasher);
+            hash_ansi_color(cell.bg, &mut hasher);
+            cell.flags.bits().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
     /// Returns a receiver that signals when the terminal content has changed.
     ///
     /// Use this to trigger re-renders when the terminal updates asynchronously.
@@ -554,6 +603,10 @@ impl TerminalState {
     pub fn test_trigger_wakeup(&self) {
         self.version.fetch_add(1, Ordering::Relaxed);
         let _ = self.wakeup_sender.try_send(());
+        self.content_dirty.store(true, Ordering::Relaxed);
+        if let Ok(mut tracker) = self.content_tracker.lock() {
+            tracker.hash = tracker.hash.wrapping_add(1);
+        }
     }
 
     /// Get the current title reported by the terminal, if any.
@@ -585,6 +638,25 @@ impl TerminalState {
     pub fn mode(&self) -> TermMode {
         let term = self.term.lock();
         *term.mode()
+    }
+}
+
+fn hash_ansi_color<H: Hasher>(color: ansi::Color, hasher: &mut H) {
+    match color {
+        ansi::Color::Named(named) => {
+            0u8.hash(hasher);
+            (named as u8).hash(hasher);
+        }
+        ansi::Color::Spec(rgb) => {
+            1u8.hash(hasher);
+            rgb.r.hash(hasher);
+            rgb.g.hash(hasher);
+            rgb.b.hash(hasher);
+        }
+        ansi::Color::Indexed(idx) => {
+            2u8.hash(hasher);
+            idx.hash(hasher);
+        }
     }
 }
 
