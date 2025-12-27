@@ -5,6 +5,7 @@ pub enum Event {
     Mouse(MouseEvent),
     FocusGained,
     FocusLost,
+    Paste(String),
 }
 
 /// The kind of key event (press, release, or repeat).
@@ -152,6 +153,10 @@ impl Event {
 
     pub fn focus_lost() -> Self {
         Self::FocusLost
+    }
+
+    pub fn paste(text: impl Into<String>) -> Self {
+        Self::Paste(text.into())
     }
 }
 
@@ -399,6 +404,16 @@ mod tests {
         match Event::focus_gained() {
             Event::FocusGained => {}
             other => panic!("expected focus gained event, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn paste_event_constructor_returns_variant() {
+        let event = Event::paste("hello");
+
+        match event {
+            Event::Paste(text) => assert_eq!(text, "hello"),
+            other => panic!("expected paste event, got {:?}", other),
         }
     }
 

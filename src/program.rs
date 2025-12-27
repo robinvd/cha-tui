@@ -143,7 +143,7 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
         // Pop kitty keyboard flags, show cursor, disable mouse tracking, exit alternate screen.
         let _ = write!(
             terminal,
-            "\x1b[<1u\x1b[?25h\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l",
+            "\x1b[<1u\x1b[?25h\x1b[?2004l\x1b[?1006l\x1b[?1004l\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1049l",
         );
         let _ = terminal.flush();
         let _ = terminal.enter_cooked_mode();
@@ -184,6 +184,17 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
         // Hide cursor
         write!(terminal, "\x1b[?25l")
             .map_err(|e| ProgramError::terminal(format!("Failed to hide cursor: {}", e)))?;
+        {
+            use termina::escape::csi;
+            write!(
+                terminal,
+                "{}",
+                csi::Csi::Mode(csi::Mode::SetDecPrivateMode(csi::DecPrivateMode::Code(
+                    csi::DecPrivateModeCode::BracketedPaste
+                ))),
+            )
+            .map_err(|e| ProgramError::terminal(format!("Failed to setup terminal: {}", e)))?;
+        }
         terminal
             .flush()
             .map_err(|e| ProgramError::terminal(format!("Failed to flush terminal: {}", e)))?;
@@ -667,6 +678,7 @@ fn convert_input_event(input: termina::Event) -> Option<Event> {
         termina::Event::WindowResized(size) => Some(Event::Resize(Size::new(size.cols, size.rows))),
         termina::Event::FocusIn => Some(Event::FocusGained),
         termina::Event::FocusOut => Some(Event::FocusLost),
+        termina::Event::Paste(text) => Some(Event::Paste(text)),
         _ => None,
     }
 }
@@ -1080,6 +1092,12 @@ mod tests {
     fn focus_in_event_is_exposed() {
         let event = super::convert_input_event(termina::Event::FocusIn);
         assert_eq!(event, Some(Event::FocusGained));
+    }
+
+    #[test]
+    fn paste_event_is_exposed() {
+        let event = super::convert_input_event(termina::Event::Paste("paste".to_string()));
+        assert_eq!(event, Some(Event::Paste("paste".to_string())));
     }
 
     #[test]

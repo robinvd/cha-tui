@@ -22,8 +22,8 @@ use std::sync::Mutex;
 
 use chatui::event::{Event, Key};
 use chatui::{
-    InputState, Node, Program, ScrollState, TerminalMsg, Transition, TreeMsg, TreeState,
-    block_with_title, column, default_terminal_keybindings, row, terminal, text,
+    InputMsg, InputState, Node, Program, ScrollState, TerminalMsg, Transition, TreeMsg,
+    TreeState, block_with_title, column, default_terminal_keybindings, row, terminal, text,
 };
 use smol::channel::Receiver;
 use tracing::warn;
@@ -433,6 +433,7 @@ impl Model {
 enum Msg {
     FocusSidebar,
     Key(Key),
+    Paste(String),
     Tree(TreeMsg<TreeId>),
     Terminal {
         project: ProjectId,
@@ -462,6 +463,7 @@ fn clear_status_on_input(model: &mut Model, msg: &Msg) {
     if matches!(
         msg,
         Msg::Key(_)
+            | Msg::Paste(_)
             | Msg::Tree(_)
             | Msg::Modal(_)
             | Msg::FocusSidebar
@@ -514,6 +516,32 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 ));
             }
             model.set_focus(Focus::Sidebar);
+        }
+        Msg::Paste(text) => {
+            if model.modal.is_some() {
+                return update(
+                    model,
+                    Msg::Modal(ModalMsg::Input(InputMsg::InsertText(text))),
+                );
+            }
+
+            if model.focus == Focus::Terminal
+                && let Some(active) = model.active
+                && model.active_session().is_some()
+            {
+                return update(
+                    model,
+                    Msg::Terminal {
+                        project: active.project,
+                        worktree: active.worktree,
+                        session: active.session,
+                        msg: TerminalMsg::Paste(text),
+                    },
+                );
+            }
+
+            transitions.push(Transition::Continue);
+            return Transition::Multiple(transitions);
         }
         Msg::Key(key) => {
             // Modal key handling takes precedence
@@ -1313,6 +1341,7 @@ fn main() {
 
     let program = Program::new(model, update, view).map_event(|event| match event {
         Event::Key(key) => Some(Msg::Key(key)),
+        Event::Paste(text) => Some(Msg::Paste(text)),
         Event::FocusGained => Some(Msg::FocusGained),
         Event::FocusLost => Some(Msg::FocusLost),
         _ => None,

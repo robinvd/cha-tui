@@ -110,6 +110,8 @@ impl Drop for TerminalTestPermit {
 pub enum TerminalMsg {
     /// Raw input bytes to write to the PTY
     Input(Vec<u8>),
+    /// Paste text into the terminal
+    Paste(String),
     /// Scroll by delta lines (positive = down, negative = up)
     Scroll(i32),
     /// Resize the terminal to new dimensions
@@ -430,6 +432,11 @@ impl TerminalState {
                 // The terminal's wakeup mechanism will trigger a re-render when output arrives.
                 false
             }
+            TerminalMsg::Paste(text) => {
+                let payload = Self::format_paste_payload(&text, self.mode());
+                self.write(&payload);
+                false
+            }
             TerminalMsg::Scroll(delta) => {
                 let mut term = self.term.lock();
                 let old_offset = term.grid().display_offset();
@@ -462,6 +469,18 @@ impl TerminalState {
     /// Write raw bytes to the terminal PTY.
     pub fn write(&mut self, data: &[u8]) {
         let _ = self.sender.send(Msg::Input(Cow::Owned(data.to_vec())));
+    }
+
+    fn format_paste_payload(text: &str, mode: TermMode) -> Vec<u8> {
+        let mut payload = Vec::with_capacity(text.len() + 12);
+        if mode.contains(TermMode::BRACKETED_PASTE) {
+            payload.extend_from_slice(b"\x1b[200~");
+            payload.extend_from_slice(text.as_bytes());
+            payload.extend_from_slice(b"\x1b[201~");
+        } else {
+            payload.extend_from_slice(text.as_bytes());
+        }
+        payload
     }
 
     /// Resize the terminal to new dimensions.
@@ -2090,6 +2109,15 @@ mod tests {
             version_after_update, initial_version,
             "version should not change immediately after update"
         );
+    }
+
+    #[test]
+    fn paste_payload_wraps_when_bracketed_paste_enabled() {
+        let payload = TerminalState::format_paste_payload("paste", TermMode::BRACKETED_PASTE);
+        assert_eq!(payload, b"\x1b[200~paste\x1b[201~".to_vec());
+
+        let payload = TerminalState::format_paste_payload("paste", TermMode::empty());
+        assert_eq!(payload, b"paste".to_vec());
     }
 
     #[test]
