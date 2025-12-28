@@ -44,6 +44,7 @@ pub fn status_bar_view(
     let base_style = Style::default();
     let key_style = Style::bold();
     let mut right_spans = Vec::new();
+    let mut status_node = None;
 
     let mut left_items: Vec<Node<Msg>> = Vec::new();
     left_items.push(
@@ -73,22 +74,35 @@ pub fn status_bar_view(
                 style.fg = Some(Color::Red);
             }
         }
-        left_items.push(
+        status_node = Some(
             rich_text(vec![
                 TextSpan::new(format!(" {} ", status.text), style),
                 TextSpan::new("│", base_style),
             ])
+            .with_flex_shrink(0.)
             .with_id("status-message"),
         );
     }
 
-    row(vec![
+    let mut items = Vec::new();
+    items.push(
         row(left_items)
             .with_gap(1, 0)
             .with_flex_grow(1.)
+            .with_flex_shrink(1.)
+            .with_min_width(taffy::Dimension::length(0.0))
             .with_id("status-left"),
-        rich_text(right_spans),
-    ])
+    );
+    if let Some(node) = status_node {
+        items.push(node);
+    }
+    items.push(
+        rich_text(right_spans)
+            .with_flex_shrink(1.)
+            .with_min_width(taffy::Dimension::length(0.0)),
+    );
+
+    row(items)
 }
 
 fn shortcut_buttons(
@@ -133,4 +147,36 @@ fn shortcut_button(
         .with_padding_2d(1, 0)
         .with_id_mixin("status-shortcut", idx)
         .on_click(on_click)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Focus, StatusMessage, status_bar_view};
+    use crate::keymap::{Action, Binding, KeyChord, Keymap, Scope};
+    use chatui::event::KeyCode;
+    use chatui::test_utils::render_node_to_string;
+
+    #[test]
+    fn renders_status_bar_error_message_offscreen() {
+        let bindings = vec![Binding {
+            scope: Scope::Sidebar,
+            chord: KeyChord::ctrl(KeyCode::Char('b')),
+            action: Action::ToggleFocus,
+            description: "toggle focus with a very long description",
+            show_in_status: true,
+        }];
+        let keymap = Keymap::new(bindings);
+        let status = StatusMessage::error("keybindings overflow");
+
+        let mut node =
+            status_bar_view(Focus::Sidebar, Some(&status), false, None, false, &keymap).with_fill();
+
+        let output =
+            render_node_to_string(&mut node, 40, 1).expect("status bar render should succeed");
+
+        assert!(output.contains("Focus: Sidebar"));
+        assert!(output.contains(" keybindings overflow │"));
+        assert!(!output.contains("very long description"));
+        assert_eq!(output.chars().count(), 40);
+    }
 }

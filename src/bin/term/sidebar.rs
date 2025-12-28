@@ -277,13 +277,7 @@ pub fn sidebar_view(
             .with_flex_basis(Dimension::ZERO)
     };
 
-    let scroll_node = scrollable_content(
-        "tree-scroll",
-        tree_scroll,
-        3,
-        Msg::TreeScroll,
-        tree_node,
-    );
+    let scroll_node = scrollable_content("tree-scroll", tree_scroll, 3, Msg::TreeScroll, tree_node);
 
     block_with_title("Sessions", vec![scroll_node])
         .with_flex_grow(0.35)

@@ -1,8 +1,8 @@
 //! Git helpers for worktree management.
 
+use smol::process::Command as AsyncCommand;
 use std::io;
 use std::path::{Path, PathBuf};
-use smol::process::Command as AsyncCommand;
 use std::process::Command;
 
 #[derive(Clone, Debug)]

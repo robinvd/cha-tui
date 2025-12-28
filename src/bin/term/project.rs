@@ -253,11 +253,7 @@ impl Project {
     }
 
     /// Add a session at the start of the list.
-    pub fn add_session_at_start(
-        &mut self,
-        worktree: Option<WorktreeId>,
-        session: Session,
-    ) {
+    pub fn add_session_at_start(&mut self, worktree: Option<WorktreeId>, session: Session) {
         match worktree {
             None => {
                 self.sessions.insert(0, session);

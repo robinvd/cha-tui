@@ -1,6 +1,6 @@
+use smol::process::Command as AsyncCommand;
 use std::io;
 use std::path::{Path, PathBuf};
-use smol::process::Command as AsyncCommand;
 use std::process::Command;
 
 #[derive(Clone, Debug)]
@@ -42,7 +42,11 @@ pub async fn list_workspaces_async(repo_path: &Path) -> io::Result<Vec<JjWorkspa
     .await?;
     let mut worktrees = Vec::new();
 
-    for name in output.lines().map(str::trim).filter(|name| !name.is_empty()) {
+    for name in output
+        .lines()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
         if name == "default" {
             continue;
         }
@@ -110,7 +114,10 @@ fn remove_workspace_dir(path: &Path) -> io::Result<()> {
 }
 
 fn run_jj(repo_path: &Path, args: &[&str]) -> io::Result<std::process::Output> {
-    Command::new("jj").current_dir(repo_path).args(args).output()
+    Command::new("jj")
+        .current_dir(repo_path)
+        .args(args)
+        .output()
 }
 
 async fn run_jj_async(repo_path: &Path, args: &[&str]) -> io::Result<std::process::Output> {

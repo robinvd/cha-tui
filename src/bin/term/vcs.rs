@@ -1,6 +1,6 @@
+use super::{git, jj};
 use std::io;
 use std::path::{Path, PathBuf};
-use super::{git, jj};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VcsKind {

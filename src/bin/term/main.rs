@@ -19,6 +19,7 @@ use std::path::PathBuf;
 use once_cell::sync::Lazy;
 #[cfg(test)]
 use std::sync::Mutex;
+use taffy::Dimension;
 
 use chatui::event::{Event, Key};
 use chatui::{
@@ -1398,7 +1399,7 @@ fn view(model: &Model) -> Node<Msg> {
         &model.keymap,
     );
 
-    let mut nodes = vec![content, status];
+    let mut nodes = vec![content, status.with_max_width(Dimension::percent(1.))];
 
     if let Some(modal_state) = &model.modal {
         nodes.push(modal_view(modal_state, Msg::Modal));
