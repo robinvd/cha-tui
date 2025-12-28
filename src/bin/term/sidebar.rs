@@ -281,7 +281,7 @@ pub fn sidebar_view(
         "tree-scroll",
         tree_scroll,
         3,
-        |scroll_msg| Msg::TreeScroll(scroll_msg),
+        Msg::TreeScroll,
         tree_node,
     );
 
