@@ -45,6 +45,9 @@ Use `just test` for running the tests, this makes sure all envs etc are set corr
 
 Run the app with `RUST_LOG=debug cargo run ...` (again! using the `just session-*` or tmux) and it will put logs in todo.log or gs.log depending on the app.
 
+### Final checks
+
+when doing an editing operation: before presenting the results to the user, always run `just quality-check` and fix any errors. this run fmt/clippy etc.
 
 ## binaries
 

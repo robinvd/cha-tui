@@ -20,3 +20,7 @@ session-get-screen:
 
 test:
     export $(cat .env | xargs) && cargo test
+
+quality-check: test
+    cargo fmt
+    cargo clippy
