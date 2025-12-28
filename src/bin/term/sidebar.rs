@@ -2,10 +2,13 @@
 
 use chatui::dom::Color;
 use chatui::{
-    Node, Style, TextSpan, TreeMsg, TreeNode, TreeState, TreeStyle, block_with_title, text,
-    tree_view,
+    Node, ScrollState, Style, TextSpan, TreeMsg, TreeNode, TreeState, TreeStyle, block_with_title,
+    scrollable_content, text, tree_view,
 };
 use taffy::Dimension;
+use taffy::prelude::TaffyZero;
+
+use crate::Msg;
 
 use super::project::{Project, ProjectId, SessionKey, WorktreeId};
 use super::session::SessionId;
@@ -86,8 +89,12 @@ pub fn rebuild_tree(
 
             let label = vec![TextSpan::new(worktree.name.clone(), Style::default())];
             children.push(
-                TreeNode::branch(TreeId::Worktree(project.id, worktree.id), label, wt_children)
-                    .with_selected_row_style(selection_style),
+                TreeNode::branch(
+                    TreeId::Worktree(project.id, worktree.id),
+                    label,
+                    wt_children,
+                )
+                .with_selected_row_style(selection_style),
             );
         }
 
@@ -115,7 +122,11 @@ pub fn rebuild_tree(
     if tree.selected().is_none()
         && let Some(first) = first_session_id(projects)
     {
-        tree.select(TreeId::Session(first.project, first.worktree, first.session));
+        tree.select(TreeId::Session(
+            first.project,
+            first.worktree,
+            first.session,
+        ));
     }
 
     if let Some(TreeId::Session(pid, worktree, sid)) = tree.selected().cloned() {
@@ -151,10 +162,7 @@ pub fn first_session_id(projects: &[Project]) -> Option<SessionKey> {
 }
 
 /// Get the next session in the tree order.
-pub fn next_session(
-    tree: &TreeState<TreeId>,
-    active: Option<SessionKey>,
-) -> Option<SessionKey> {
+pub fn next_session(tree: &TreeState<TreeId>, active: Option<SessionKey>) -> Option<SessionKey> {
     let active = active?;
     let mut seen_active = false;
     let mut first_session = None;
@@ -185,10 +193,7 @@ pub fn next_session(
 }
 
 /// Get the previous session in the tree order.
-pub fn prev_session(
-    tree: &TreeState<TreeId>,
-    active: Option<SessionKey>,
-) -> Option<SessionKey> {
+pub fn prev_session(tree: &TreeState<TreeId>, active: Option<SessionKey>) -> Option<SessionKey> {
     let active = active?;
     let mut previous = None;
 
@@ -250,8 +255,9 @@ pub fn move_project_down(projects: &mut [Project], pid: ProjectId) -> bool {
 }
 
 /// Render the sidebar.
-pub fn sidebar_view<Msg: Clone + 'static>(
+pub fn sidebar_view(
     tree: &TreeState<TreeId>,
+    tree_scroll: &ScrollState,
     auto_hide: bool,
     focused: bool,
     wrap_tree: impl Fn(TreeMsg<TreeId>) -> Msg + 'static,
@@ -266,9 +272,20 @@ pub fn sidebar_view<Msg: Clone + 'static>(
         text::<Msg>("No projects yet. Press p to add one.")
     } else {
         tree_view("session-tree", tree, &style, wrap_tree, focused)
+            .with_min_height(Dimension::ZERO)
+            .with_flex_grow(1.)
+            .with_flex_basis(Dimension::ZERO)
     };
 
-    block_with_title("Sessions", vec![tree_node.with_fill()])
+    let scroll_node = scrollable_content(
+        "tree-scroll",
+        tree_scroll,
+        3,
+        |scroll_msg| Msg::TreeScroll(scroll_msg),
+        tree_node,
+    );
+
+    block_with_title("Sessions", vec![scroll_node])
         .with_flex_grow(0.35)
         .with_flex_shrink(0.0)
         .with_flex_basis(Dimension::length(0.))
