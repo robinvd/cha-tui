@@ -19,7 +19,8 @@ session-get-screen:
     @rm /tmp/chatui_screen
 
 test:
-    export $(cat .env | xargs) && cargo test --workspace
+    # run all workspaces tests but skip doctests, as they compile very slow and we dont have any
+    cargo test --workspace --lib --bins --tests
 
 quality-check: test
     cargo fmt
