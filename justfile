@@ -19,7 +19,7 @@ session-get-screen:
     @rm /tmp/chatui_screen
 
 test:
-    export $(cat .env | xargs) && cargo test
+    export $(cat .env | xargs) && cargo test --workspace
 
 quality-check: test
     cargo fmt
