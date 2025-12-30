@@ -10,3 +10,4 @@ chatui = { path = "../.." }
 miette = { version = "7", features = ["fancy"] }
 smol = "2"
 taffy = "0.9.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }

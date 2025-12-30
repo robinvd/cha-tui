@@ -5,3 +5,7 @@ edition = "2024"
 
 [dependencies]
 chatui = { path = "../.." }
+color-eyre = "0.6.5"
+smol = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
