@@ -48,7 +48,8 @@ use smol::channel::{self, Receiver, Sender};
 use crate::buffer::{CellAttributes, CursorShape};
 use crate::dom::{Node, Renderable, renderable};
 use crate::event::{
-    Key, KeyCode, KeyEventKind, MediaKeyCode, ModifierKeyCode, MouseButtons, MouseEvent,
+    Key, KeyCode, KeyEventKind, LocalMouseEvent, MediaKeyCode, ModifierKeyCode, MouseButton,
+    MouseEventKind, MouseScrollAxis, MouseScrollDirection,
 };
 use crate::palette::Rgba;
 use crate::render::RenderContext;
@@ -685,7 +686,6 @@ pub fn terminal<Msg>(
 where
     Msg: 'static,
 {
-    use std::cell::RefCell;
     use std::rc::Rc;
 
     let renderable_widget = TerminalRenderable::new(state, focused);
@@ -696,70 +696,53 @@ where
     let resize_handler = handler.clone();
     let current_size = state.size();
     let term = state.term.clone();
-    let last_buttons = Rc::new(RefCell::new(MouseButtons::default()));
-
-    node = node.on_mouse(move |event: MouseEvent| {
-        let prev_buttons = *last_buttons.borrow();
-        *last_buttons.borrow_mut() = event.buttons;
+    node = node.on_mouse(move |event: LocalMouseEvent| {
         // Get current mode dynamically - applications can enable/disable mouse mode
         let current_mode = *term.lock().mode();
 
-        // Handle scroll wheel - always process for alternate scroll mode
-        if event.buttons.vert_wheel {
-            // If terminal is in mouse mode, forward as mouse event
-            if current_mode.intersects(TermMode::MOUSE_MODE) {
-                let sgr = current_mode.contains(TermMode::SGR_MOUSE);
-                if let Some(bytes) = encode_mouse_event(&event, true, sgr, false) {
-                    return Some(mouse_handler(TerminalMsg::Input(bytes)));
+        match event.event.kind {
+            MouseEventKind::Scroll(scroll) => {
+                if current_mode.intersects(TermMode::MOUSE_MODE) {
+                    let sgr = current_mode.contains(TermMode::SGR_MOUSE);
+                    if let Some(bytes) = encode_mouse_event(&event, true, sgr, false) {
+                        return Some(mouse_handler(TerminalMsg::Input(bytes)));
+                    }
                 }
-            }
-            // Otherwise use scroll behavior
-            let delta = if event.buttons.wheel_positive { -3 } else { 3 };
-            return Some(mouse_handler(TerminalMsg::Scroll(delta)));
-        }
 
-        // Handle horizontal scroll
-        if event.buttons.horz_wheel && current_mode.intersects(TermMode::MOUSE_MODE) {
-            let sgr = current_mode.contains(TermMode::SGR_MOUSE);
-            if let Some(bytes) = encode_mouse_event(&event, true, sgr, false) {
-                return Some(mouse_handler(TerminalMsg::Input(bytes)));
-            }
-        }
+                if scroll.axis == MouseScrollAxis::Vertical {
+                    let delta = if scroll.direction == MouseScrollDirection::Positive {
+                        -3
+                    } else {
+                        3
+                    };
+                    return Some(mouse_handler(TerminalMsg::Scroll(delta)));
+                }
 
-        // Handle click events when terminal is in mouse mode
-        if current_mode.intersects(TermMode::MOUSE_MODE) {
-            let is_press = event.buttons.left || event.buttons.middle || event.buttons.right;
-            let was_pressed = prev_buttons.left || prev_buttons.middle || prev_buttons.right;
-            let motion_event = current_mode.contains(TermMode::MOUSE_MOTION);
-            if is_press {
-                let is_drag = was_pressed;
+                None
+            }
+            MouseEventKind::Down(_) | MouseEventKind::Drag(_) | MouseEventKind::Up(_)
+                if current_mode.intersects(TermMode::MOUSE_MODE) =>
+            {
+                let pressed = !matches!(event.event.kind, MouseEventKind::Up(_));
+                let is_drag = matches!(event.event.kind, MouseEventKind::Drag(_));
                 let sgr = current_mode.contains(TermMode::SGR_MOUSE);
-                if let Some(bytes) = encode_mouse_event(&event, true, sgr, is_drag) {
+                if let Some(bytes) = encode_mouse_event(&event, pressed, sgr, is_drag) {
                     return Some(mouse_handler(TerminalMsg::Input(bytes)));
                 }
-            } else if was_pressed {
-                let mut release_event = event;
-                release_event.buttons = MouseButtons {
-                    left: prev_buttons.left,
-                    right: prev_buttons.right,
-                    middle: prev_buttons.middle,
-                    horz_wheel: false,
-                    vert_wheel: false,
-                    wheel_positive: true,
-                };
-                let sgr = current_mode.contains(TermMode::SGR_MOUSE);
-                if let Some(bytes) = encode_mouse_event(&release_event, false, sgr, false) {
-                    return Some(mouse_handler(TerminalMsg::Input(bytes)));
-                }
-            } else if motion_event {
+                None
+            }
+            MouseEventKind::Move
+                if current_mode.intersects(TermMode::MOUSE_MODE)
+                    && current_mode.contains(TermMode::MOUSE_MOTION) =>
+            {
                 let sgr = current_mode.contains(TermMode::SGR_MOUSE);
                 if let Some(bytes) = encode_mouse_event(&event, true, sgr, true) {
                     return Some(mouse_handler(TerminalMsg::Input(bytes)));
                 }
+                None
             }
+            _ => None,
         }
-
-        None
     });
 
     node = node.on_resize(move |layout| {
@@ -1424,45 +1407,39 @@ fn get_kitty_key_code_non_numpad(key: &Key) -> Option<(u32, char)> {
 /// Uses SGR mouse encoding format: `\x1b[<Cb;Cx;CyM` (press) or `\x1b[<Cb;Cx;Cym` (release)
 /// where Cb is the button code with modifiers, and Cx/Cy are 1-based coordinates.
 pub fn encode_mouse_event(
-    event: &MouseEvent,
+    event: &LocalMouseEvent,
     pressed: bool,
     sgr_mode: bool,
     motion: bool,
 ) -> Option<Vec<u8>> {
     // Determine button code
-    let button = if event.buttons.left {
-        0
-    } else if event.buttons.middle {
-        1
-    } else if event.buttons.right {
-        2
-    } else if event.buttons.vert_wheel {
-        if event.buttons.wheel_positive {
-            64 // scroll up
-        } else {
-            65 // scroll down
-        }
-    } else if event.buttons.horz_wheel {
-        if event.buttons.wheel_positive {
-            67 // scroll right
-        } else {
-            66 // scroll left
-        }
-    } else if motion {
-        3
-    } else {
-        return None;
+    let button = match event.event.kind {
+        MouseEventKind::Down(button)
+        | MouseEventKind::Up(button)
+        | MouseEventKind::Drag(button) => match button {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+        },
+        MouseEventKind::Scroll(scroll) => match (scroll.axis, scroll.direction) {
+            (MouseScrollAxis::Vertical, MouseScrollDirection::Positive) => 64, // scroll up
+            (MouseScrollAxis::Vertical, MouseScrollDirection::Negative) => 65, // scroll down
+            (MouseScrollAxis::Horizontal, MouseScrollDirection::Negative) => 66, // scroll left
+            (MouseScrollAxis::Horizontal, MouseScrollDirection::Positive) => 67, // scroll right
+        },
+        MouseEventKind::Move if motion => 3,
+        _ => return None,
     };
 
     // Add modifier flags
     let mut cb = button;
-    if event.shift {
+    if event.event.modifiers.shift {
         cb |= 4;
     }
-    if event.alt {
+    if event.event.modifiers.alt {
         cb |= 8;
     }
-    if event.ctrl {
+    if event.event.modifiers.ctrl {
         cb |= 16;
     }
     if motion {
@@ -1470,8 +1447,8 @@ pub fn encode_mouse_event(
     }
 
     // Convert to 1-based coordinates
-    let cx = event.local_x.saturating_add(1);
-    let cy = event.local_y.saturating_add(1);
+    let cx = event.local_position.x.saturating_add(1);
+    let cy = event.local_position.y.saturating_add(1);
 
     if sgr_mode {
         // SGR format: \x1b[<Cb;Cx;CyM or \x1b[<Cb;Cx;Cym
@@ -1759,6 +1736,10 @@ impl Renderable for TerminalRenderable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::event::{
+        LocalMouseEvent, MouseButton, MouseEvent, MouseEventKind, MouseScroll, MouseScrollAxis,
+        MouseScrollDirection,
+    };
 
     // Helper: test key_to_input in legacy mode (empty TermMode)
     fn legacy_key_input(key: Key) -> Option<Vec<u8>> {
@@ -1853,26 +1834,8 @@ mod tests {
 
     #[test]
     fn encode_mouse_left_click_sgr() {
-        use crate::event::MouseButtons;
-        let event = MouseEvent {
-            x: 5,
-            y: 10,
-            local_x: 5,
-            local_y: 10,
-            buttons: MouseButtons {
-                left: true,
-                right: false,
-                middle: false,
-                horz_wheel: false,
-                vert_wheel: false,
-                wheel_positive: false,
-            },
-            ctrl: false,
-            alt: false,
-            shift: false,
-            super_key: false,
-            click_count: 1,
-        };
+        let event = MouseEvent::new(5, 10, MouseEventKind::Down(MouseButton::Left));
+        let event = LocalMouseEvent::new(event, 5, 10);
         let bytes = encode_mouse_event(&event, true, true, false);
         // SGR format: \x1b[<0;6;11M (button 0, 1-based coords)
         assert_eq!(bytes, Some(b"\x1b[<0;6;11M".to_vec()));
@@ -1880,26 +1843,8 @@ mod tests {
 
     #[test]
     fn encode_mouse_right_click_sgr() {
-        use crate::event::MouseButtons;
-        let event = MouseEvent {
-            x: 0,
-            y: 0,
-            local_x: 0,
-            local_y: 0,
-            buttons: MouseButtons {
-                left: false,
-                right: true,
-                middle: false,
-                horz_wheel: false,
-                vert_wheel: false,
-                wheel_positive: false,
-            },
-            ctrl: false,
-            alt: false,
-            shift: false,
-            super_key: false,
-            click_count: 1,
-        };
+        let event = MouseEvent::new(0, 0, MouseEventKind::Down(MouseButton::Right));
+        let event = LocalMouseEvent::new(event, 0, 0);
         let bytes = encode_mouse_event(&event, true, true, false);
         // SGR format: \x1b[<2;1;1M (button 2 = right, 1-based coords)
         assert_eq!(bytes, Some(b"\x1b[<2;1;1M".to_vec()));
@@ -1907,26 +1852,8 @@ mod tests {
 
     #[test]
     fn encode_mouse_release_sgr() {
-        use crate::event::MouseButtons;
-        let event = MouseEvent {
-            x: 10,
-            y: 20,
-            local_x: 10,
-            local_y: 20,
-            buttons: MouseButtons {
-                left: true,
-                right: false,
-                middle: false,
-                horz_wheel: false,
-                vert_wheel: false,
-                wheel_positive: false,
-            },
-            ctrl: false,
-            alt: false,
-            shift: false,
-            super_key: false,
-            click_count: 0,
-        };
+        let event = MouseEvent::new(10, 20, MouseEventKind::Up(MouseButton::Left));
+        let event = LocalMouseEvent::new(event, 10, 20);
         let bytes = encode_mouse_event(&event, false, true, false);
         // SGR release format: \x1b[<0;11;21m (lowercase 'm' for release)
         assert_eq!(bytes, Some(b"\x1b[<0;11;21m".to_vec()));
@@ -1934,26 +1861,16 @@ mod tests {
 
     #[test]
     fn encode_mouse_with_modifiers_sgr() {
-        use crate::event::MouseButtons;
-        let event = MouseEvent {
-            x: 0,
-            y: 0,
-            local_x: 0,
-            local_y: 0,
-            buttons: MouseButtons {
-                left: true,
-                right: false,
-                middle: false,
-                horz_wheel: false,
-                vert_wheel: false,
-                wheel_positive: false,
-            },
-            ctrl: true,
-            alt: true,
-            shift: true,
-            super_key: false,
-            click_count: 1,
-        };
+        let event = MouseEvent::with_modifiers(
+            0,
+            0,
+            MouseEventKind::Down(MouseButton::Left),
+            true,
+            true,
+            true,
+            false,
+        );
+        let event = LocalMouseEvent::new(event, 0, 0);
         let bytes = encode_mouse_event(&event, true, true, false);
         // Button 0 + shift(4) + alt(8) + ctrl(16) = 28
         assert_eq!(bytes, Some(b"\x1b[<28;1;1M".to_vec()));
@@ -1961,26 +1878,15 @@ mod tests {
 
     #[test]
     fn encode_mouse_scroll_sgr() {
-        use crate::event::MouseButtons;
-        let event = MouseEvent {
-            x: 5,
-            y: 5,
-            local_x: 5,
-            local_y: 5,
-            buttons: MouseButtons {
-                left: false,
-                right: false,
-                middle: false,
-                horz_wheel: false,
-                vert_wheel: true,
-                wheel_positive: true,
-            },
-            ctrl: false,
-            alt: false,
-            shift: false,
-            super_key: false,
-            click_count: 0,
-        };
+        let event = MouseEvent::new(
+            5,
+            5,
+            MouseEventKind::Scroll(MouseScroll {
+                axis: MouseScrollAxis::Vertical,
+                direction: MouseScrollDirection::Positive,
+            }),
+        );
+        let event = LocalMouseEvent::new(event, 5, 5);
         let bytes = encode_mouse_event(&event, true, true, false);
         // Scroll up = button 64
         assert_eq!(bytes, Some(b"\x1b[<64;6;6M".to_vec()));
@@ -1988,49 +1894,28 @@ mod tests {
 
     #[test]
     fn encode_mouse_horizontal_scroll_sgr() {
-        use crate::event::MouseButtons;
-        let event = MouseEvent {
-            x: 5,
-            y: 5,
-            local_x: 5,
-            local_y: 5,
-            buttons: MouseButtons {
-                left: false,
-                right: false,
-                middle: false,
-                horz_wheel: true,
-                vert_wheel: false,
-                wheel_positive: true,
-            },
-            ctrl: false,
-            alt: false,
-            shift: false,
-            super_key: false,
-            click_count: 0,
-        };
+        let event = MouseEvent::new(
+            5,
+            5,
+            MouseEventKind::Scroll(MouseScroll {
+                axis: MouseScrollAxis::Horizontal,
+                direction: MouseScrollDirection::Positive,
+            }),
+        );
+        let event = LocalMouseEvent::new(event, 5, 5);
         let bytes = encode_mouse_event(&event, true, true, false);
         // Scroll right = button 67
         assert_eq!(bytes, Some(b"\x1b[<67;6;6M".to_vec()));
 
-        let event = MouseEvent {
-            x: 5,
-            y: 5,
-            local_x: 5,
-            local_y: 5,
-            buttons: MouseButtons {
-                left: false,
-                right: false,
-                middle: false,
-                horz_wheel: true,
-                vert_wheel: false,
-                wheel_positive: false,
-            },
-            ctrl: false,
-            alt: false,
-            shift: false,
-            super_key: false,
-            click_count: 0,
-        };
+        let event = MouseEvent::new(
+            5,
+            5,
+            MouseEventKind::Scroll(MouseScroll {
+                axis: MouseScrollAxis::Horizontal,
+                direction: MouseScrollDirection::Negative,
+            }),
+        );
+        let event = LocalMouseEvent::new(event, 5, 5);
         let bytes = encode_mouse_event(&event, true, true, false);
         // Scroll left = button 66
         assert_eq!(bytes, Some(b"\x1b[<66;6;6M".to_vec()));
@@ -2038,26 +1923,8 @@ mod tests {
 
     #[test]
     fn encode_mouse_legacy_format() {
-        use crate::event::MouseButtons;
-        let event = MouseEvent {
-            x: 5,
-            y: 10,
-            local_x: 5,
-            local_y: 10,
-            buttons: MouseButtons {
-                left: true,
-                right: false,
-                middle: false,
-                horz_wheel: false,
-                vert_wheel: false,
-                wheel_positive: false,
-            },
-            ctrl: false,
-            alt: false,
-            shift: false,
-            super_key: false,
-            click_count: 1,
-        };
+        let event = MouseEvent::new(5, 10, MouseEventKind::Down(MouseButton::Left));
+        let event = LocalMouseEvent::new(event, 5, 10);
         let bytes = encode_mouse_event(&event, true, false, false);
         // Legacy format: \x1b[M followed by (button+32), (x+32+1), (y+32+1)
         // button=0, x=5+1=6, y=10+1=11
@@ -2066,19 +1933,8 @@ mod tests {
 
     #[test]
     fn encode_mouse_no_button_returns_none() {
-        use crate::event::MouseButtons;
-        let event = MouseEvent {
-            x: 0,
-            y: 0,
-            local_x: 0,
-            local_y: 0,
-            buttons: MouseButtons::default(),
-            ctrl: false,
-            alt: false,
-            shift: false,
-            super_key: false,
-            click_count: 0,
-        };
+        let event = MouseEvent::new(0, 0, MouseEventKind::Move);
+        let event = LocalMouseEvent::new(event, 0, 0);
         let bytes = encode_mouse_event(&event, true, true, false);
         assert_eq!(bytes, None);
     }

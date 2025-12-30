@@ -21,7 +21,10 @@ pub use crate::dom::{
     text,
 };
 pub use crate::error::ProgramError;
-pub use crate::event::{Event, Key, KeyCode, MouseButtons, MouseEvent, Size};
+pub use crate::event::{
+    Event, Key, KeyCode, LocalMouseEvent, MouseButton, MouseEvent, MouseEventKind, MouseModifiers,
+    MousePosition, MouseScroll, MouseScrollAxis, MouseScrollDirection, Size,
+};
 pub use crate::geometry::{Point, Rect};
 pub use crate::program::{EventFn, Program, Transition, UpdateFn, ViewFn};
 pub use components::input::{

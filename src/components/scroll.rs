@@ -6,7 +6,7 @@ use std::{
 
 use crate::{
     dom::{Node, PendingScroll},
-    event::Size,
+    event::{LocalMouseEvent, MouseEventKind, MouseScrollAxis, MouseScrollDirection, Size},
     hash,
     scroll::ScrollAlignment,
 };
@@ -381,62 +381,61 @@ pub fn scrollable_content<Msg>(
             .with_scroll_x(state.offset_x()),
     };
 
-    node = node.on_mouse(move |event| match behavior {
-        ScrollBehavior::Vertical => {
-            if !event.buttons.vert_wheel {
-                return None;
-            }
-            let delta = if event.buttons.wheel_positive {
-                -step
-            } else {
-                step
-            };
-            Some(mouse_handler(ScrollMsg::AxisDelta {
-                axis: ScrollAxis::Vertical,
-                amount: delta,
-            }))
-        }
-        ScrollBehavior::Horizontal => {
-            let wheel_triggered =
-                event.buttons.horz_wheel || (event.buttons.vert_wheel && event.shift);
-            if !wheel_triggered {
-                return None;
-            }
-            let delta = if event.buttons.wheel_positive {
-                -step
-            } else {
-                step
-            };
-            Some(mouse_handler(ScrollMsg::AxisDelta {
-                axis: ScrollAxis::Horizontal,
-                amount: delta,
-            }))
-        }
-        ScrollBehavior::Both => {
-            if event.buttons.horz_wheel || (event.buttons.vert_wheel && event.shift) {
-                let delta = if event.buttons.wheel_positive {
-                    -step
-                } else {
-                    step
-                };
-                return Some(mouse_handler(ScrollMsg::AxisDelta {
-                    axis: ScrollAxis::Horizontal,
-                    amount: delta,
-                }));
-            }
+    node = node.on_mouse(move |event: LocalMouseEvent| {
+        let MouseEventKind::Scroll(scroll) = event.event.kind else {
+            return None;
+        };
 
-            if event.buttons.vert_wheel {
-                let delta = if event.buttons.wheel_positive {
-                    -step
-                } else {
-                    step
-                };
-                return Some(mouse_handler(ScrollMsg::AxisDelta {
+        let direction = match scroll.direction {
+            MouseScrollDirection::Positive => -step,
+            MouseScrollDirection::Negative => step,
+        };
+
+        match behavior {
+            ScrollBehavior::Vertical => {
+                if scroll.axis != MouseScrollAxis::Vertical {
+                    return None;
+                }
+                Some(mouse_handler(ScrollMsg::AxisDelta {
                     axis: ScrollAxis::Vertical,
-                    amount: delta,
-                }));
+                    amount: direction,
+                }))
             }
-            None
+            ScrollBehavior::Horizontal => {
+                let scroll_axis =
+                    if scroll.axis == MouseScrollAxis::Vertical && event.event.modifiers.shift {
+                        MouseScrollAxis::Horizontal
+                    } else {
+                        scroll.axis
+                    };
+
+                if scroll_axis != MouseScrollAxis::Horizontal {
+                    return None;
+                }
+
+                Some(mouse_handler(ScrollMsg::AxisDelta {
+                    axis: ScrollAxis::Horizontal,
+                    amount: direction,
+                }))
+            }
+            ScrollBehavior::Both => {
+                let scroll_axis =
+                    if scroll.axis == MouseScrollAxis::Vertical && event.event.modifiers.shift {
+                        MouseScrollAxis::Horizontal
+                    } else {
+                        scroll.axis
+                    };
+
+                let axis = match scroll_axis {
+                    MouseScrollAxis::Horizontal => ScrollAxis::Horizontal,
+                    MouseScrollAxis::Vertical => ScrollAxis::Vertical,
+                };
+
+                Some(mouse_handler(ScrollMsg::AxisDelta {
+                    axis,
+                    amount: direction,
+                }))
+            }
         }
     });
 

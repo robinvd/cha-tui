@@ -9,7 +9,7 @@ use std::any::Any;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::event::{MouseEvent, Size};
+use crate::event::{LocalMouseEvent, Size};
 use crate::render::RenderContext;
 use crate::scroll::ScrollAlignment;
 use taffy::{
@@ -63,7 +63,7 @@ pub struct Node<Msg> {
     pub(crate) scroll_x: f32,
     pub(crate) scroll_y: f32,
 
-    pub(crate) on_mouse: Option<Rc<dyn Fn(MouseEvent) -> Option<Msg>>>,
+    pub(crate) on_mouse: Option<Rc<dyn Fn(LocalMouseEvent) -> Option<Msg>>>,
     pub(crate) on_resize: Option<ResizeHandler<Msg>>,
     pub(crate) pending_scroll: Option<PendingScroll<Msg>>,
 }
@@ -398,7 +398,7 @@ impl<Msg> Node<Msg> {
     }
 
     pub fn on_click(mut self, handler: impl Fn() -> Msg + 'static) -> Self {
-        self.on_mouse = Some(Rc::new(move |e: MouseEvent| {
+        self.on_mouse = Some(Rc::new(move |e: LocalMouseEvent| {
             if e.is_single_click() {
                 Some(handler())
             } else {
@@ -408,7 +408,7 @@ impl<Msg> Node<Msg> {
         self
     }
 
-    pub fn on_mouse(mut self, handler: impl Fn(MouseEvent) -> Option<Msg> + 'static) -> Self {
+    pub fn on_mouse(mut self, handler: impl Fn(LocalMouseEvent) -> Option<Msg> + 'static) -> Self {
         self.on_mouse = Some(Rc::new(handler));
         self
     }
@@ -675,7 +675,7 @@ impl<Msg> Node<Msg> {
         }
     }
 
-    pub(crate) fn mouse_message(&self, event: MouseEvent) -> Option<Msg> {
+    pub(crate) fn mouse_message(&self, event: LocalMouseEvent) -> Option<Msg> {
         if let Some(handler) = &self.on_mouse {
             return handler(event);
         }
@@ -1294,10 +1294,14 @@ mod tests {
         crate::dom::rounding::round_layout(&mut node);
 
         node.hit_test(0, 0, &mut |n, _, _| {
-            n.mouse_message(crate::event::MouseEvent::new(
+            n.mouse_message(crate::event::LocalMouseEvent::new(
+                crate::event::MouseEvent::new(
+                    0,
+                    0,
+                    crate::event::MouseEventKind::Down(crate::event::MouseButton::Left),
+                ),
                 0,
                 0,
-                crate::event::MouseButtons::new(true, false, false),
             ))
         })
         .expect("expected hit");

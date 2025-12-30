@@ -7,7 +7,7 @@ use zed_sum_tree::TreeMap;
 use crate::Style;
 use crate::buffer::{CellAttributes, CursorShape};
 use crate::dom::{Color, Node, Renderable, renderable};
-use crate::event::{Key, KeyCode, MouseEvent};
+use crate::event::{Key, KeyCode, LocalMouseEvent, MouseButton, MouseEventKind};
 use crate::render::RenderContext;
 use taffy::AvailableSpace;
 
@@ -3072,17 +3072,19 @@ where
     let handler = Rc::new(map_msg);
     let mouse_handler = handler.clone();
 
-    node = node.on_mouse(move |event: MouseEvent| {
-        if event.buttons.left && event.click_count > 0 {
+    node = node.on_mouse(move |event: LocalMouseEvent| {
+        if matches!(event.event.kind, MouseEventKind::Down(MouseButton::Left))
+            && event.event.click_count > 0
+        {
             let msg = InputMsg::Pointer {
-                column: event.local_x,
-                row: event.local_y,
-                click_count: event.click_count,
+                column: event.local_position.x,
+                row: event.local_position.y,
+                click_count: event.event.click_count,
                 modifiers: PointerModifiers {
-                    ctrl: event.ctrl,
-                    alt: event.alt,
-                    shift: event.shift,
-                    super_key: event.super_key,
+                    ctrl: event.event.modifiers.ctrl,
+                    alt: event.event.modifiers.alt,
+                    shift: event.event.modifiers.shift,
+                    super_key: event.event.modifiers.super_key,
                 },
                 scroll_y: 0,
             };

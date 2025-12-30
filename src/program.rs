@@ -9,8 +9,8 @@ use crate::buffer::DoubleBuffer;
 use crate::dom::Node;
 use crate::error::ProgramError;
 use crate::event::{
-    Event, Key, KeyCode, KeyEventKind, MediaKeyCode, ModifierKeyCode, MouseButtons, MouseEvent,
-    Size,
+    Event, Key, KeyCode, KeyEventKind, LocalMouseEvent, MediaKeyCode, ModifierKeyCode, MouseButton,
+    MouseEvent, MouseEventKind, MouseScrollAxis, MouseScrollDirection, Size,
 };
 use crate::palette::Palette;
 use crate::render::Renderer;
@@ -67,7 +67,6 @@ pub struct Program<Model, Msg> {
     event_mapper: EventFn<Msg>,
     current_size: Size,
     current_view: Option<Node<Msg>>,
-    last_mouse_buttons: MouseButtons,
     last_click: Option<LastClick>,
     palette: Palette,
     queued_quit: bool,
@@ -90,7 +89,6 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
             event_mapper: Box::new(|_| None),
             current_size: Size::new(DEFAULT_WIDTH, DEFAULT_HEIGHT),
             current_view: None,
-            last_mouse_buttons: MouseButtons::default(),
             last_click: None,
             palette: Palette::default(),
             queued_quit: false,
@@ -611,18 +609,15 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
     }
 
     fn handle_mouse_event(&mut self, event: &MouseEvent) -> Option<Msg> {
-        let previous = self.last_mouse_buttons;
-        self.last_mouse_buttons = event.buttons;
-
         let mut enriched = *event;
         enriched.click_count = 0;
 
-        if event.buttons.left && !previous.left {
+        if matches!(event.kind, MouseEventKind::Down(MouseButton::Left)) {
             let timestamp = Instant::now();
             let click_count = if let Some(last) = &self.last_click
                 && timestamp.duration_since(last.timestamp) <= DOUBLE_CLICK_INTERVAL
-                && last.x == event.x
-                && last.y == event.y
+                && last.x == event.position.x
+                && last.y == event.position.y
             {
                 if last.count >= 3 { 1 } else { last.count + 1 }
             } else {
@@ -632,25 +627,28 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
             enriched.click_count = click_count;
             self.last_click = Some(LastClick {
                 timestamp,
-                x: event.x,
-                y: event.y,
+                x: event.position.x,
+                y: event.position.y,
                 count: click_count,
             });
         }
 
         if let Some(view) = self.current_view.as_ref()
-            && let Some(msg) = view.hit_test(event.x, event.y, &mut |target, origin_x, origin_y| {
-                let mut local_event = enriched;
-                let origin_x_rounded = origin_x.round() as i32;
-                let origin_y_rounded = origin_y.round() as i32;
+            && let Some(msg) = view.hit_test(
+                event.position.x,
+                event.position.y,
+                &mut |target, origin_x, origin_y| {
+                    let origin_x_rounded = origin_x.round() as i32;
+                    let origin_y_rounded = origin_y.round() as i32;
 
-                let rel_x = i32::from(local_event.x).saturating_sub(origin_x_rounded);
-                let rel_y = i32::from(local_event.y).saturating_sub(origin_y_rounded);
-                local_event.local_x = rel_x.max(0) as u16;
-                local_event.local_y = rel_y.max(0) as u16;
+                    let rel_x = i32::from(enriched.position.x).saturating_sub(origin_x_rounded);
+                    let rel_y = i32::from(enriched.position.y).saturating_sub(origin_y_rounded);
+                    let local_event =
+                        LocalMouseEvent::new(enriched, rel_x.max(0) as u16, rel_y.max(0) as u16);
 
-                target.mouse_message(local_event)
-            })
+                    target.mouse_message(local_event)
+                },
+            )
         {
             return Some(msg);
         }
@@ -684,65 +682,47 @@ fn convert_input_event(input: termina::Event) -> Option<Event> {
 }
 
 fn map_mouse_event(mouse: termina::event::MouseEvent) -> Option<Event> {
-    use termina::event::{MouseButton, MouseEventKind};
+    use termina::event::{MouseButton as TermMouseButton, MouseEventKind as TermMouseEventKind};
 
-    let mut buttons = MouseButtons::default();
-
-    match mouse.kind {
-        MouseEventKind::Down(btn) => {
-            // Button press - set the button as pressed
-            match btn {
-                MouseButton::Left => buttons.left = true,
-                MouseButton::Right => buttons.right = true,
-                MouseButton::Middle => buttons.middle = true,
-            }
-        }
-        MouseEventKind::Up(btn) => {
-            // Button release - all buttons are now released
-            // We still need to report which button was released for the event
-            // but we'll keep buttons at default (all false)
-            match btn {
-                MouseButton::Left => {
-                    // Report this as a mouse event with left button having just been released
-                    // The program's handle_mouse_event will detect the state change
-                }
-                MouseButton::Right => {}
-                MouseButton::Middle => {}
-            }
-        }
-        MouseEventKind::Drag(btn) => {
-            // Dragging - the button is pressed
-            match btn {
-                MouseButton::Left => buttons.left = true,
-                MouseButton::Right => buttons.right = true,
-                MouseButton::Middle => buttons.middle = true,
-            }
-        }
-        MouseEventKind::Moved => {
-            // Just movement, no buttons
-        }
-        MouseEventKind::ScrollDown => {
-            buttons.vert_wheel = true;
-            buttons.wheel_positive = false;
-        }
-        MouseEventKind::ScrollUp => {
-            buttons.vert_wheel = true;
-            buttons.wheel_positive = true;
-        }
-        MouseEventKind::ScrollLeft => {
-            buttons.horz_wheel = true;
-            buttons.wheel_positive = false;
-        }
-        MouseEventKind::ScrollRight => {
-            buttons.horz_wheel = true;
-            buttons.wheel_positive = true;
-        }
-    }
+    let kind = match mouse.kind {
+        TermMouseEventKind::Down(btn) => MouseEventKind::Down(match btn {
+            TermMouseButton::Left => MouseButton::Left,
+            TermMouseButton::Right => MouseButton::Right,
+            TermMouseButton::Middle => MouseButton::Middle,
+        }),
+        TermMouseEventKind::Up(btn) => MouseEventKind::Up(match btn {
+            TermMouseButton::Left => MouseButton::Left,
+            TermMouseButton::Right => MouseButton::Right,
+            TermMouseButton::Middle => MouseButton::Middle,
+        }),
+        TermMouseEventKind::Drag(btn) => MouseEventKind::Drag(match btn {
+            TermMouseButton::Left => MouseButton::Left,
+            TermMouseButton::Right => MouseButton::Right,
+            TermMouseButton::Middle => MouseButton::Middle,
+        }),
+        TermMouseEventKind::Moved => MouseEventKind::Move,
+        TermMouseEventKind::ScrollDown => MouseEventKind::Scroll(crate::event::MouseScroll {
+            axis: MouseScrollAxis::Vertical,
+            direction: MouseScrollDirection::Negative,
+        }),
+        TermMouseEventKind::ScrollUp => MouseEventKind::Scroll(crate::event::MouseScroll {
+            axis: MouseScrollAxis::Vertical,
+            direction: MouseScrollDirection::Positive,
+        }),
+        TermMouseEventKind::ScrollLeft => MouseEventKind::Scroll(crate::event::MouseScroll {
+            axis: MouseScrollAxis::Horizontal,
+            direction: MouseScrollDirection::Negative,
+        }),
+        TermMouseEventKind::ScrollRight => MouseEventKind::Scroll(crate::event::MouseScroll {
+            axis: MouseScrollAxis::Horizontal,
+            direction: MouseScrollDirection::Positive,
+        }),
+    };
 
     Some(Event::Mouse(MouseEvent::with_modifiers(
         mouse.column,
         mouse.row,
-        buttons,
+        kind,
         mouse.modifiers.contains(termina::event::Modifiers::CONTROL),
         mouse.modifiers.contains(termina::event::Modifiers::ALT),
         mouse.modifiers.contains(termina::event::Modifiers::SHIFT),
@@ -934,7 +914,7 @@ mod tests {
 
         program
             .process_event(
-                Event::mouse(0, 0, MouseButtons::new(true, false, false)),
+                Event::mouse(0, 0, MouseEventKind::Down(MouseButton::Left)),
                 Some(&mut buffer),
             )
             .expect("mouse down should succeed");
@@ -942,14 +922,14 @@ mod tests {
 
         program
             .process_event(
-                Event::mouse(0, 0, MouseButtons::default()),
+                Event::mouse(0, 0, MouseEventKind::Up(MouseButton::Left)),
                 Some(&mut buffer),
             )
             .expect("mouse move up should succeed");
 
         program
             .process_event(
-                Event::mouse(0, 0, MouseButtons::new(true, false, false)),
+                Event::mouse(0, 0, MouseEventKind::Down(MouseButton::Left)),
                 Some(&mut buffer),
             )
             .expect("second click should succeed");
@@ -957,14 +937,14 @@ mod tests {
 
         program
             .process_event(
-                Event::mouse(0, 0, MouseButtons::default()),
+                Event::mouse(0, 0, MouseEventKind::Up(MouseButton::Left)),
                 Some(&mut buffer),
             )
             .expect("mouse up should succeed");
 
         program
             .process_event(
-                Event::mouse(1, 0, MouseButtons::new(true, false, false)),
+                Event::mouse(1, 0, MouseEventKind::Down(MouseButton::Left)),
                 Some(&mut buffer),
             )
             .expect("third click should succeed");
@@ -1025,7 +1005,7 @@ mod tests {
 
         program
             .process_event(
-                Event::mouse(0, 0, MouseButtons::new(true, false, false)),
+                Event::mouse(0, 0, MouseEventKind::Down(MouseButton::Left)),
                 Some(&mut buffer),
             )
             .expect("first click should succeed");
@@ -1034,14 +1014,14 @@ mod tests {
 
         program
             .process_event(
-                Event::mouse(0, 0, MouseButtons::default()),
+                Event::mouse(0, 0, MouseEventKind::Up(MouseButton::Left)),
                 Some(&mut buffer),
             )
             .expect("mouse up should succeed");
 
         program
             .process_event(
-                Event::mouse(0, 0, MouseButtons::new(true, false, false)),
+                Event::mouse(0, 0, MouseEventKind::Down(MouseButton::Left)),
                 Some(&mut buffer),
             )
             .expect("second click should succeed");
@@ -1064,7 +1044,7 @@ mod tests {
 
         program
             .process_event(
-                Event::mouse(0, 0, MouseButtons::new(true, false, false)),
+                Event::mouse(0, 0, MouseEventKind::Down(MouseButton::Left)),
                 Some(&mut buffer),
             )
             .expect("first click should succeed");
@@ -1073,14 +1053,14 @@ mod tests {
 
         program
             .process_event(
-                Event::mouse(0, 0, MouseButtons::default()),
+                Event::mouse(0, 0, MouseEventKind::Up(MouseButton::Left)),
                 Some(&mut buffer),
             )
             .expect("mouse up should succeed");
 
         program
             .process_event(
-                Event::mouse(1, 0, MouseButtons::new(true, false, false)),
+                Event::mouse(1, 0, MouseEventKind::Down(MouseButton::Left)),
                 Some(&mut buffer),
             )
             .expect("second click should succeed");

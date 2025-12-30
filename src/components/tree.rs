@@ -3,7 +3,7 @@ use std::hash::Hash;
 use std::rc::Rc;
 
 use crate::dom::{Node, TextSpan};
-use crate::event::MouseEvent;
+use crate::event::LocalMouseEvent;
 use crate::{Style, column, rich_text, row};
 
 /// The type of node represented in the tree.
@@ -435,7 +435,7 @@ where
         let is_branch = visible.has_children;
         let mouse_map = Rc::clone(&map_msg);
         let item_id = visible.id.clone();
-        node = node.on_mouse(move |event: MouseEvent| {
+        node = node.on_mouse(move |event: LocalMouseEvent| {
             if event.is_double_click() {
                 Some(mouse_map(TreeMsg::DoubleClick(item_id.clone())))
             } else if event.is_single_click() {
@@ -462,7 +462,7 @@ mod tests {
     use crate::buffer::DoubleBuffer;
     use crate::dom::rounding::round_layout;
     use crate::dom::{Color, TextSpan};
-    use crate::event::{MouseButtons, MouseEvent, Size};
+    use crate::event::{LocalMouseEvent, MouseButton, MouseEvent, MouseEventKind, Size};
     use crate::palette::{Palette, Rgba};
     use crate::render::Renderer;
     use taffy::{self, AvailableSpace, Dimension, compute_root_layout};
@@ -682,10 +682,10 @@ mod tests {
         let mut column = root_node.into_element().unwrap();
         let row = column.children.remove(0);
 
-        let mut event = MouseEvent::new(0, 0, MouseButtons::new(true, false, false));
+        let mut event = MouseEvent::new(0, 0, MouseEventKind::Down(MouseButton::Left));
         event.click_count = 2;
 
-        let message = row.mouse_message(event);
+        let message = row.mouse_message(LocalMouseEvent::new(event, 0, 0));
         assert_eq!(message, Some(TreeMsg::DoubleClick("root")));
     }
 
@@ -697,10 +697,10 @@ mod tests {
         let mut column = root_node.into_element().unwrap();
         let row = column.children.remove(0);
 
-        let mut event = MouseEvent::new(0, 0, MouseButtons::new(true, false, false));
+        let mut event = MouseEvent::new(0, 0, MouseEventKind::Down(MouseButton::Left));
         event.click_count = 1;
 
-        let message = row.mouse_message(event);
+        let message = row.mouse_message(LocalMouseEvent::new(event, 0, 0));
         assert_eq!(message, Some(TreeMsg::ToggleExpand("root")));
     }
 
@@ -714,10 +714,10 @@ mod tests {
         // After expand_all, the first child is root, second is "file".
         let leaf_row = column.children.remove(1);
 
-        let mut event = MouseEvent::new(0, 0, MouseButtons::new(true, false, false));
+        let mut event = MouseEvent::new(0, 0, MouseEventKind::Down(MouseButton::Left));
         event.click_count = 1;
 
-        let message = leaf_row.mouse_message(event);
+        let message = leaf_row.mouse_message(LocalMouseEvent::new(event, 0, 0));
         assert_eq!(message, Some(TreeMsg::Activate("file")));
     }
 
@@ -730,10 +730,10 @@ mod tests {
         let mut column = root_node.into_element().unwrap();
         let leaf_row = column.children.remove(1);
 
-        let mut event = MouseEvent::new(0, 0, MouseButtons::new(true, false, false));
+        let mut event = MouseEvent::new(0, 0, MouseEventKind::Down(MouseButton::Left));
         event.click_count = 2;
 
-        let message = leaf_row.mouse_message(event);
+        let message = leaf_row.mouse_message(LocalMouseEvent::new(event, 0, 0));
         assert_eq!(message, Some(TreeMsg::DoubleClick("file")));
     }
 

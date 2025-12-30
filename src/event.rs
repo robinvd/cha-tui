@@ -33,27 +33,82 @@ pub struct Key {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct MouseEvent {
+pub struct MousePosition {
     pub x: u16,
     pub y: u16,
-    pub local_x: u16,
-    pub local_y: u16,
-    pub buttons: MouseButtons,
+}
+
+impl MousePosition {
+    pub const fn new(x: u16, y: u16) -> Self {
+        Self { x, y }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct MouseModifiers {
     pub ctrl: bool,
     pub alt: bool,
     pub shift: bool,
     pub super_key: bool,
+}
+
+impl MouseModifiers {
+    pub const fn new(ctrl: bool, alt: bool, shift: bool, super_key: bool) -> Self {
+        Self {
+            ctrl,
+            alt,
+            shift,
+            super_key,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseScrollAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseScrollDirection {
+    Positive,
+    Negative,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouseScroll {
+    pub axis: MouseScrollAxis,
+    pub direction: MouseScrollDirection,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseEventKind {
+    Down(MouseButton),
+    Up(MouseButton),
+    Drag(MouseButton),
+    Move,
+    Scroll(MouseScroll),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MouseEvent {
+    pub position: MousePosition,
+    pub kind: MouseEventKind,
+    pub modifiers: MouseModifiers,
     pub click_count: u8,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub struct MouseButtons {
-    pub left: bool,
-    pub right: bool,
-    pub middle: bool,
-    pub horz_wheel: bool,
-    pub vert_wheel: bool,
-    pub wheel_positive: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalMouseEvent {
+    pub local_position: MousePosition,
+    pub event: MouseEvent,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -143,8 +198,8 @@ impl Event {
         Self::Resize(Size::new(width, height))
     }
 
-    pub fn mouse(x: u16, y: u16, buttons: MouseButtons) -> Self {
-        Self::Mouse(MouseEvent::new(x, y, buttons))
+    pub fn mouse(x: u16, y: u16, kind: MouseEventKind) -> Self {
+        Self::Mouse(MouseEvent::new(x, y, kind))
     }
 
     pub fn focus_gained() -> Self {
@@ -245,17 +300,11 @@ impl Key {
 }
 
 impl MouseEvent {
-    pub fn new(x: u16, y: u16, buttons: MouseButtons) -> Self {
+    pub fn new(x: u16, y: u16, kind: MouseEventKind) -> Self {
         Self {
-            x,
-            y,
-            local_x: x,
-            local_y: y,
-            buttons,
-            ctrl: false,
-            alt: false,
-            shift: false,
-            super_key: false,
+            position: MousePosition { x, y },
+            kind,
+            modifiers: MouseModifiers::default(),
             click_count: 0,
         }
     }
@@ -263,22 +312,21 @@ impl MouseEvent {
     pub fn with_modifiers(
         x: u16,
         y: u16,
-        buttons: MouseButtons,
+        kind: MouseEventKind,
         ctrl: bool,
         alt: bool,
         shift: bool,
         super_key: bool,
     ) -> Self {
         Self {
-            x,
-            y,
-            local_x: x,
-            local_y: y,
-            buttons,
-            ctrl,
-            alt,
-            shift,
-            super_key,
+            position: MousePosition { x, y },
+            kind,
+            modifiers: MouseModifiers {
+                ctrl,
+                alt,
+                shift,
+                super_key,
+            },
             click_count: 0,
         }
     }
@@ -292,28 +340,23 @@ impl MouseEvent {
     }
 }
 
-impl MouseButtons {
-    pub fn new(left: bool, right: bool, middle: bool) -> Self {
+impl LocalMouseEvent {
+    pub fn new(event: MouseEvent, local_x: u16, local_y: u16) -> Self {
         Self {
-            left,
-            right,
-            middle,
-            horz_wheel: false,
-            vert_wheel: false,
-            wheel_positive: true,
+            local_position: MousePosition {
+                x: local_x,
+                y: local_y,
+            },
+            event,
         }
     }
 
-    pub fn is_left_pressed(self) -> bool {
-        self.left
+    pub fn is_single_click(self) -> bool {
+        self.event.is_single_click()
     }
 
-    pub fn is_right_pressed(self) -> bool {
-        self.right
-    }
-
-    pub fn is_middle_pressed(self) -> bool {
-        self.middle
+    pub fn is_double_click(self) -> bool {
+        self.event.is_double_click()
     }
 }
 
@@ -383,17 +426,16 @@ mod tests {
 
     #[test]
     fn mouse_event_constructor_sets_defaults() {
-        let buttons = MouseButtons::new(true, false, false);
-        let event = Event::mouse(4, 7, buttons);
+        let event = Event::mouse(4, 7, MouseEventKind::Down(MouseButton::Left));
 
         match event {
             Event::Mouse(mouse) => {
-                assert_eq!(mouse.x, 4);
-                assert_eq!(mouse.y, 7);
-                assert!(mouse.buttons.is_left_pressed());
-                assert!(!mouse.ctrl);
-                assert!(!mouse.alt);
-                assert!(!mouse.shift);
+                assert_eq!(mouse.position.x, 4);
+                assert_eq!(mouse.position.y, 7);
+                assert_eq!(mouse.kind, MouseEventKind::Down(MouseButton::Left));
+                assert!(!mouse.modifiers.ctrl);
+                assert!(!mouse.modifiers.alt);
+                assert!(!mouse.modifiers.shift);
             }
             other => panic!("expected mouse event, got {:?}", other),
         }
