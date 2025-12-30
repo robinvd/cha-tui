@@ -31,8 +31,8 @@ pub use components::input::{
 pub use components::paragraph::{Paragraph, paragraph, rich_paragraph};
 pub use components::scroll::{ScrollMsg, ScrollState, scrollable_content};
 pub use components::terminal::{
-    TerminalMouseButton, TerminalMouseEvent, TerminalMouseEventKind, TerminalMsg, TerminalState,
-    default_terminal_keybindings, terminal,
+    TermMode, TerminalMsg, TerminalState, default_terminal_keybindings, encode_mouse_event,
+    key_to_input, terminal,
 };
 pub use components::tree::{TreeMsg, TreeNode, TreeNodeKind, TreeState, TreeStyle, tree_view};
 pub use scroll::ScrollAlignment;

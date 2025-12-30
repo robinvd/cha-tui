@@ -628,13 +628,15 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             // Fallback: when terminal focused, send to terminal
             if model.focus == Focus::Terminal
                 && let Some(active) = model.active
-                && let Some((_, _session)) = model.active_session()
+                && let Some((_, session)) = model.active_session()
                 && let Some(msg) =
-                    default_terminal_keybindings(key, move |term_msg| Msg::Terminal {
-                        project: active.project,
-                        worktree: active.worktree,
-                        session: active.session,
-                        msg: term_msg,
+                    default_terminal_keybindings(key, session.terminal.mode(), move |term_msg| {
+                        Msg::Terminal {
+                            project: active.project,
+                            worktree: active.worktree,
+                            session: active.session,
+                            msg: term_msg,
+                        }
                     })
             {
                 return update(model, msg);
