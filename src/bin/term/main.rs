@@ -1415,7 +1415,9 @@ fn main() {
     use std::fs::File;
     use tracing_subscriber::fmt;
     use tracing_subscriber::prelude::*;
-    let log_file = File::create("./term_debug.log").expect("failed to create log file");
+    let log_file_path =
+        std::env::var("TERM_LOG_FILE").unwrap_or_else(|_| "./term_debug.log".to_owned());
+    let log_file = File::create(log_file_path).expect("failed to create log file");
     tracing_subscriber::registry()
         .with(fmt::layer().with_writer(log_file).with_ansi(false))
         .init();
