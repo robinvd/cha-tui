@@ -1,0 +1,13 @@
+[package]
+name = "text_editor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chatui = { path = "../.." }
+color-eyre = "0.6.5"
+once_cell = "1.19"
+ropey = "1.6"
+taffy = "0.9.1"
+time = { version = "0.3", features = ["formatting"] }
+tree-house = { version = "0.3" }

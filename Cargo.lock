@@ -523,6 +523,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "data_table_demo"
+version = "0.1.0"
+dependencies = [
+ "chatui",
+ "taffy",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "deltae"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -574,6 +583,15 @@ checksum = "9ed9a281f7bc9b7576e61468ba615a66a5c8cfdff42420a70aa82701a3b1e292"
 dependencies = [
  "block-buffer",
  "crypto-common",
+]
+
+[[package]]
+name = "dir_browser"
+version = "0.1.0"
+dependencies = [
+ "chatui",
+ "taffy",
+ "time",
 ]
 
 [[package]]
@@ -939,6 +957,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07e28edb80900c19c28f1072f2e8aeca7fa06b23cd4169cefe1af5aa3260783f"
 
 [[package]]
+name = "git_status"
+version = "0.1.0"
+dependencies = [
+ "chatui",
+ "facet",
+ "facet-args",
+ "miette",
+ "once_cell",
+ "ropey",
+ "similar",
+ "smol",
+ "taffy",
+ "termwiz",
+ "tracing",
+ "tracing-subscriber",
+ "tree-house",
+]
+
+[[package]]
 name = "grid"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1014,6 +1051,18 @@ checksum = "ec48937a97411dcb524a265206ccd4c90bb711fca92b2792c407f268825b9305"
 dependencies = [
  "once_cell",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "kaeru"
+version = "0.1.0"
+dependencies = [
+ "agent-client-protocol",
+ "async-trait",
+ "chatui",
+ "miette",
+ "smol",
+ "taffy",
 ]
 
 [[package]]
@@ -2056,6 +2105,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "term"
+version = "0.1.0"
+dependencies = [
+ "chatui",
+ "once_cell",
+ "serde",
+ "smol",
+ "taffy",
+ "tracing",
+]
+
+[[package]]
 name = "termina"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2140,6 +2201,19 @@ dependencies = [
  "wezterm-dynamic",
  "wezterm-input-types",
  "winapi",
+]
+
+[[package]]
+name = "text_editor"
+version = "0.1.0"
+dependencies = [
+ "chatui",
+ "color-eyre",
+ "once_cell",
+ "ropey",
+ "taffy",
+ "time",
+ "tree-house",
 ]
 
 [[package]]
@@ -2230,6 +2304,13 @@ checksum = "30cfb0125f12d9c277f35663a0a33f8c30190f4e4574868a330595412d34ebf3"
 dependencies = [
  "num-conv",
  "time-core",
+]
+
+[[package]]
+name = "todo"
+version = "0.1.0"
+dependencies = [
+ "chatui",
 ]
 
 [[package]]

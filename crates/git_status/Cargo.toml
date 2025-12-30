@@ -1,37 +1,19 @@
 [package]
-name = "chatui"
+name = "git_status"
 version = "0.1.0"
 edition = "2024"
 
-[workspace]
-members = ["crates/*"]
-
 [dependencies]
-alacritty_terminal = "0.25.1"
-agent-client-protocol = "0.9.0"
-async-trait = "0.1"
-color-eyre = "0.6.5"
-directories = "5.0.1"
+chatui = { path = "../.." }
 facet = { git = "https://github.com/facet-rs/facet", branch = "main" }
 facet-args = { git = "https://github.com/facet-rs/facet", branch = "main", package = "facet-args" }
-libc = "0.2"
 miette = { version = "7", features = ["fancy"] }
 once_cell = "1.19"
 ropey = "1.6"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 similar = { version = "2.5", default-features = false, features = ["text", "inline"] }
-smallvec = "1.13"
 smol = "2"
 taffy = "0.9.1"
-termina = { version = "0.1.1", features = ["event-stream"] }
 termwiz = { version = "0.23.3", default-features = false, features = [] }
-time = { version = "0.3", features = ["formatting"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tree-house = { version = "0.3" }
-vte = "*"
-zed-sum-tree = "0.2.0"
-
-[dev-dependencies]
-tempfile = "3.10"

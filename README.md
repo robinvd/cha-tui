@@ -2,7 +2,7 @@
 
 A rust crate for creating terminal TUIs with modern features and layout. 
 
-See also the main app developed using this [git_status](./src/bin/git_status)
+See also the main app developed using this [git_status](./crates/git_status)
 
 ## Features
 
@@ -41,7 +41,7 @@ with outside updates (like keyboard or resizes) get fed into the update function
 
 ## Example
 
-See `src/bin/todo`
+See `crates/todo/src/main.rs`
 
 ![TODO Example](./assets/TODO.png)
 

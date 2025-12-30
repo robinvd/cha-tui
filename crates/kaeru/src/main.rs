@@ -117,7 +117,7 @@ impl Model {
                     content: "Changes
 
 - Added ACP client dependencies (agent-client-protocol, async-trait) in Cargo.toml to support talking to external servers.
-- Built new single-window chat binary src/bin/kaeru/main.rs that parses CLI server/args, spawns an ACP connection on a background
+- Built new single-window chat binary crates/kaeru/src/main.rs that parses CLI server/args, spawns an ACP connection on a background
   LocalExecutor, and forwards session updates back to the UI via channels.
 - Implemented scrollable chat log, status header, and input widget; user prompts are sent to the configured ACP server, while agent streams,
   permission prompts, and stop reasons are rendered inline.
@@ -163,7 +163,7 @@ Potential next steps: 1) surface ACP permission choices instead of auto-cancel; 
                     content: "Changes
 
 - Added ACP client dependencies (agent-client-protocol, async-trait) in Cargo.toml to support talking to external servers.
-- Built new single-window chat binary src/bin/kaeru/main.rs that parses CLI server/args, spawns an ACP connection on a background
+- Built new single-window chat binary crates/kaeru/src/main.rs that parses CLI server/args, spawns an ACP connection on a background
   LocalExecutor, and forwards session updates back to the UI via channels.
 - Implemented scrollable chat log, status header, and input widget; user prompts are sent to the configured ACP server, while agent streams,
   permission prompts, and stop reasons are rendered inline.

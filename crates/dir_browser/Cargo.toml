@@ -1,0 +1,9 @@
+[package]
+name = "dir_browser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chatui = { path = "../.." }
+taffy = "0.9.1"
+time = { version = "0.3", features = ["formatting"] }
