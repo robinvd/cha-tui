@@ -1,5 +1,6 @@
 //! Session management for terminal sessions.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use chatui::{TerminalMsg, TerminalState};
@@ -31,15 +32,22 @@ pub struct Session {
 
 impl Session {
     /// Create a new session with a spawned terminal.
-    pub fn spawn(path: &Path, number: usize, id: SessionId) -> std::io::Result<Self> {
+    pub fn spawn(
+        path: &Path,
+        number: usize,
+        id: SessionId,
+        env: HashMap<String, String>,
+    ) -> std::io::Result<Self> {
         #[cfg(test)]
         let _ = path;
+        #[cfg(test)]
+        let _ = &env;
 
         #[cfg(test)]
         let terminal = TerminalState::spawn("true", &[]).unwrap();
 
         #[cfg(not(test))]
-        let terminal = TerminalState::with_working_dir(path).or_else(|err| {
+        let terminal = TerminalState::with_working_dir_and_env(path, env).or_else(|err| {
             warn!(
                 ?err,
                 "failed to start terminal in project dir, falling back to default"

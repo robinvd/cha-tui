@@ -3,6 +3,8 @@
 use std::collections::HashMap;
 
 use chatui::event::{Key, KeyCode};
+
+use super::focus::Focus;
 /// Logical scope in which a keybinding is active.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Scope {
@@ -523,17 +525,13 @@ impl Keymap {
         None
     }
 
-    /// Shortcuts to display in the status bar for the given focus/lock state.
-    pub fn status_shortcuts(&self, focus_terminal: bool, terminal_locked: bool) -> &[Shortcut] {
-        if focus_terminal && terminal_locked {
-            return &self.terminal_locked_shortcuts;
+    /// Shortcuts to display in the status bar for the given focus state.
+    pub fn status_shortcuts(&self, focus: Focus) -> &[Shortcut] {
+        match focus {
+            Focus::TerminalLocked => &self.terminal_locked_shortcuts,
+            Focus::Terminal => &self.terminal_shortcuts,
+            Focus::Sidebar => &self.sidebar_shortcuts,
         }
-
-        if focus_terminal {
-            return &self.terminal_shortcuts;
-        }
-
-        &self.sidebar_shortcuts
     }
 }
 

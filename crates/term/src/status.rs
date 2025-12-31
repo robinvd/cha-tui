@@ -38,7 +38,6 @@ pub fn status_bar_view(
     status: Option<&StatusMessage>,
     auto_hide: bool,
     active_session: Option<(&Project, &Session)>,
-    terminal_locked: bool,
     keymap: &Keymap,
 ) -> Node<Msg> {
     let base_style = Style::default();
@@ -49,14 +48,14 @@ pub fn status_bar_view(
     let mut left_items: Vec<Node<Msg>> = Vec::new();
     left_items.push(
         rich_text(vec![TextSpan::new(
-            format!(" Focus: {:?} │", focus),
+            format!(" Focus: {} │", focus.status_label()),
             base_style,
         )])
         .with_id("status-focus"),
     );
 
     left_items.extend(shortcut_buttons(
-        keymap.status_shortcuts(focus == Focus::Terminal, terminal_locked),
+        keymap.status_shortcuts(focus),
         &key_style,
         &base_style,
     ));
@@ -169,12 +168,12 @@ mod tests {
         let status = StatusMessage::error("keybindings overflow");
 
         let mut node =
-            status_bar_view(Focus::Sidebar, Some(&status), false, None, false, &keymap).with_fill();
+            status_bar_view(Focus::Sidebar, Some(&status), false, None, &keymap).with_fill();
 
         let output =
             render_node_to_string(&mut node, 40, 1).expect("status bar render should succeed");
 
-        assert!(output.contains("Focus: Sidebar"));
+        assert!(output.contains("Focus: sidebar"));
         assert!(output.contains(" keybindings overflow │"));
         assert!(!output.contains("very long description"));
         assert_eq!(output.chars().count(), 40);

@@ -6,6 +6,7 @@ pub enum Focus {
     #[default]
     Sidebar,
     Terminal,
+    TerminalLocked,
 }
 
 impl Focus {
@@ -13,7 +14,19 @@ impl Focus {
     pub fn toggle(self) -> Self {
         match self {
             Focus::Sidebar => Focus::Terminal,
-            Focus::Terminal => Focus::Sidebar,
+            Focus::Terminal | Focus::TerminalLocked => Focus::Sidebar,
+        }
+    }
+
+    pub fn is_terminal(self) -> bool {
+        matches!(self, Focus::Terminal | Focus::TerminalLocked)
+    }
+
+    pub fn status_label(self) -> &'static str {
+        match self {
+            Focus::Sidebar => "sidebar",
+            Focus::Terminal => "terminal",
+            Focus::TerminalLocked => "locked",
         }
     }
 }

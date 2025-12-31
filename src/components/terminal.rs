@@ -19,7 +19,7 @@ pub use alacritty_terminal::term::TermMode;
 use once_cell::sync::Lazy;
 use std::any::Any;
 use std::borrow::Cow;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::io;
 #[cfg(unix)]
@@ -313,24 +313,33 @@ impl TerminalState {
     /// Create a new terminal with a specific shell.
     pub fn with_shell(shell: Option<&str>) -> std::io::Result<Self> {
         let shell = shell.map(|s| Shell::new(s.to_string(), Vec::new()));
-        Self::spawn_internal(shell, None)
+        Self::spawn_internal(shell, None, HashMap::new())
     }
 
     /// Create a new terminal state starting in a specific working directory.
     pub fn with_working_dir(path: impl AsRef<Path>) -> std::io::Result<Self> {
-        Self::spawn_internal(None, Some(path.as_ref().to_path_buf()))
+        Self::spawn_internal(None, Some(path.as_ref().to_path_buf()), HashMap::new())
+    }
+
+    /// Create a new terminal state with a working directory and extra environment variables.
+    pub fn with_working_dir_and_env(
+        path: impl AsRef<Path>,
+        env: HashMap<String, String>,
+    ) -> std::io::Result<Self> {
+        Self::spawn_internal(None, Some(path.as_ref().to_path_buf()), env)
     }
 
     /// Spawn a command in the terminal.
     pub fn spawn(command: &str, args: &[&str]) -> std::io::Result<Self> {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let shell = Shell::new(command.to_string(), args);
-        Self::spawn_internal(Some(shell), None)
+        Self::spawn_internal(Some(shell), None, HashMap::new())
     }
 
     fn spawn_internal(
         shell: Option<Shell>,
         working_directory: Option<PathBuf>,
+        env: HashMap<String, String>,
     ) -> std::io::Result<Self> {
         #[cfg(test)]
         let test_permit = TerminalTestPermit::acquire();
@@ -342,7 +351,7 @@ impl TerminalState {
             shell,
             working_directory,
             drain_on_exit: true,
-            env: Default::default(),
+            env,
         };
 
         let window_size = WindowSize {
