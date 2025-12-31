@@ -284,6 +284,9 @@ impl TerminalState {
                     *current = None;
                 }
             }
+            TermEvent::Notification { .. } => {
+                bell_shared.store(true, Ordering::Relaxed);
+            }
             TermEvent::Bell => {
                 bell_shared.store(true, Ordering::Relaxed);
             }
@@ -1980,6 +1983,17 @@ mod tests {
             !state.take_bell(),
             "bell flag should be cleared after retrieval"
         );
+    }
+
+    #[test]
+    fn notification_events_set_bell() {
+        let mut state = TerminalState::new().expect("failed to create terminal");
+        state.handle_event_direct(TermEvent::Notification {
+            title: Some("Title".into()),
+            body: "Update".into(),
+        });
+
+        assert!(state.take_bell(), "bell flag should be set by notification");
     }
 
     #[test]

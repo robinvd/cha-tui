@@ -2371,6 +2371,12 @@ impl<T: EventListener> Handler for Term<T> {
     }
 
     #[inline]
+    fn notification(&mut self, title: Option<String>, body: String) {
+        self.event_proxy
+            .send_event(Event::Notification { title, body });
+    }
+
+    #[inline]
     fn push_title(&mut self) {
         trace!("Pushing '{:?}' onto title stack", self.title);
 

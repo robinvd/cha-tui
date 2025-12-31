@@ -17,6 +17,9 @@ pub enum Event {
     /// Window title change.
     Title(String),
 
+    /// OSC notification.
+    Notification { title: Option<String>, body: String },
+
     /// Reset to the default window title.
     ResetTitle,
 
@@ -69,6 +72,9 @@ impl Debug for Event {
             Event::ColorRequest(index, _) => write!(f, "ColorRequest({index})"),
             Event::PtyWrite(text) => write!(f, "PtyWrite({text})"),
             Event::Title(title) => write!(f, "Title({title})"),
+            Event::Notification { title, body } => {
+                write!(f, "Notification(title={title:?}, body={body})")
+            }
             Event::CursorBlinkingChange => write!(f, "CursorBlinkingChange"),
             Event::MouseCursorDirty => write!(f, "MouseCursorDirty"),
             Event::ResetTitle => write!(f, "ResetTitle"),

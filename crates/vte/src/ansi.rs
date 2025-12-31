@@ -496,6 +496,9 @@ pub trait Handler {
     /// OSC to set window title.
     fn set_title(&mut self, _: Option<String>) {}
 
+    /// OSC notification.
+    fn notification(&mut self, _: Option<String>, _: String) {}
+
     /// Set the cursor style.
     fn set_cursor_style(&mut self, _: Option<CursorStyle>) {}
 
@@ -1357,6 +1360,25 @@ where
                         .trim()
                         .to_owned();
                     self.handler.set_title(Some(title));
+                    return;
+                }
+                unhandled(params);
+            },
+
+            // Notification.
+            b"9" => {
+                if params.len() >= 2 {
+                    let title = if params.len() >= 3 {
+                        Some(String::from_utf8_lossy(params[1]).into_owned())
+                    } else {
+                        None
+                    };
+                    let body = params[if title.is_some() { 2 } else { 1 }..]
+                        .iter()
+                        .map(|param| String::from_utf8_lossy(param))
+                        .collect::<Vec<_>>()
+                        .join(";");
+                    self.handler.notification(title, body);
                     return;
                 }
                 unhandled(params);
