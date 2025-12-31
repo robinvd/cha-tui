@@ -20,6 +20,7 @@ pub enum Action {
     ToggleFocus,
     Quit,
     ToggleAutoHide,
+    ToggleLayout,
     FocusTerminal,
     MoveSelectionUp,
     MoveSelectionDown,
@@ -164,6 +165,13 @@ pub static DEFAULT_BINDINGS: &[Binding] = &[
         chord: KeyChord::ctrl(KeyCode::Char('b')),
         action: Action::ToggleFocus,
         description: "switch focus",
+        show_in_status: true,
+    },
+    Binding {
+        scope: Scope::Global,
+        chord: KeyChord::ctrl(KeyCode::Char('\\')),
+        action: Action::ToggleLayout,
+        description: "toggle layout",
         show_in_status: true,
     },
     Binding {
@@ -541,8 +549,9 @@ impl Default for Keymap {
     }
 }
 
-const SIDEBAR_ACTIONS: [Action; 10] = [
+const SIDEBAR_ACTIONS: [Action; 11] = [
     Action::ToggleFocus,
+    Action::ToggleLayout,
     Action::Quit,
     Action::NewProject,
     Action::NewWorktree,
@@ -554,8 +563,9 @@ const SIDEBAR_ACTIONS: [Action; 10] = [
     Action::ActivateSelected,
 ];
 
-const TERMINAL_ACTIONS: [Action; 5] = [
+const TERMINAL_ACTIONS: [Action; 6] = [
     Action::ToggleFocus,
+    Action::ToggleLayout,
     Action::PrevSession,
     Action::NextSession,
     Action::RenameSession,

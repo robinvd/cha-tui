@@ -6,6 +6,7 @@ use chatui::{Node, Style, TextSpan, rich_text, row};
 use super::Msg;
 use super::focus::Focus;
 use super::keymap::{Keymap, Shortcut};
+use super::project::Layout;
 use super::project::Project;
 use super::session::Session;
 
@@ -38,6 +39,7 @@ pub fn status_bar_view(
     status: Option<&StatusMessage>,
     auto_hide: bool,
     active_session: Option<(&Project, &Session)>,
+    layout: Layout,
     keymap: &Keymap,
 ) -> Node<Msg> {
     let base_style = Style::default();
@@ -52,6 +54,13 @@ pub fn status_bar_view(
             base_style,
         )])
         .with_id("status-focus"),
+    );
+    left_items.push(
+        rich_text(vec![TextSpan::new(
+            format!("Layout: {} │", layout.status_label()),
+            base_style,
+        )])
+        .with_id("status-layout"),
     );
 
     left_items.extend(shortcut_buttons(
@@ -152,6 +161,7 @@ fn shortcut_button(
 mod tests {
     use super::{Focus, StatusMessage, status_bar_view};
     use crate::keymap::{Action, Binding, KeyChord, Keymap, Scope};
+    use crate::project::Layout;
     use chatui::event::KeyCode;
     use chatui::test_utils::render_node_to_string;
 
@@ -167,15 +177,23 @@ mod tests {
         let keymap = Keymap::new(bindings);
         let status = StatusMessage::error("keybindings overflow");
 
-        let mut node =
-            status_bar_view(Focus::Sidebar, Some(&status), false, None, &keymap).with_fill();
+        let mut node = status_bar_view(
+            Focus::Sidebar,
+            Some(&status),
+            false,
+            None,
+            Layout::Zoom,
+            &keymap,
+        )
+        .with_fill();
 
         let output =
-            render_node_to_string(&mut node, 40, 1).expect("status bar render should succeed");
+            render_node_to_string(&mut node, 60, 1).expect("status bar render should succeed");
 
         assert!(output.contains("Focus: sidebar"));
+        assert!(output.contains("Layout: zoom"));
         assert!(output.contains(" keybindings overflow │"));
         assert!(!output.contains("very long description"));
-        assert_eq!(output.chars().count(), 40);
+        assert_eq!(output.chars().count(), 60);
     }
 }

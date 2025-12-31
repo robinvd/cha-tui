@@ -4,6 +4,28 @@ use std::path::PathBuf;
 
 use super::session::{Session, SessionId};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Layout {
+    Zoom,
+    Tall,
+}
+
+impl Layout {
+    pub fn toggle(self) -> Self {
+        match self {
+            Layout::Zoom => Layout::Tall,
+            Layout::Tall => Layout::Zoom,
+        }
+    }
+
+    pub fn status_label(self) -> &'static str {
+        match self {
+            Layout::Zoom => "zoom",
+            Layout::Tall => "tall",
+        }
+    }
+}
+
 /// Unique identifier for a project.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ProjectId(pub u64);
@@ -27,6 +49,7 @@ pub struct Worktree {
     pub path: PathBuf,
     pub sessions: Vec<Session>,
     pub next_session_number: usize,
+    pub layout: Layout,
 }
 
 impl Worktree {
@@ -38,6 +61,7 @@ impl Worktree {
             path,
             sessions: Vec::new(),
             next_session_number: 1,
+            layout: Layout::Tall,
         }
     }
 
@@ -118,6 +142,7 @@ pub struct Project {
     pub next_worktree_id: u64,
     pub worktrees_loaded: bool,
     pub worktrees_loading: bool,
+    pub layout: Layout,
 }
 
 impl Project {
@@ -133,6 +158,7 @@ impl Project {
             next_worktree_id: 1,
             worktrees_loaded: false,
             worktrees_loading: false,
+            layout: Layout::Tall,
         }
     }
 

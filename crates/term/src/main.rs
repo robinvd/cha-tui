@@ -37,7 +37,7 @@ use focus::Focus;
 use keymap::{Action, Keymap, Scope};
 use modal::{ModalMsg, ModalResult, ModalState, modal_handle_key, modal_update, modal_view};
 use persistence::{load_projects, save_projects};
-use project::{Project, ProjectId, SessionKey, WorktreeId};
+use project::{Layout, Project, ProjectId, SessionKey, WorktreeId};
 use remote::{
     RemoteClientArgs, RemoteEnvelope, RemoteParams, RemoteProject, RemoteRequest, RemoteResponse,
     RemoteResult, RemoteServer, RemoteSession, RemoteStatus, RemoteWorktree, params_action_name,
@@ -683,6 +683,54 @@ impl Model {
         let project = self.projects.iter().find(|p| p.id == key.project)?;
         let session = project.session(key.worktree, key.session)?;
         Some((project, session))
+    }
+
+    fn active_container_sessions(
+        &self,
+    ) -> Option<(ProjectId, Option<WorktreeId>, SessionId, &[Session])> {
+        let key = self.active?;
+        let project = self.projects.iter().find(|p| p.id == key.project)?;
+        project.session(key.worktree, key.session)?;
+        let sessions = match key.worktree {
+            Some(wid) => project.worktree(wid)?.sessions.as_slice(),
+            None => project.sessions.as_slice(),
+        };
+        Some((project.id, key.worktree, key.session, sessions))
+    }
+
+    fn active_layout(&self) -> Layout {
+        let Some(key) = self.active else {
+            return Layout::Tall;
+        };
+        let Some(project) = self.projects.iter().find(|p| p.id == key.project) else {
+            return Layout::Tall;
+        };
+        match key.worktree {
+            Some(wid) => project
+                .worktree(wid)
+                .map(|worktree| worktree.layout)
+                .unwrap_or(Layout::Tall),
+            None => project.layout,
+        }
+    }
+
+    fn toggle_active_layout(&mut self) {
+        let Some(key) = self.active else {
+            return;
+        };
+        let Some(project) = self.project_mut(key.project) else {
+            return;
+        };
+        match key.worktree {
+            Some(wid) => {
+                if let Some(worktree) = project.worktree_mut(wid) {
+                    worktree.layout = worktree.layout.toggle();
+                }
+            }
+            None => {
+                project.layout = project.layout.toggle();
+            }
+        }
     }
 
     fn project(&self, pid: ProjectId) -> Option<&Project> {
@@ -1893,6 +1941,10 @@ fn handle_action(
             model.auto_hide = !model.auto_hide;
             Transition::Continue
         }
+        Action::ToggleLayout => {
+            model.toggle_active_layout();
+            Transition::Continue
+        }
         Action::FocusTerminal => {
             let was_terminal = model.focus.is_terminal();
             if !was_terminal && let Some(active) = model.active {
@@ -2351,31 +2403,79 @@ fn delete_selected(model: &mut Model) {
 }
 
 fn terminal_pane(model: &Model) -> Node<Msg> {
+    match model.active_layout() {
+        Layout::Zoom => terminal_pane_zoom(model),
+        Layout::Tall => terminal_pane_tall(model),
+    }
+}
+
+fn terminal_pane_placeholder(model: &Model) -> Node<Msg> {
+    block_with_title(
+        "Terminal",
+        vec![text::<Msg>("Select or create a session to start.")],
+    )
+    .with_flex_grow(1.0)
+    .with_style(section_style(model.focus.is_terminal()))
+}
+
+fn terminal_pane_zoom(model: &Model) -> Node<Msg> {
     if let Some((project, session)) = model.active_session() {
         let worktree = model.active.map(|active| active.worktree).unwrap_or(None);
         let pid = project.id;
         let sid = session.id;
-        terminal(
-            "main-terminal",
-            &session.terminal,
-            model.focus.is_terminal(),
-            move |msg| Msg::Terminal {
+        let is_focused = model.focus.is_terminal();
+        terminal("terminal", &session.terminal, is_focused, move |msg| {
+            Msg::Terminal {
                 project: pid,
                 worktree,
                 session: sid,
                 msg,
-            },
-        )
+            }
+        })
+        .with_id_mixin("terminal", sid.0)
         .with_flex_grow(1.0)
-        .with_style(section_style(model.focus.is_terminal()))
+        .with_style(section_style(is_focused))
     } else {
-        block_with_title(
-            "Terminal",
-            vec![text::<Msg>("Select or create a session to start.")],
-        )
-        .with_flex_grow(1.0)
-        .with_style(section_style(model.focus.is_terminal()))
+        terminal_pane_placeholder(model)
     }
+}
+
+fn terminal_pane_tall(model: &Model) -> Node<Msg> {
+    let Some((project_id, worktree, active_session, sessions)) = model.active_container_sessions()
+    else {
+        return terminal_pane_placeholder(model);
+    };
+
+    let mut iter = sessions.iter();
+    let Some(first) = iter.next() else {
+        return terminal_pane_placeholder(model);
+    };
+
+    let terminal_node = |session: &Session| {
+        let sid = session.id;
+        let is_active = sid == active_session;
+        let is_focused = model.focus.is_terminal() && is_active;
+        terminal("terminal", &session.terminal, is_focused, move |msg| {
+            Msg::Terminal {
+                project: project_id,
+                worktree,
+                session: sid,
+                msg,
+            }
+        })
+        .with_id_mixin("terminal", sid.0)
+        .with_flex_grow(1.0)
+        .with_style(section_style(is_focused))
+    };
+
+    let left = terminal_node(first);
+    let right_children: Vec<_> = iter.map(terminal_node).collect();
+    if right_children.is_empty() {
+        return left.with_flex_grow(1.0);
+    }
+
+    let right = column(right_children).with_flex_grow(1.0);
+    row(vec![left.with_flex_grow(1.0), right]).with_flex_grow(1.0)
 }
 
 fn view(model: &Model) -> Node<Msg> {
@@ -2395,6 +2495,7 @@ fn view(model: &Model) -> Node<Msg> {
         model.status.as_ref(),
         model.auto_hide,
         model.active_session(),
+        model.active_layout(),
         &model.keymap,
     );
 
@@ -2703,6 +2804,39 @@ mod tests {
             Err(err) => {
                 eprintln!("Skipping term test: {err}");
                 None
+            }
+        }
+    }
+
+    struct TerminalLayout {
+        width: f32,
+        height: f32,
+        x: f32,
+        y: f32,
+    }
+
+    fn collect_terminal_layouts(
+        node: &Node<Msg>,
+        origin: (f32, f32),
+        layouts: &mut Vec<TerminalLayout>,
+    ) {
+        let layout = node.layout_state().layout;
+        let x = origin.0 + layout.location.x;
+        let y = origin.1 + layout.location.y;
+
+        if let Some(renderable) = node.as_renderable() {
+            if renderable.debug_label() == "terminal" {
+                layouts.push(TerminalLayout {
+                    width: layout.size.width,
+                    height: layout.size.height,
+                    x,
+                    y,
+                });
+            }
+        }
+        if let Some(element) = node.as_element() {
+            for child in &element.children {
+                collect_terminal_layouts(child, (x, y), layouts);
             }
         }
     }
@@ -3203,6 +3337,105 @@ mod tests {
             !cleared,
             "has_unread_output flag should reset after selecting the session"
         );
+    }
+
+    #[test]
+    fn terminal_tall_layout_two_sessions() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        update(&mut model, Msg::NewSession);
+
+        let project_id = model.projects[0].id;
+        let first_session = model.projects[0].sessions[0].id;
+        model.select_session(SessionKey {
+            project: project_id,
+            worktree: None,
+            session: first_session,
+        });
+
+        let mut node = terminal_pane(&model).with_fill();
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: taffy::AvailableSpace::Definite(80.0),
+                height: taffy::AvailableSpace::Definite(20.0),
+            },
+        );
+        round_layout(&mut node);
+
+        let mut layouts = Vec::new();
+        collect_terminal_layouts(&node, (0.0, 0.0), &mut layouts);
+        assert_eq!(layouts.len(), 2);
+
+        layouts.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+        let left = &layouts[0];
+        let right = &layouts[1];
+
+        assert_eq!(left.x, 0.0);
+        assert_eq!(left.width, 40.0);
+        assert_eq!(left.height, 20.0);
+        assert_eq!(right.x, 40.0);
+        assert_eq!(right.width, 40.0);
+        assert_eq!(right.height, 20.0);
+    }
+
+    #[test]
+    fn terminal_tall_layout_three_sessions() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        update(&mut model, Msg::NewSession);
+        update(&mut model, Msg::NewSession);
+
+        let project_id = model.projects[0].id;
+        let second_session = model.projects[0].sessions[1].id;
+        model.select_session(SessionKey {
+            project: project_id,
+            worktree: None,
+            session: second_session,
+        });
+
+        let mut node = terminal_pane(&model).with_fill();
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: taffy::AvailableSpace::Definite(90.0),
+                height: taffy::AvailableSpace::Definite(30.0),
+            },
+        );
+        round_layout(&mut node);
+
+        let mut layouts = Vec::new();
+        collect_terminal_layouts(&node, (0.0, 0.0), &mut layouts);
+        assert_eq!(layouts.len(), 3);
+
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        for layout in &layouts {
+            if layout.x == 0.0 {
+                left.push(layout);
+            } else {
+                right.push(layout);
+            }
+        }
+
+        assert_eq!(left.len(), 1);
+        assert_eq!(right.len(), 2);
+
+        let left = left[0];
+        assert_eq!(left.width, 45.0);
+        assert_eq!(left.height, 30.0);
+
+        right.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap());
+        assert_eq!(right[0].x, 45.0);
+        assert_eq!(right[1].x, 45.0);
+        assert_eq!(right[0].width, 45.0);
+        assert_eq!(right[1].width, 45.0);
+        assert_eq!(right[0].height, 15.0);
+        assert_eq!(right[1].height, 15.0);
     }
 
     #[test]
