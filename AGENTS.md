@@ -49,9 +49,16 @@ Run the app with `RUST_LOG=debug cargo run ...` (again! using the `just session-
 
 when doing an editing operation: before presenting the results to the user, always run `just quality-check` and fix any errors. this run fmt/clippy etc.
 
-## binaries
+## crates
+
+Notes on a subselection of crates that need extra info:
 
 ### term
 a terminal multiplexer, with a sidebar for different projects/sessions
 
 by default logs tracing::info! etc to ./term_debug.log
+
+### vte + alacritty_terminal
+
+vendored version of the official crates with various additions required for this project.
+As these are vendored there is no need to think about backwards compatibility as all users are in this cargo workspace.
