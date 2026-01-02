@@ -686,7 +686,7 @@ mod tests {
         event.click_count = 2;
 
         let message = row.mouse_message(LocalMouseEvent::new(event, 0, 0));
-        assert_eq!(message, Some(TreeMsg::DoubleClick("root")));
+        assert_eq!(message, Some(vec![TreeMsg::DoubleClick("root")]));
     }
 
     #[test]
@@ -701,7 +701,7 @@ mod tests {
         event.click_count = 1;
 
         let message = row.mouse_message(LocalMouseEvent::new(event, 0, 0));
-        assert_eq!(message, Some(TreeMsg::ToggleExpand("root")));
+        assert_eq!(message, Some(vec![TreeMsg::ToggleExpand("root")]));
     }
 
     #[test]
@@ -718,7 +718,7 @@ mod tests {
         event.click_count = 1;
 
         let message = leaf_row.mouse_message(LocalMouseEvent::new(event, 0, 0));
-        assert_eq!(message, Some(TreeMsg::Activate("file")));
+        assert_eq!(message, Some(vec![TreeMsg::Activate("file")]));
     }
 
     #[test]
@@ -734,7 +734,7 @@ mod tests {
         event.click_count = 2;
 
         let message = leaf_row.mouse_message(LocalMouseEvent::new(event, 0, 0));
-        assert_eq!(message, Some(TreeMsg::DoubleClick("file")));
+        assert_eq!(message, Some(vec![TreeMsg::DoubleClick("file")]));
     }
 
     #[test]

@@ -63,7 +63,7 @@ pub struct Node<Msg> {
     pub(crate) scroll_x: f32,
     pub(crate) scroll_y: f32,
 
-    pub(crate) on_mouse: Option<Rc<dyn Fn(LocalMouseEvent) -> Option<Msg>>>,
+    pub(crate) on_mouse: Vec<Rc<dyn Fn(LocalMouseEvent) -> Option<Msg>>>,
     pub(crate) on_resize: Option<ResizeHandler<Msg>>,
     pub(crate) pending_scroll: Option<PendingScroll<Msg>>,
 }
@@ -82,7 +82,7 @@ impl<Msg> fmt::Debug for Node<Msg> {
             .field("classname", &self.classname)
             .field("id", &self.id)
             .field("layout_state", &self.layout_state)
-            .field("clickable", &self.on_mouse.is_some())
+            .field("clickable", &!self.on_mouse.is_empty())
             .field("pending_scroll", &self.pending_scroll.is_some())
             .finish()
     }
@@ -350,7 +350,7 @@ impl<Msg> Node<Msg> {
             layout_state: LayoutState::default(),
             classname: "",
             id: 0,
-            on_mouse: None,
+            on_mouse: Vec::new(),
             on_resize: None,
             scroll_x: 0.0,
             scroll_y: 0.0,
@@ -398,7 +398,7 @@ impl<Msg> Node<Msg> {
     }
 
     pub fn on_click(mut self, handler: impl Fn() -> Msg + 'static) -> Self {
-        self.on_mouse = Some(Rc::new(move |e: LocalMouseEvent| {
+        self.on_mouse.push(Rc::new(move |e: LocalMouseEvent| {
             if e.is_single_click() {
                 Some(handler())
             } else {
@@ -409,7 +409,7 @@ impl<Msg> Node<Msg> {
     }
 
     pub fn on_mouse(mut self, handler: impl Fn(LocalMouseEvent) -> Option<Msg> + 'static) -> Self {
-        self.on_mouse = Some(Rc::new(handler));
+        self.on_mouse.push(Rc::new(handler));
         self
     }
 
@@ -675,11 +675,18 @@ impl<Msg> Node<Msg> {
         }
     }
 
-    pub(crate) fn mouse_message(&self, event: LocalMouseEvent) -> Option<Msg> {
-        if let Some(handler) = &self.on_mouse {
-            return handler(event);
+    pub(crate) fn mouse_message(&self, event: LocalMouseEvent) -> Option<Vec<Msg>> {
+        let mut messages = Vec::new();
+        for handler in &self.on_mouse {
+            if let Some(msg) = handler(event) {
+                messages.push(msg);
+            }
         }
-        None
+        if messages.is_empty() {
+            None
+        } else {
+            Some(messages)
+        }
     }
 
     pub(crate) fn hit_test<T>(
@@ -1293,18 +1300,41 @@ mod tests {
         );
         crate::dom::rounding::round_layout(&mut node);
 
-        node.hit_test(0, 0, &mut |n, _, _| {
-            n.mouse_message(crate::event::LocalMouseEvent::new(
-                crate::event::MouseEvent::new(
+        let messages = node
+            .hit_test(0, 0, &mut |n, _, _| {
+                n.mouse_message(crate::event::LocalMouseEvent::new(
+                    crate::event::MouseEvent::new(
+                        0,
+                        0,
+                        crate::event::MouseEventKind::Down(crate::event::MouseButton::Left),
+                    ),
                     0,
                     0,
-                    crate::event::MouseEventKind::Down(crate::event::MouseButton::Left),
-                ),
+                ))
+            })
+            .expect("expected hit");
+        assert_eq!(messages, vec![()]);
+    }
+
+    #[test]
+    fn mouse_message_runs_multiple_handlers_in_order() {
+        let node = text::<&'static str>("btn")
+            .on_mouse(|_| Some("first"))
+            .on_mouse(|_| Some("second"))
+            .on_mouse(|_| None);
+
+        let event = crate::event::LocalMouseEvent::new(
+            crate::event::MouseEvent::new(
                 0,
                 0,
-            ))
-        })
-        .expect("expected hit");
+                crate::event::MouseEventKind::Down(crate::event::MouseButton::Left),
+            ),
+            0,
+            0,
+        );
+
+        let messages = node.mouse_message(event);
+        assert_eq!(messages, Some(vec!["first", "second"]));
     }
 
     #[test]

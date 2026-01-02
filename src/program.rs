@@ -340,12 +340,17 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
             self.current_size = *size;
         }
 
-        let mut msg = (self.event_mapper)(event.clone());
+        let msg = (self.event_mapper)(event.clone());
 
-        if let Event::Mouse(mouse_event) = &event {
-            let click_msg = self.handle_mouse_event(mouse_event);
-            if msg.is_none() {
-                msg = click_msg;
+        if let Event::Mouse(mouse_event) = &event
+            && msg.is_none()
+            && let Some(mouse_messages) = self.handle_mouse_event(mouse_event)
+        {
+            for message in mouse_messages {
+                let transition = (self.update)(&mut self.model, message);
+                let (t_needs_quit, t_needs_render) = self.resolve_transition(transition);
+                needs_render |= t_needs_render;
+                needs_quit |= t_needs_quit;
             }
         }
 
@@ -667,7 +672,7 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
         desired.clamp(0.0, max_scroll)
     }
 
-    fn handle_mouse_event(&mut self, event: &MouseEvent) -> Option<Msg> {
+    fn handle_mouse_event(&mut self, event: &MouseEvent) -> Option<Vec<Msg>> {
         let mut enriched = *event;
         enriched.click_count = 0;
 
