@@ -10,6 +10,13 @@ pub enum Layout {
     Tall,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartupState {
+    Inactive,
+    Loading,
+    Active,
+}
+
 impl Layout {
     pub fn toggle(self) -> Self {
         match self {
@@ -50,6 +57,7 @@ pub struct Worktree {
     pub sessions: Vec<Session>,
     pub next_session_number: usize,
     pub layout: Layout,
+    pub startup_state: StartupState,
 }
 
 impl Worktree {
@@ -62,6 +70,7 @@ impl Worktree {
             sessions: Vec::new(),
             next_session_number: 1,
             layout: Layout::Tall,
+            startup_state: StartupState::Inactive,
         }
     }
 
@@ -143,6 +152,7 @@ pub struct Project {
     pub worktrees_loaded: bool,
     pub worktrees_loading: bool,
     pub layout: Layout,
+    pub startup_state: StartupState,
 }
 
 impl Project {
@@ -159,6 +169,7 @@ impl Project {
             worktrees_loaded: false,
             worktrees_loading: false,
             layout: Layout::Tall,
+            startup_state: StartupState::Inactive,
         }
     }
 

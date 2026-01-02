@@ -52,6 +52,7 @@ pub trait TermIo: Send + Sync {
         &self,
         path: &Path,
         env: HashMap<String, String>,
+        binary: Option<&str>,
     ) -> io::Result<TerminalState>;
     fn foreground_process_name(&self, terminal: &TerminalState) -> Option<String>;
 }
@@ -154,8 +155,9 @@ impl TermIo for RealIo {
         &self,
         path: &Path,
         env: HashMap<String, String>,
+        binary: Option<&str>,
     ) -> io::Result<TerminalState> {
-        TerminalState::with_working_dir_and_env(path, env).or_else(|err| {
+        TerminalState::with_working_dir_and_env_and_shell(path, env, binary).or_else(|err| {
             warn!(
                 ?err,
                 "failed to start terminal in project dir, falling back to default"
@@ -254,7 +256,11 @@ impl TermIo for FakeIo {
         &self,
         _path: &Path,
         _env: HashMap<String, String>,
+        binary: Option<&str>,
     ) -> io::Result<TerminalState> {
+        if let Some(binary) = binary {
+            return TerminalState::spawn(binary, &[]);
+        }
         TerminalState::spawn("true", &[])
     }
 

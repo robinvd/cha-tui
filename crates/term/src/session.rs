@@ -40,8 +40,9 @@ impl Session {
         number: usize,
         id: SessionId,
         env: HashMap<String, String>,
+        binary: Option<&str>,
     ) -> std::io::Result<Self> {
-        let terminal = io.spawn_terminal(path, env)?;
+        let terminal = io.spawn_terminal(path, env, binary)?;
         let wakeup = terminal.wakeup_receiver();
         let mut session = Session {
             id,

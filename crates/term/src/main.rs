@@ -35,13 +35,13 @@ use tracing::warn;
 use focus::Focus;
 use keymap::{Action, Keymap, Scope};
 use modal::{ModalMsg, ModalResult, ModalState, modal_handle_key, modal_update, modal_view};
-use project::{Layout, Project, ProjectId, SessionKey, WorktreeId};
+use project::{Layout, Project, ProjectId, SessionKey, StartupState, WorktreeId};
 use remote::{
     RemoteClientArgs, RemoteEnvelope, RemoteParams, RemoteProject, RemoteRequest, RemoteResponse,
     RemoteResult, RemoteServer, RemoteSession, RemoteStatus, RemoteWorktree, params_action_name,
     params_input_bytes, params_project_id, params_session_id, params_worktree_id, parse_key_spec,
-    parse_vcs_kind, project_selection, remote_env_map, resolve_new_session_target,
-    session_selection, worktree_selection,
+    parse_vcs_kind, project_selection, remote_container_env_map, remote_env_map,
+    resolve_new_session_target, session_selection, worktree_selection,
 };
 use session::{Session, SessionId};
 use sidebar::{
@@ -214,6 +214,24 @@ enum SessionCommand {
         /// Session id to insert after (overrides TERM_SESSION_ID).
         #[facet(args::named, rename = "after")]
         session: Option<u64>,
+        /// Binary to run for the new session.
+        #[facet(args::named)]
+        binary: Option<String>,
+    },
+    /// Add a new session.
+    Add {
+        /// Project id (overrides TERM_PROJECT_ID).
+        #[facet(args::named)]
+        project: Option<u64>,
+        /// Worktree id (overrides TERM_WORKTREE_ID).
+        #[facet(args::named)]
+        worktree: Option<u64>,
+        /// Session id to insert after (overrides TERM_SESSION_ID).
+        #[facet(args::named, rename = "after")]
+        session: Option<u64>,
+        /// Binary to run for the new session.
+        #[facet(args::named)]
+        binary: Option<String>,
     },
     /// Rename the selected session.
     Rename {
@@ -364,7 +382,6 @@ enum ToggleMode {
 struct StartupScriptRequest {
     project_id: ProjectId,
     worktree: Option<WorktreeId>,
-    session_id: SessionId,
     workspace_path: PathBuf,
 }
 
@@ -384,7 +401,6 @@ struct Model {
     keymap: Keymap,
     remote_socket: Option<PathBuf>,
     remote_receiver: Option<Receiver<RemoteEnvelope>>,
-    pending_startup_scripts: Vec<StartupScriptRequest>,
 }
 
 #[derive(Default)]
@@ -419,7 +435,6 @@ impl Model {
             keymap: Keymap::default(),
             remote_socket,
             remote_receiver: None,
-            pending_startup_scripts: Vec::new(),
         };
 
         let persisted = match model.io.load_projects() {
@@ -437,10 +452,10 @@ impl Model {
                 .and_then(|s| s.to_str())
                 .unwrap_or("project")
                 .to_string();
-            model.add_project(cwd, name, None)?;
+            model.add_project(cwd, name)?;
         } else {
             for project in persisted {
-                if let Err(err) = model.add_project(project.path, project.name, None) {
+                if let Err(err) = model.add_project(project.path, project.name) {
                     warn!(?err, "failed to restore project");
                 }
             }
@@ -451,7 +466,7 @@ impl Model {
                     .and_then(|s| s.to_str())
                     .unwrap_or("project")
                     .to_string();
-                model.add_project(cwd, name, None)?;
+                model.add_project(cwd, name)?;
             }
         }
         Ok(model)
@@ -461,12 +476,7 @@ impl Model {
         self.remote_receiver = Some(receiver);
     }
 
-    fn add_project(
-        &mut self,
-        path: PathBuf,
-        name: String,
-        transitions: Option<&mut Vec<Transition<Msg>>>,
-    ) -> std::io::Result<()> {
+    fn add_project(&mut self, path: PathBuf, name: String) -> std::io::Result<()> {
         let path = match self.io.canonicalize_dir(&path) {
             Ok(p) => p,
             Err(_) => path,
@@ -483,24 +493,10 @@ impl Model {
 
         let mut project = Project::new(project_id, name, path);
         project.worktrees_loaded = !self.io.load_worktrees();
-        let session = self.spawn_session_for(&project, None)?;
-        let session_id = session.id;
-        let workspace_path = project.path.clone();
-        project.add_session(None, session);
 
         self.projects.push(project);
         rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
         self.focus = Focus::Sidebar;
-
-        self.queue_startup_script(
-            StartupScriptRequest {
-                project_id,
-                worktree: None,
-                session_id,
-                workspace_path,
-            },
-            transitions,
-        );
 
         if let Err(err) = self.io.save_projects(&self.projects) {
             warn!(?err, "failed to save projects");
@@ -514,11 +510,12 @@ impl Model {
         number: usize,
         project_id: ProjectId,
         worktree: Option<WorktreeId>,
+        binary: Option<&str>,
     ) -> std::io::Result<Session> {
         let id = SessionId(self.next_session_id);
         self.next_session_id += 1;
         let env = self.session_env(project_id, worktree, id);
-        Session::spawn(self.io.clone(), path, number, id, env)
+        Session::spawn(self.io.clone(), path, number, id, env, binary)
     }
 
     fn session_env(
@@ -533,20 +530,15 @@ impl Model {
         remote_env_map(socket, project_id, worktree, session_id)
     }
 
-    fn queue_startup_script(
-        &mut self,
-        request: StartupScriptRequest,
-        transitions: Option<&mut Vec<Transition<Msg>>>,
-    ) {
-        if self.initial_update || transitions.is_none() {
-            self.pending_startup_scripts.push(request);
-            return;
-        }
-        if let Some(transition) = self.build_startup_script_transition(request) {
-            if let Some(transitions) = transitions {
-                transitions.push(transition);
-            }
-        }
+    fn startup_env(
+        &self,
+        project_id: ProjectId,
+        worktree: Option<WorktreeId>,
+    ) -> HashMap<String, String> {
+        let Some(socket) = &self.remote_socket else {
+            return HashMap::new();
+        };
+        remote_container_env_map(socket, project_id, worktree)
     }
 
     fn build_startup_script_transition(
@@ -554,7 +546,9 @@ impl Model {
         request: StartupScriptRequest,
     ) -> Option<Transition<Msg>> {
         let script_path = self.io.resolve_startup_script(&request.workspace_path)?;
-        let env = self.session_env(request.project_id, request.worktree, request.session_id);
+        let env = self.startup_env(request.project_id, request.worktree);
+        let project_id = request.project_id;
+        let worktree = request.worktree;
         Some(startup_script_transition(
             self.io.clone(),
             StartupScript {
@@ -562,33 +556,126 @@ impl Model {
                 workspace_path: request.workspace_path,
                 env,
             },
+            project_id,
+            worktree,
         ))
     }
 
-    fn spawn_session_for(
+    fn container_startup_state_mut(
         &mut self,
-        project: &Project,
+        project_id: ProjectId,
         worktree: Option<WorktreeId>,
-    ) -> std::io::Result<Session> {
+    ) -> Option<&mut StartupState> {
+        let project = self.project_mut(project_id)?;
         match worktree {
-            None => {
-                self.spawn_session(&project.path, project.next_session_number, project.id, None)
+            None => Some(&mut project.startup_state),
+            Some(wid) => project.worktree_mut(wid).map(|wt| &mut wt.startup_state),
+        }
+    }
+
+    fn container_startup_state(
+        &self,
+        project_id: ProjectId,
+        worktree: Option<WorktreeId>,
+    ) -> Option<StartupState> {
+        let project = self.project(project_id)?;
+        match worktree {
+            None => Some(project.startup_state),
+            Some(wid) => project.worktree(wid).map(|wt| wt.startup_state),
+        }
+    }
+
+    fn container_path(
+        &self,
+        project_id: ProjectId,
+        worktree: Option<WorktreeId>,
+    ) -> Option<PathBuf> {
+        let project = self.project(project_id)?;
+        match worktree {
+            None => Some(project.path.clone()),
+            Some(wid) => project.worktree(wid).map(|wt| wt.path.clone()),
+        }
+    }
+
+    fn container_has_sessions(&self, project_id: ProjectId, worktree: Option<WorktreeId>) -> bool {
+        let project = match self.project(project_id) {
+            Some(project) => project,
+            None => return false,
+        };
+        match worktree {
+            None => !project.sessions.is_empty(),
+            Some(wid) => project
+                .worktree(wid)
+                .map(|wt| !wt.sessions.is_empty())
+                .unwrap_or(false),
+        }
+    }
+
+    fn activate_container(
+        &mut self,
+        project_id: ProjectId,
+        worktree: Option<WorktreeId>,
+        transitions: &mut Vec<Transition<Msg>>,
+    ) {
+        if self.container_startup_state(project_id, worktree) != Some(StartupState::Inactive) {
+            return;
+        }
+        let Some(workspace_path) = self.container_path(project_id, worktree) else {
+            return;
+        };
+
+        let request = StartupScriptRequest {
+            project_id,
+            worktree,
+            workspace_path,
+        };
+        if let Some(transition) = self.build_startup_script_transition(request) {
+            if let Some(startup_state) = self.container_startup_state_mut(project_id, worktree) {
+                *startup_state = StartupState::Loading;
             }
-            Some(wid) => {
-                let Some(worktree) = project.worktree(wid) else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::NotFound,
-                        "worktree not found",
-                    ));
-                };
-                self.spawn_session(
-                    &worktree.path,
-                    worktree.next_session_number,
-                    project.id,
-                    Some(wid),
-                )
+            transitions.push(transition);
+        } else {
+            if let Some(startup_state) = self.container_startup_state_mut(project_id, worktree) {
+                *startup_state = StartupState::Active;
+            }
+            if !self.container_has_sessions(project_id, worktree) {
+                create_session(
+                    self,
+                    project_id,
+                    worktree,
+                    InsertPosition::Top,
+                    None,
+                    false,
+                    transitions,
+                );
             }
         }
+        rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
+    }
+
+    fn finish_startup_script(
+        &mut self,
+        project_id: ProjectId,
+        worktree: Option<WorktreeId>,
+        transitions: &mut Vec<Transition<Msg>>,
+    ) {
+        if self.container_startup_state(project_id, worktree) == Some(StartupState::Loading)
+            && let Some(startup_state) = self.container_startup_state_mut(project_id, worktree)
+        {
+            *startup_state = StartupState::Active;
+        }
+        if !self.container_has_sessions(project_id, worktree) {
+            create_session(
+                self,
+                project_id,
+                worktree,
+                InsertPosition::Top,
+                None,
+                false,
+                transitions,
+            );
+        }
+        rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
     }
 
     fn start_worktree_load(&mut self, project_id: ProjectId) -> Option<Transition<Msg>> {
@@ -616,7 +703,6 @@ impl Model {
         &mut self,
         project_id: ProjectId,
         result: Result<Vec<vcs::Worktree>, String>,
-        transitions: &mut Vec<Transition<Msg>>,
     ) {
         let Some(project_index) = self.projects.iter().position(|p| p.id == project_id) else {
             return;
@@ -632,33 +718,7 @@ impl Model {
 
         self.projects[project_index].worktrees_loaded = true;
         for worktree in worktrees {
-            let path = worktree.path.clone();
-            let wid = self.projects[project_index].add_worktree(worktree.name, worktree.path);
-            let number = self.projects[project_index]
-                .worktree(wid)
-                .map(|wt| wt.next_session_number)
-                .unwrap_or(1);
-            let session = match self.spawn_session(&path, number, project_id, Some(wid)) {
-                Ok(session) => session,
-                Err(err) => {
-                    warn!(?err, "failed to create worktree session");
-                    continue;
-                }
-            };
-            let tree_id = TreeId::Session(project_id, Some(wid), session.id);
-            self.queue_startup_script(
-                StartupScriptRequest {
-                    project_id,
-                    worktree: Some(wid),
-                    session_id: session.id,
-                    workspace_path: path,
-                },
-                Some(transitions),
-            );
-            self.projects[project_index].add_session(Some(wid), session);
-            if let Some(receiver) = self.wakeup_for(&tree_id) {
-                transitions.push(arm_wakeup(tree_id, receiver));
-            }
+            self.projects[project_index].add_worktree(worktree.name, worktree.path);
         }
 
         rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
@@ -669,7 +729,6 @@ impl Model {
         project_id: ProjectId,
         name: String,
         vcs: VcsKind,
-        transitions: Option<&mut Vec<Transition<Msg>>>,
     ) -> Option<TreeId> {
         let project_index = self.projects.iter().position(|p| p.id == project_id)?;
         if self.projects[project_index]
@@ -693,43 +752,9 @@ impl Model {
         copy_optional_files(self.io.as_ref(), &repo_path, &path, &mut self.status);
 
         let wid = self.projects[project_index].add_worktree(name, path);
-        let (path, number) = match self.projects[project_index].worktree(wid) {
-            Some(worktree) => (worktree.path.clone(), worktree.next_session_number),
-            None => {
-                self.status = Some(StatusMessage::error("Worktree no longer exists"));
-                return None;
-            }
-        };
-        let session = match self.spawn_session(&path, number, project_id, Some(wid)) {
-            Ok(session) => session,
-            Err(err) => {
-                self.status = Some(StatusMessage::error(format!(
-                    "Failed to create worktree session: {err}"
-                )));
-                return None;
-            }
-        };
-
-        let sid = session.id;
-        self.queue_startup_script(
-            StartupScriptRequest {
-                project_id,
-                worktree: Some(wid),
-                session_id: sid,
-                workspace_path: path,
-            },
-            transitions,
-        );
-        self.projects[project_index].add_session(Some(wid), session);
         rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
-        self.select_session(SessionKey {
-            project: project_id,
-            worktree: Some(wid),
-            session: sid,
-        });
         self.set_focus(Focus::Sidebar);
-
-        Some(TreeId::Session(project_id, Some(wid), sid))
+        Some(TreeId::Worktree(project_id, wid))
     }
 
     fn active_session(&self) -> Option<(&Project, &Session)> {
@@ -924,10 +949,15 @@ impl Model {
         }
 
         let project_id = self.projects[project_index].id;
-        let session = self.spawn_session(&path, number, project_id, worktree)?;
+        let session = self.spawn_session(&path, number, project_id, worktree, None)?;
         let tree_id = TreeId::Session(self.projects[project_index].id, worktree, session.id);
 
         self.projects[project_index].add_session(worktree, session);
+        if let Some(state) = self.container_startup_state_mut(project_id, worktree)
+            && *state == StartupState::Inactive
+        {
+            *state = StartupState::Active;
+        }
         rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
         Ok(Some(tree_id))
     }
@@ -968,6 +998,8 @@ enum Msg {
     Modal(ModalMsg),
     NewSession,
     StartupScriptFinished {
+        project: ProjectId,
+        worktree: Option<WorktreeId>,
         ok: bool,
     },
 }
@@ -988,10 +1020,19 @@ fn arm_remote(receiver: Receiver<RemoteEnvelope>) -> Transition<Msg> {
     }))
 }
 
-fn startup_script_transition(io: Arc<dyn TermIo>, script: StartupScript) -> Transition<Msg> {
+fn startup_script_transition(
+    io: Arc<dyn TermIo>,
+    script: StartupScript,
+    project: ProjectId,
+    worktree: Option<WorktreeId>,
+) -> Transition<Msg> {
     Transition::Task(Box::pin(async move {
         let ok = smol::unblock(move || io.run_startup_script(script)).await;
-        Msg::StartupScriptFinished { ok }
+        Msg::StartupScriptFinished {
+            project,
+            worktree,
+            ok,
+        }
     }))
 }
 
@@ -1047,14 +1088,6 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         }
         if let Some(receiver) = model.remote_receiver.clone() {
             transitions.push(arm_remote(receiver));
-        }
-        if !model.pending_startup_scripts.is_empty() {
-            let pending = std::mem::take(&mut model.pending_startup_scripts);
-            for request in pending {
-                if let Some(transition) = model.build_startup_script_transition(request) {
-                    transitions.push(transition);
-                }
-            }
         }
     }
 
@@ -1192,10 +1225,12 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             TreeMsg::Activate(TreeId::Project(pid))
             | TreeMsg::DoubleClick(TreeId::Project(pid)) => {
                 model.tree.toggle_expanded(&TreeId::Project(pid));
+                model.activate_container(pid, None, &mut transitions);
             }
             TreeMsg::Activate(TreeId::Worktree(pid, wid))
             | TreeMsg::DoubleClick(TreeId::Worktree(pid, wid)) => {
                 model.tree.toggle_expanded(&TreeId::Worktree(pid, wid));
+                model.activate_container(pid, Some(wid), &mut transitions);
             }
         },
         Msg::TreeScroll(scroll_msg) => model.tree_scroll.update(scroll_msg),
@@ -1266,7 +1301,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             }
         }
         Msg::WorktreesLoaded { project, result } => {
-            model.apply_worktrees_loaded(project, result, &mut transitions);
+            model.apply_worktrees_loaded(project, result);
         }
         Msg::OpenNewProject => {
             model.modal = Some(ModalState::NewProject {
@@ -1305,32 +1340,18 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| path_str.clone());
 
-                        if let Err(err) = model.add_project(path, name, Some(&mut transitions)) {
+                        if let Err(err) = model.add_project(path, name) {
                             warn!(?err, "failed to add project");
                         } else if let Some(project_id) = model.projects.last().map(|p| p.id) {
                             if let Some(transition) = model.start_worktree_load(project_id) {
                                 transitions.push(transition);
                             }
-                            if let Some(session) = model
-                                .project(project_id)
-                                .and_then(|project| project.sessions.first())
-                            {
-                                model.select_session(SessionKey {
-                                    project: project_id,
-                                    worktree: None,
-                                    session: session.id,
-                                });
-                            }
+                            model.tree.select(TreeId::Project(project_id));
                         }
                         model.modal = None;
                     }
                     ModalResult::WorktreeSubmitted { project, name, vcs } => {
-                        if let Some(tree_id) =
-                            model.add_worktree(project, name, vcs, Some(&mut transitions))
-                            && let Some(receiver) = model.wakeup_for(&tree_id)
-                        {
-                            transitions.push(arm_wakeup(tree_id, receiver));
-                        }
+                        model.add_worktree(project, name, vcs);
                         model.modal = None;
                     }
                     ModalResult::SessionRenamed {
@@ -1368,13 +1389,20 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 project_id,
                 worktree,
                 insert_position,
+                None,
+                true,
                 &mut transitions,
             );
         }
-        Msg::StartupScriptFinished { ok } => {
+        Msg::StartupScriptFinished {
+            project,
+            worktree,
+            ok,
+        } => {
             if !ok {
                 model.status = Some(StatusMessage::error("Startup script failed"));
             }
+            model.finish_startup_script(project, worktree, &mut transitions);
         }
     }
 
@@ -1590,6 +1618,8 @@ fn handle_remote_new_session(
         project_id,
         worktree,
         insert_position,
+        params.binary.as_deref(),
+        true,
         &mut transitions,
     );
 
@@ -1633,23 +1663,14 @@ fn handle_remote_new_project(
         .unwrap_or_else(|| path_str.clone());
 
     let mut transitions = Vec::new();
-    if let Err(err) = model.add_project(path, name, Some(&mut transitions)) {
+    if let Err(err) = model.add_project(path, name) {
         return (Transition::Continue, RemoteResponse::err(err.to_string()));
     }
     if let Some(project_id) = model.projects.last().map(|project| project.id) {
         if let Some(transition) = model.start_worktree_load(project_id) {
             transitions.push(transition);
         }
-        if let Some(session) = model
-            .project(project_id)
-            .and_then(|project| project.sessions.first())
-        {
-            model.select_session(SessionKey {
-                project: project_id,
-                worktree: None,
-                session: session.id,
-            });
-        }
+        model.tree.select(TreeId::Project(project_id));
     }
 
     let response = model
@@ -1699,16 +1720,13 @@ fn handle_remote_new_worktree(
         })
         .unwrap_or(VcsKind::Git);
 
-    let mut transitions = Vec::new();
-    let Some(tree_id) = model.add_worktree(project_id, name, vcs, Some(&mut transitions)) else {
+    let transitions = Vec::new();
+    let Some(_tree_id) = model.add_worktree(project_id, name, vcs) else {
         return (
             Transition::Continue,
             RemoteResponse::err("Failed to create worktree"),
         );
     };
-    if let Some(receiver) = model.wakeup_for(&tree_id) {
-        transitions.push(arm_wakeup(tree_id, receiver));
-    }
 
     let response = model
         .active_session()
@@ -2117,6 +2135,7 @@ fn handle_action(
                 match selected {
                     TreeId::Project(pid) => {
                         model.tree.toggle_expanded(&selected);
+                        model.activate_container(pid, None, &mut transitions);
                         if let Some(project) = model.project(pid)
                             && let Some(session) = project.sessions.first()
                         {
@@ -2135,10 +2154,15 @@ fn handle_action(
                                 session: session.id,
                             });
                         }
-                        Transition::Continue
+                        if transitions.is_empty() {
+                            Transition::Continue
+                        } else {
+                            Transition::Multiple(transitions)
+                        }
                     }
                     TreeId::Worktree(pid, wid) => {
                         model.tree.toggle_expanded(&selected);
+                        model.activate_container(pid, Some(wid), &mut transitions);
                         if let Some(project) = model.project(pid)
                             && let Some(worktree) = project.worktree(wid)
                             && let Some(session) = worktree.sessions.first()
@@ -2149,7 +2173,11 @@ fn handle_action(
                                 session: session.id,
                             });
                         }
-                        Transition::Continue
+                        if transitions.is_empty() {
+                            Transition::Continue
+                        } else {
+                            Transition::Multiple(transitions)
+                        }
                     }
                     TreeId::Session(pid, worktree, sid) => {
                         if let Some(active) = model.active {
@@ -2340,6 +2368,8 @@ fn create_session(
     project_id: ProjectId,
     worktree: Option<WorktreeId>,
     insert_position: InsertPosition,
+    binary: Option<&str>,
+    focus_terminal: bool,
     transitions: &mut Vec<Transition<Msg>>,
 ) -> Option<SessionId> {
     let Some(project_index) = model.projects.iter().position(|p| p.id == project_id) else {
@@ -2358,7 +2388,7 @@ fn create_session(
             }
         }
     };
-    let session = match model.spawn_session(&path, number, project_id, worktree) {
+    let session = match model.spawn_session(&path, number, project_id, worktree, binary) {
         Ok(session) => session,
         Err(err) => {
             warn!(?err, "failed to create new session");
@@ -2379,13 +2409,21 @@ fn create_session(
         }
     }
 
+    if let Some(state) = model.container_startup_state_mut(project_id, worktree)
+        && *state == StartupState::Inactive
+    {
+        *state = StartupState::Active;
+    }
+
     rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
     model.select_session(SessionKey {
         project: project_id,
         worktree,
         session: sid,
     });
-    model.set_focus(Focus::Terminal);
+    if focus_terminal {
+        model.set_focus(Focus::Terminal);
+    }
 
     if let Some(receiver) = model.wakeup_for(&TreeId::Session(project_id, worktree, sid)) {
         transitions.push(arm_wakeup(
@@ -2634,6 +2672,7 @@ fn remote_action_name(action: &RemoteCommand) -> &'static str {
             SessionCommand::Prev => "session-prev",
             SessionCommand::Index { .. } => "session-index",
             SessionCommand::New { .. } => "session-new",
+            SessionCommand::Add { .. } => "session-new",
             SessionCommand::Rename { .. } => "session-rename",
             SessionCommand::List { .. } => "session-list",
             SessionCommand::Get => "session-get",
@@ -2679,6 +2718,7 @@ fn build_remote_client_args(remote: RemoteArgs) -> RemoteClientArgs {
         name: None,
         path: None,
         vcs: None,
+        binary: None,
         key: None,
         ctrl: false,
         alt: false,
@@ -2713,11 +2753,27 @@ fn build_remote_client_args(remote: RemoteArgs) -> RemoteClientArgs {
                     project,
                     worktree,
                     session,
+                    binary,
                 },
         } => {
             args.project = project;
             args.worktree = worktree;
             args.session = session;
+            args.binary = binary;
+        }
+        RemoteCommand::Session {
+            command:
+                SessionCommand::Add {
+                    project,
+                    worktree,
+                    session,
+                    binary,
+                },
+        } => {
+            args.project = project;
+            args.worktree = worktree;
+            args.session = session;
+            args.binary = binary;
         }
         RemoteCommand::Project {
             command: ProjectCommand::New { path, name },
@@ -2907,6 +2963,15 @@ mod tests {
         }
     }
 
+    fn activate_first_project(model: &mut Model) -> ProjectId {
+        let project_id = model.projects[0].id;
+        update(
+            model,
+            Msg::Tree(TreeMsg::Activate(TreeId::Project(project_id))),
+        );
+        project_id
+    }
+
     struct TerminalLayout {
         width: f32,
         height: f32,
@@ -2945,6 +3010,7 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        let _project_id = activate_first_project(&mut model);
         let TreeId::Session(pid, worktree, sid) = model.tree.selected().cloned().expect("selected")
         else {
             panic!("expected a session selected");
@@ -2972,7 +3038,7 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
-        let project_id = model.projects[0].id;
+        let project_id = activate_first_project(&mut model);
 
         // Add another session
         update(&mut model, Msg::NewSession);
@@ -3007,9 +3073,8 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        let project_id = activate_first_project(&mut model);
         update(&mut model, Msg::NewSession);
-
-        let project_id = model.projects[0].id;
         let first_session = model.projects[0].sessions[0].id;
         let second_session = model.projects[0].sessions[1].id;
 
@@ -3044,9 +3109,8 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        let project_id = activate_first_project(&mut model);
         update(&mut model, Msg::NewSession);
-
-        let project_id = model.projects[0].id;
         let first_session = model.projects[0].sessions[0].id;
         let second_session = model.projects[0].sessions[1].id;
 
@@ -3081,9 +3145,10 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        activate_first_project(&mut model);
         let cwd = std::env::current_dir().expect("cwd available");
         model
-            .add_project(cwd, "secondary".to_string(), None)
+            .add_project(cwd, "secondary".to_string())
             .expect("project added");
 
         let primary_project = model.projects[0].id;
@@ -3101,9 +3166,14 @@ mod tests {
         let (_, response) = handle_remote_activate_target(&mut model, &params);
 
         assert!(response.ok, "expected ok response, got {response:?}");
+        let secondary_session = model.projects[1]
+            .sessions
+            .first()
+            .expect("secondary session created")
+            .id;
         assert_eq!(
             model.tree.selected(),
-            Some(&TreeId::Project(secondary_project))
+            Some(&TreeId::Session(secondary_project, None, secondary_session))
         );
     }
 
@@ -3112,9 +3182,8 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        let project_id = activate_first_project(&mut model);
         update(&mut model, Msg::NewSession);
-
-        let project_id = model.projects[0].id;
         let first_session = model.projects[0].sessions[0].id;
         let second_session = model.projects[0].sessions[1].id;
 
@@ -3149,8 +3218,7 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
-
-        let project_id = model.projects[0].id;
+        let project_id = activate_first_project(&mut model);
         let active_session = model.projects[0].sessions[0].id;
 
         model.select_session(SessionKey {
@@ -3184,6 +3252,7 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        activate_first_project(&mut model);
         let (project_id, worktree_id, session_id, initial_name) = {
             let (project, session) = model.active_session().expect("active session");
             let worktree = model.active.map(|active| active.worktree).unwrap_or(None);
@@ -3239,6 +3308,7 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        activate_first_project(&mut model);
         let TreeId::Session(pid, worktree, sid) =
             model.tree.selected().cloned().expect("selected session")
         else {
@@ -3277,6 +3347,7 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        activate_first_project(&mut model);
         let TreeId::Session(pid, worktree, sid) =
             model.tree.selected().cloned().expect("selected session")
         else {
@@ -3316,9 +3387,8 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        let project_id = activate_first_project(&mut model);
         update(&mut model, Msg::NewSession);
-
-        let project_id = model.projects[0].id;
         let first_session = model.projects[0].sessions[0].id;
         let second_session = model.projects[0].sessions[1].id;
 
@@ -3377,9 +3447,8 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        let project_id = activate_first_project(&mut model);
         update(&mut model, Msg::NewSession);
-
-        let project_id = model.projects[0].id;
         let first_session = model.projects[0].sessions[0].id;
         let second_session = model.projects[0].sessions[1].id;
 
@@ -3443,9 +3512,8 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        let project_id = activate_first_project(&mut model);
         update(&mut model, Msg::NewSession);
-
-        let project_id = model.projects[0].id;
         let first_session = model.projects[0].sessions[0].id;
         model.select_session(SessionKey {
             project: project_id,
@@ -3485,10 +3553,9 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        let project_id = activate_first_project(&mut model);
         update(&mut model, Msg::NewSession);
         update(&mut model, Msg::NewSession);
-
-        let project_id = model.projects[0].id;
         let second_session = model.projects[0].sessions[1].id;
         model.select_session(SessionKey {
             project: project_id,
@@ -3542,6 +3609,7 @@ mod tests {
         let Some(mut model) = test_model() else {
             return;
         };
+        activate_first_project(&mut model);
         update(&mut model, Msg::NewSession);
         model.focus = Focus::Sidebar;
 

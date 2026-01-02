@@ -538,12 +538,9 @@ impl<Msg> Node<Msg> {
                 element.attrs.style = style;
             }
             NodeContent::Text(text) => {
-                let prev = text.base_style;
                 text.base_style = style;
                 for span in &mut text.spans {
-                    if span.style == prev {
-                        span.style = style;
-                    }
+                    span.style = style.merged(&span.style)
                 }
             }
             NodeContent::Renderable(_leaf) => {}

@@ -341,6 +341,17 @@ impl TerminalState {
         Self::spawn_internal(None, Some(path.as_ref().to_path_buf()), env)
     }
 
+    /// Create a new terminal state with a working directory, extra environment variables,
+    /// and an optional shell command.
+    pub fn with_working_dir_and_env_and_shell(
+        path: impl AsRef<Path>,
+        env: HashMap<String, String>,
+        shell: Option<&str>,
+    ) -> std::io::Result<Self> {
+        let shell = shell.map(|command| Shell::new(command.to_string(), Vec::new()));
+        Self::spawn_internal(shell, Some(path.as_ref().to_path_buf()), env)
+    }
+
     /// Spawn a command in the terminal.
     pub fn spawn(command: &str, args: &[&str]) -> std::io::Result<Self> {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();

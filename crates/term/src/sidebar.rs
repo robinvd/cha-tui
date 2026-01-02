@@ -10,7 +10,7 @@ use taffy::prelude::TaffyZero;
 
 use crate::Msg;
 
-use super::project::{Project, ProjectId, SessionKey, WorktreeId};
+use super::project::{Project, ProjectId, SessionKey, StartupState, WorktreeId};
 use super::session::SessionId;
 
 /// Identifier for tree nodes.
@@ -87,7 +87,18 @@ pub fn rebuild_tree(
                 })
                 .collect::<Vec<_>>();
 
-            let label = vec![TextSpan::new(worktree.name.clone(), Style::default())];
+            let mut label = vec![TextSpan::new(worktree.name.clone(), Style::default())];
+            match worktree.startup_state {
+                StartupState::Inactive => {
+                    let state_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
+                    label.push(TextSpan::new(" inactive", state_style));
+                }
+                StartupState::Loading => {
+                    let state_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
+                    label.push(TextSpan::new(" loading", state_style));
+                }
+                StartupState::Active => {}
+            }
             children.push(
                 TreeNode::branch(
                     TreeId::Worktree(project.id, worktree.id),
@@ -100,8 +111,19 @@ pub fn rebuild_tree(
 
         let mut label = vec![TextSpan::new(project.name.clone(), Style::default())];
         if !project.worktrees_loaded {
-            let loading_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
+            let loading_style = Style::dim();
             label.push(TextSpan::new(" ⟳", loading_style));
+        }
+        match project.startup_state {
+            StartupState::Inactive => {
+                let state_style = Style::dim();
+                label.push(TextSpan::new(" inactive", state_style));
+            }
+            StartupState::Loading => {
+                let state_style = Style::dim();
+                label.push(TextSpan::new(" loading", state_style));
+            }
+            StartupState::Active => {}
         }
 
         items.push(
@@ -119,14 +141,16 @@ pub fn rebuild_tree(
         tree.select(selected);
     }
 
-    if tree.selected().is_none()
-        && let Some(first) = first_session_id(projects)
-    {
-        tree.select(TreeId::Session(
-            first.project,
-            first.worktree,
-            first.session,
-        ));
+    if tree.selected().is_none() {
+        if let Some(first) = first_session_id(projects) {
+            tree.select(TreeId::Session(
+                first.project,
+                first.worktree,
+                first.session,
+            ));
+        } else if let Some(project) = projects.first() {
+            tree.select(TreeId::Project(project.id));
+        }
     }
 
     if let Some(TreeId::Session(pid, worktree, sid)) = tree.selected().cloned() {

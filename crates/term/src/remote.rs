@@ -70,6 +70,8 @@ pub struct RemoteParams {
     #[facet(default)]
     pub vcs: Option<String>,
     #[facet(default)]
+    pub binary: Option<String>,
+    #[facet(default)]
     pub key: Option<RemoteKey>,
     #[facet(default)]
     pub text: Option<String>,
@@ -211,6 +213,7 @@ pub struct RemoteClientArgs {
     pub name: Option<String>,
     pub path: Option<String>,
     pub vcs: Option<String>,
+    pub binary: Option<String>,
     pub key: Option<String>,
     pub ctrl: bool,
     pub alt: bool,
@@ -499,6 +502,7 @@ fn params_from_args(args: &RemoteClientArgs) -> color_eyre::Result<RemoteParams>
     params.name = args.name.clone();
     params.path = args.path.clone();
     params.vcs = args.vcs.clone();
+    params.binary = args.binary.clone();
     params.text = args.content.clone();
 
     if let Some(key) = &args.key {
@@ -738,6 +742,23 @@ pub fn remote_env_map(
     env
 }
 
+pub fn remote_container_env_map(
+    socket_path: &PathBuf,
+    project: ProjectId,
+    worktree: Option<WorktreeId>,
+) -> HashMap<String, String> {
+    let mut env = HashMap::new();
+    env.insert(
+        ENV_REMOTE_SOCKET.to_string(),
+        socket_path.display().to_string(),
+    );
+    env.insert(ENV_PROJECT_ID.to_string(), project.0.to_string());
+    if let Some(worktree) = worktree {
+        env.insert(ENV_WORKTREE_ID.to_string(), worktree.0.to_string());
+    }
+    env
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -788,6 +809,7 @@ mod tests {
             name: None,
             path: None,
             vcs: None,
+            binary: None,
             key: None,
             ctrl: false,
             alt: false,
