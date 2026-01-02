@@ -33,6 +33,9 @@ pub enum Transition<Msg> {
     Quit,
     Task(TaskFn<Msg>),
     Multiple(Vec<Transition<Msg>>),
+    Bell,
+    SetTitle(Option<String>),
+    Notify { title: Option<String>, body: String },
 }
 
 impl<Msg> Transition<Msg> {
@@ -73,6 +76,7 @@ pub struct Program<Model, Msg> {
     executor: smol::LocalExecutor<'static>,
     task_queue_send: smol::channel::Sender<Msg>,
     task_queue_recv: smol::channel::Receiver<Msg>,
+    pending_terminal_actions: Vec<TerminalAction>,
 }
 
 impl<Model, Msg: 'static> Program<Model, Msg> {
@@ -95,6 +99,7 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
             executor: smol::LocalExecutor::new(),
             task_queue_recv: recv,
             task_queue_send: snd,
+            pending_terminal_actions: Vec::new(),
         }
     }
 
@@ -212,6 +217,9 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
             if needs_render {
                 self.flush_render(&mut buffer, terminal)?;
             }
+            if !self.pending_terminal_actions.is_empty() {
+                self.flush_terminal_actions(terminal)?;
+            }
             if should_quit {
                 break;
             }
@@ -256,6 +264,9 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
 
             if loop_needs_render {
                 self.flush_render(&mut buffer, terminal)?;
+            }
+            if !self.pending_terminal_actions.is_empty() {
+                self.flush_terminal_actions(terminal)?;
             }
 
             if loop_should_quit {
@@ -399,6 +410,17 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
                     needs_render |= t_render;
                 }
             }
+            Transition::Bell => {
+                self.pending_terminal_actions.push(TerminalAction::Bell);
+            }
+            Transition::SetTitle(title) => {
+                self.pending_terminal_actions
+                    .push(TerminalAction::SetTitle(title));
+            }
+            Transition::Notify { title, body } => {
+                self.pending_terminal_actions
+                    .push(TerminalAction::Notify { title, body });
+            }
         }
 
         (needs_quit, needs_render)
@@ -432,6 +454,43 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
         } else {
             Ok(())
         }
+    }
+
+    fn flush_terminal_actions(
+        &mut self,
+        terminal: &mut PlatformTerminal,
+    ) -> Result<(), ProgramError> {
+        let actions = std::mem::take(&mut self.pending_terminal_actions);
+        for action in actions {
+            match action {
+                TerminalAction::Bell => {
+                    write!(terminal, "\x07").map_err(|e| {
+                        ProgramError::terminal(format!("Failed to write bell: {}", e))
+                    })?;
+                }
+                TerminalAction::SetTitle(title) => {
+                    let title = title.unwrap_or_default();
+                    write!(terminal, "\x1b]0;{title}\x07").map_err(|e| {
+                        ProgramError::terminal(format!("Failed to write title: {}", e))
+                    })?;
+                }
+                TerminalAction::Notify { title, body } => {
+                    if let Some(title) = title {
+                        write!(terminal, "\x1b]9;{title};{body}\x07").map_err(|e| {
+                            ProgramError::terminal(format!("Failed to write notification: {}", e))
+                        })?;
+                    } else {
+                        write!(terminal, "\x1b]9;{body}\x07").map_err(|e| {
+                            ProgramError::terminal(format!("Failed to write notification: {}", e))
+                        })?;
+                    }
+                }
+            }
+        }
+        terminal
+            .flush()
+            .map_err(|e| ProgramError::terminal(format!("Failed to flush terminal: {}", e)))?;
+        Ok(())
     }
 
     fn flush_render(
@@ -660,6 +719,12 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
 const DEFAULT_WIDTH: u16 = 80;
 const DEFAULT_HEIGHT: u16 = 24;
 const DOUBLE_CLICK_INTERVAL: Duration = Duration::from_millis(400);
+
+enum TerminalAction {
+    Bell,
+    SetTitle(Option<String>),
+    Notify { title: Option<String>, body: String },
+}
 
 struct LastClick {
     timestamp: Instant,

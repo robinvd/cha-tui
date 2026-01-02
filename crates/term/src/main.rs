@@ -25,8 +25,9 @@ use taffy::Dimension;
 
 use chatui::event::{Event, Key, KeyCode};
 use chatui::{
-    InputMsg, InputState, Node, Program, ScrollMsg, ScrollState, TerminalMsg, Transition, TreeMsg,
-    TreeState, block_with_title, column, default_terminal_keybindings, row, terminal, text,
+    InputMsg, InputState, Node, Program, ScrollMsg, ScrollState, TerminalMsg, TerminalNotification,
+    Transition, TreeMsg, TreeState, block_with_title, column, default_terminal_keybindings, row,
+    terminal, text,
 };
 use facet::Facet;
 use facet_args as args;
@@ -385,6 +386,13 @@ struct Model {
     remote_receiver: Option<Receiver<RemoteEnvelope>>,
     #[cfg(test)]
     _test_guard: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+#[derive(Default)]
+struct SessionSync {
+    changed: bool,
+    bell: bool,
+    notifications: Vec<TerminalNotification>,
 }
 
 impl Model {
@@ -800,9 +808,9 @@ impl Model {
         }
     }
 
-    fn sync_session_state(&mut self, id: &TreeId) -> bool {
+    fn sync_session_state(&mut self, id: &TreeId) -> SessionSync {
         let TreeId::Session(pid, worktree, sid) = id else {
-            return false;
+            return SessionSync::default();
         };
 
         let is_active = self
@@ -813,18 +821,30 @@ impl Model {
             .unwrap_or(false);
 
         let Some(project) = self.project_mut(*pid) else {
-            return false;
+            return SessionSync::default();
         };
         let Some(session) = project.session_mut(*worktree, *sid) else {
-            return false;
+            return SessionSync::default();
         };
 
-        let mut changed = false;
-        changed |= session.sync_title();
-        changed |= session.sync_bell(is_active);
-        changed |= session.sync_exited();
-        changed |= session.sync_activity(is_active);
-        changed
+        let mut sync = SessionSync::default();
+
+        let title_sync = session.sync_title();
+        sync.changed |= title_sync.display_changed;
+
+        let bell_sync = session.sync_bell(is_active);
+        sync.changed |= bell_sync.changed;
+        sync.bell = bell_sync.triggered;
+
+        sync.changed |= session.sync_exited();
+        sync.changed |= session.sync_activity(is_active);
+
+        let notifications = session.take_notifications();
+        if !notifications.is_empty() {
+            sync.notifications = notifications;
+        }
+
+        sync
     }
 
     fn ensure_container_has_session(
@@ -1137,8 +1157,18 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             }
         }
         Msg::SessionWake(id) => {
-            if model.sync_session_state(&id) {
+            let sync = model.sync_session_state(&id);
+            if sync.changed {
                 rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+            }
+            if sync.bell {
+                transitions.push(Transition::Bell);
+            }
+            for notification in sync.notifications {
+                transitions.push(Transition::Notify {
+                    title: notification.title,
+                    body: notification.body,
+                });
             }
             if let Some(receiver) = model.wakeup_for(&id) {
                 transitions.push(arm_wakeup(id, receiver));
@@ -3190,7 +3220,7 @@ mod tests {
             }
         }
 
-        model.sync_session_state(&TreeId::Session(pid, worktree, sid));
+        let _ = model.sync_session_state(&TreeId::Session(pid, worktree, sid));
         rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
 
         let visible_session = model

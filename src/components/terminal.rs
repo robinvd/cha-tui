@@ -19,7 +19,7 @@ pub use alacritty_terminal::term::TermMode;
 use once_cell::sync::Lazy;
 use std::any::Any;
 use std::borrow::Cow;
-use std::collections::{HashMap, hash_map::DefaultHasher};
+use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::io;
 #[cfg(unix)]
@@ -125,6 +125,12 @@ pub enum TerminalMsg {
     FocusLost,
 }
 
+#[derive(Clone, Debug)]
+pub struct TerminalNotification {
+    pub title: Option<String>,
+    pub body: String,
+}
+
 /// Event listener that tracks terminal content changes.
 #[derive(Clone)]
 struct TerminalEventListener {
@@ -196,6 +202,8 @@ pub struct TerminalState {
     title: Arc<Mutex<Option<String>>>,
     /// Whether a bell has been emitted since the last check.
     bell: Arc<AtomicBool>,
+    /// Pending OSC notification payloads from the terminal.
+    notifications: Arc<Mutex<VecDeque<TerminalNotification>>>,
     /// Tracks changes to the visible terminal content (excluding cursor state).
     content_tracker: Mutex<ContentTracker>,
     /// Marks when content should be rehashed.
@@ -253,6 +261,7 @@ impl TerminalState {
         exited_shared: &Arc<AtomicBool>,
         title_shared: &Arc<Mutex<Option<String>>>,
         bell_shared: &Arc<AtomicBool>,
+        notifications: &Arc<Mutex<VecDeque<TerminalNotification>>>,
         term: &Arc<FairMutex<Term<TerminalEventListener>>>,
         version: &Arc<AtomicU64>,
         wakeup_sender: &Sender<()>,
@@ -284,7 +293,10 @@ impl TerminalState {
                     *current = None;
                 }
             }
-            TermEvent::Notification { .. } => {
+            TermEvent::Notification { title, body } => {
+                if let Ok(mut queue) = notifications.lock() {
+                    queue.push_back(TerminalNotification { title, body });
+                }
                 bell_shared.store(true, Ordering::Relaxed);
             }
             TermEvent::Bell => {
@@ -376,6 +388,7 @@ impl TerminalState {
         let rows_shared = Arc::new(AtomicU16::new(rows));
         let exited_shared = Arc::new(AtomicBool::new(false));
         let title_shared = Arc::new(Mutex::new(None));
+        let notifications = Arc::new(Mutex::new(VecDeque::new()));
         let bell_shared = Arc::new(AtomicBool::new(false));
         let content_dirty = Arc::new(AtomicBool::new(true));
         let (wakeup_sender, wakeup_receiver) = channel::unbounded();
@@ -412,6 +425,7 @@ impl TerminalState {
             exited_shared: exited_shared.clone(),
             title: title_shared.clone(),
             bell: bell_shared.clone(),
+            notifications: notifications.clone(),
             content_tracker: Mutex::new(ContentTracker::default()),
             content_dirty: content_dirty.clone(),
             #[cfg(unix)]
@@ -429,6 +443,7 @@ impl TerminalState {
             let exited_shared = state.exited_shared.clone();
             let title_shared = state.title.clone();
             let bell_shared = state.bell.clone();
+            let notifications = state.notifications.clone();
             let term = state.term.clone();
             let version = state.version.clone();
             let wakeup_sender = state.wakeup_sender.clone();
@@ -443,6 +458,7 @@ impl TerminalState {
                         &exited_shared,
                         &title_shared,
                         &bell_shared,
+                        &notifications,
                         &term,
                         &version,
                         &wakeup_sender,
@@ -558,6 +574,7 @@ impl TerminalState {
             &self.exited_shared,
             &self.title,
             &self.bell,
+            &self.notifications,
             &self.term,
             &self.version,
             &self.wakeup_sender,
@@ -645,6 +662,14 @@ impl TerminalState {
     /// Returns true if the terminal has emitted a bell since the last check.
     pub fn take_bell(&self) -> bool {
         self.bell.swap(false, Ordering::Relaxed)
+    }
+
+    pub fn take_notifications(&self) -> Vec<TerminalNotification> {
+        if let Ok(mut queue) = self.notifications.lock() {
+            queue.drain(..).collect()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Get the current terminal mode flags.

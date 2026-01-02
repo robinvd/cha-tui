@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use chatui::{TerminalMsg, TerminalState};
+use chatui::{TerminalMsg, TerminalNotification, TerminalState};
 use smol::channel::Receiver;
 #[cfg(not(test))]
 use tracing::warn;
@@ -111,32 +111,34 @@ impl Session {
     }
 
     /// Sync OSC title from terminal, returns true if display name changed.
-    pub fn sync_title(&mut self) -> bool {
+    pub fn sync_title(&mut self) -> TitleSync {
         let new_title = self.terminal.title();
         if new_title != self.title {
             self.title = new_title;
         }
-        self.sync_display_name()
+        let display_changed = self.sync_display_name();
+        TitleSync { display_changed }
     }
 
     /// Check and consume bell state, returns true if bell state changed.
-    pub fn sync_bell(&mut self, is_active: bool) -> bool {
+    pub fn sync_bell(&mut self, is_active: bool) -> BellSync {
         let triggered = self.terminal.take_bell();
+        let mut changed = false;
 
         if is_active {
             if self.bell {
                 self.bell = false;
-                return true;
+                changed = true;
             }
-            return false;
+            return BellSync { triggered, changed };
         }
 
         if triggered && !self.bell {
             self.bell = true;
-            return true;
+            changed = true;
         }
 
-        false
+        BellSync { triggered, changed }
     }
 
     /// Clear bell indicator, returns true if it was set.
@@ -204,4 +206,17 @@ impl Session {
     pub fn update(&mut self, msg: TerminalMsg) {
         self.terminal.update(msg);
     }
+
+    pub fn take_notifications(&self) -> Vec<TerminalNotification> {
+        self.terminal.take_notifications()
+    }
+}
+
+pub struct BellSync {
+    pub triggered: bool,
+    pub changed: bool,
+}
+
+pub struct TitleSync {
+    pub display_changed: bool,
 }
