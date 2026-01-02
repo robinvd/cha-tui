@@ -2,11 +2,12 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 
 use chatui::{TerminalMsg, TerminalNotification, TerminalState};
 use smol::channel::Receiver;
-#[cfg(not(test))]
-use tracing::warn;
+
+use crate::term_io::TermIo;
 
 /// Unique identifier for a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -28,32 +29,19 @@ pub struct Session {
     pub has_unread_output: bool,
     /// Last terminal content version that was observed.
     pub last_seen_content_version: u64,
+    io: Arc<dyn TermIo>,
 }
 
 impl Session {
     /// Create a new session with a spawned terminal.
     pub fn spawn(
+        io: Arc<dyn TermIo>,
         path: &Path,
         number: usize,
         id: SessionId,
         env: HashMap<String, String>,
     ) -> std::io::Result<Self> {
-        #[cfg(test)]
-        let _ = path;
-        #[cfg(test)]
-        let _ = &env;
-
-        #[cfg(test)]
-        let terminal = TerminalState::spawn("true", &[]).unwrap();
-
-        #[cfg(not(test))]
-        let terminal = TerminalState::with_working_dir_and_env(path, env).or_else(|err| {
-            warn!(
-                ?err,
-                "failed to start terminal in project dir, falling back to default"
-            );
-            TerminalState::new()
-        })?;
+        let terminal = io.spawn_terminal(path, env)?;
         let wakeup = terminal.wakeup_receiver();
         let mut session = Session {
             id,
@@ -67,6 +55,7 @@ impl Session {
             cached_display_name: String::new(),
             has_unread_output: false,
             last_seen_content_version: 0,
+            io,
         };
         session.last_seen_content_version = session.terminal.content_version();
         session.cached_display_name = session.display_name();
@@ -79,16 +68,7 @@ impl Session {
             .custom_title
             .clone()
             .or_else(|| self.title.clone())
-            .or_else(|| {
-                #[cfg(not(test))]
-                {
-                    self.terminal.foreground_process_name()
-                }
-                #[cfg(test)]
-                {
-                    None
-                }
-            })
+            .or_else(|| self.io.foreground_process_name(&self.terminal))
             .unwrap_or_else(|| format!("session{}", self.number));
         if self.exited {
             format!("{base} [exited]")

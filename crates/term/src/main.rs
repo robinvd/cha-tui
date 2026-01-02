@@ -11,16 +11,14 @@ mod remote;
 mod session;
 mod sidebar;
 mod status;
+mod term_io;
 mod vcs;
 
 use std::collections::HashMap;
 use std::io::{self};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 
-#[cfg(test)]
-use once_cell::sync::Lazy;
-#[cfg(test)]
-use std::sync::Mutex;
 use taffy::Dimension;
 
 use chatui::event::{Event, Key, KeyCode};
@@ -37,7 +35,6 @@ use tracing::warn;
 use focus::Focus;
 use keymap::{Action, Keymap, Scope};
 use modal::{ModalMsg, ModalResult, ModalState, modal_handle_key, modal_update, modal_view};
-use persistence::{load_projects, save_projects};
 use project::{Layout, Project, ProjectId, SessionKey, WorktreeId};
 use remote::{
     RemoteClientArgs, RemoteEnvelope, RemoteParams, RemoteProject, RemoteRequest, RemoteResponse,
@@ -52,10 +49,8 @@ use sidebar::{
     section_style, sidebar_view,
 };
 use status::{StatusMessage, status_bar_view};
+use term_io::{RealIo, StartupScript, TermIo};
 use vcs::VcsKind;
-
-#[cfg(test)]
-static TEST_MODEL_GUARD: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 
 #[derive(Facet)]
 struct Args {
@@ -373,13 +368,8 @@ struct StartupScriptRequest {
     workspace_path: PathBuf,
 }
 
-struct StartupScript {
-    script_path: PathBuf,
-    workspace_path: PathBuf,
-    env: HashMap<String, String>,
-}
-
 struct Model {
+    io: Arc<dyn TermIo>,
     projects: Vec<Project>,
     tree: TreeState<TreeId>,
     tree_scroll: ScrollState,
@@ -390,18 +380,11 @@ struct Model {
     initial_update: bool,
     next_project_id: u64,
     next_session_id: u64,
-    /// When true, skip writing to the config file (used in tests).
-    skip_persist: bool,
-    /// When true, skip worktree discovery (used in tests).
-    skip_worktrees: bool,
-    run_startup_scripts: bool,
     status: Option<StatusMessage>,
     keymap: Keymap,
     remote_socket: Option<PathBuf>,
     remote_receiver: Option<Receiver<RemoteEnvelope>>,
     pending_startup_scripts: Vec<StartupScriptRequest>,
-    #[cfg(test)]
-    _test_guard: Option<std::sync::MutexGuard<'static, ()>>,
 }
 
 #[derive(Default)]
@@ -412,27 +395,16 @@ struct SessionSync {
 }
 
 impl Model {
-    #[cfg(test)]
-    fn new_without_persistence() -> std::io::Result<Self> {
-        Self::new_with_options(true, None)
-    }
-
-    fn new_with_remote(remote_socket: Option<PathBuf>) -> std::io::Result<Self> {
-        Self::new_with_options(false, remote_socket)
-    }
-
-    fn new_with_options(
-        skip_persist: bool,
+    fn new_with_remote(
+        io: Arc<dyn TermIo>,
         remote_socket: Option<PathBuf>,
     ) -> std::io::Result<Self> {
-        #[cfg(test)]
-        let test_guard = if skip_persist {
-            Some(TEST_MODEL_GUARD.lock().expect("test model guard poisoned"))
-        } else {
-            None
-        };
+        Self::new_with_io(io, remote_socket)
+    }
 
+    fn new_with_io(io: Arc<dyn TermIo>, remote_socket: Option<PathBuf>) -> std::io::Result<Self> {
         let mut model = Self {
+            io,
             projects: Vec::new(),
             tree: TreeState::new(),
             tree_scroll: ScrollState::vertical(),
@@ -443,32 +415,23 @@ impl Model {
             initial_update: true,
             next_project_id: 1,
             next_session_id: 1,
-            skip_persist,
-            skip_worktrees: skip_persist,
-            run_startup_scripts: !cfg!(test),
             status: None,
             keymap: Keymap::default(),
             remote_socket,
             remote_receiver: None,
             pending_startup_scripts: Vec::new(),
-            #[cfg(test)]
-            _test_guard: test_guard,
         };
 
-        let persisted = if skip_persist {
-            Vec::new()
-        } else {
-            match load_projects() {
-                Ok(data) => data,
-                Err(err) => {
-                    warn!(?err, "failed to load saved projects");
-                    Vec::new()
-                }
+        let persisted = match model.io.load_projects() {
+            Ok(data) => data,
+            Err(err) => {
+                warn!(?err, "failed to load saved projects");
+                Vec::new()
             }
         };
 
         if persisted.is_empty() {
-            let cwd = std::env::current_dir()?;
+            let cwd = model.io.current_dir()?;
             let name = cwd
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -482,7 +445,7 @@ impl Model {
                 }
             }
             if model.projects.is_empty() {
-                let cwd = std::env::current_dir()?;
+                let cwd = model.io.current_dir()?;
                 let name = cwd
                     .file_name()
                     .and_then(|s| s.to_str())
@@ -504,11 +467,11 @@ impl Model {
         name: String,
         transitions: Option<&mut Vec<Transition<Msg>>>,
     ) -> std::io::Result<()> {
-        let path = match path.canonicalize() {
+        let path = match self.io.canonicalize_dir(&path) {
             Ok(p) => p,
             Err(_) => path,
         };
-        if !path.is_dir() {
+        if !self.io.is_dir(&path) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("{} is not a directory", path.display()),
@@ -519,7 +482,7 @@ impl Model {
         self.next_project_id += 1;
 
         let mut project = Project::new(project_id, name, path);
-        project.worktrees_loaded = self.skip_worktrees;
+        project.worktrees_loaded = !self.io.load_worktrees();
         let session = self.spawn_session_for(&project, None)?;
         let session_id = session.id;
         let workspace_path = project.path.clone();
@@ -539,9 +502,7 @@ impl Model {
             transitions,
         );
 
-        if !self.skip_persist
-            && let Err(err) = save_projects(&self.projects)
-        {
+        if let Err(err) = self.io.save_projects(&self.projects) {
             warn!(?err, "failed to save projects");
         }
         Ok(())
@@ -557,7 +518,7 @@ impl Model {
         let id = SessionId(self.next_session_id);
         self.next_session_id += 1;
         let env = self.session_env(project_id, worktree, id);
-        Session::spawn(path, number, id, env)
+        Session::spawn(self.io.clone(), path, number, id, env)
     }
 
     fn session_env(
@@ -577,9 +538,6 @@ impl Model {
         request: StartupScriptRequest,
         transitions: Option<&mut Vec<Transition<Msg>>>,
     ) {
-        if !self.run_startup_scripts {
-            return;
-        }
         if self.initial_update || transitions.is_none() {
             self.pending_startup_scripts.push(request);
             return;
@@ -595,13 +553,16 @@ impl Model {
         &self,
         request: StartupScriptRequest,
     ) -> Option<Transition<Msg>> {
-        let script_path = resolve_startup_script(&request.workspace_path)?;
+        let script_path = self.io.resolve_startup_script(&request.workspace_path)?;
         let env = self.session_env(request.project_id, request.worktree, request.session_id);
-        Some(startup_script_transition(StartupScript {
-            script_path,
-            workspace_path: request.workspace_path,
-            env,
-        }))
+        Some(startup_script_transition(
+            self.io.clone(),
+            StartupScript {
+                script_path,
+                workspace_path: request.workspace_path,
+                env,
+            },
+        ))
     }
 
     fn spawn_session_for(
@@ -631,7 +592,7 @@ impl Model {
     }
 
     fn start_worktree_load(&mut self, project_id: ProjectId) -> Option<Transition<Msg>> {
-        if self.skip_worktrees {
+        if !self.io.load_worktrees() {
             return None;
         }
         let project = self.project_mut(project_id)?;
@@ -640,11 +601,10 @@ impl Model {
         }
         project.worktrees_loading = true;
         let path = project.path.clone();
+        let io = self.io.clone();
         Some(Transition::Task(Box::pin(async move {
-            let vcs = vcs::detect_async(&path).await;
-            let result = vcs::list_worktrees_async(&path, vcs)
-                .await
-                .map_err(|err| err.to_string());
+            let vcs = io.detect_vcs(path.clone()).await;
+            let result = io.list_worktrees(path, vcs).await;
             Msg::WorktreesLoaded {
                 project: project_id,
                 result,
@@ -721,7 +681,7 @@ impl Model {
         }
 
         let repo_path = self.projects[project_index].path.clone();
-        let path = match vcs::add_worktree(&repo_path, &name, vcs) {
+        let path = match self.io.add_worktree(&repo_path, &name, vcs) {
             Ok(path) => path,
             Err(err) => {
                 self.status = Some(StatusMessage::error(format!(
@@ -730,7 +690,7 @@ impl Model {
                 return None;
             }
         };
-        copy_optional_files(&repo_path, &path, &mut self.status);
+        copy_optional_files(self.io.as_ref(), &repo_path, &path, &mut self.status);
 
         let wid = self.projects[project_index].add_worktree(name, path);
         let (path, number) = match self.projects[project_index].worktree(wid) {
@@ -973,10 +933,7 @@ impl Model {
     }
 
     fn save(&self) {
-        if self.skip_persist {
-            return;
-        }
-        if let Err(err) = save_projects(&self.projects) {
+        if let Err(err) = self.io.save_projects(&self.projects) {
             warn!(?err, "failed to save projects");
         }
     }
@@ -1031,35 +988,9 @@ fn arm_remote(receiver: Receiver<RemoteEnvelope>) -> Transition<Msg> {
     }))
 }
 
-fn resolve_startup_script(workspace_path: &Path) -> Option<PathBuf> {
-    let project_script = workspace_path.join(".term").join("init_project");
-    if project_script.is_file() {
-        return Some(project_script);
-    }
-    let config_script = directories::BaseDirs::new()?
-        .home_dir()
-        .join(".config")
-        .join("term")
-        .join("init_project");
-    if config_script.is_file() {
-        return Some(config_script);
-    }
-    None
-}
-
-fn run_startup_script(script: StartupScript) -> bool {
-    let mut command = std::process::Command::new(&script.script_path);
-    command.current_dir(&script.workspace_path);
-    command.envs(script.env);
-    match command.status() {
-        Ok(status) => status.success(),
-        Err(_) => false,
-    }
-}
-
-fn startup_script_transition(script: StartupScript) -> Transition<Msg> {
+fn startup_script_transition(io: Arc<dyn TermIo>, script: StartupScript) -> Transition<Msg> {
     Transition::Task(Box::pin(async move {
-        let ok = smol::unblock(move || run_startup_script(script)).await;
+        let ok = smol::unblock(move || io.run_startup_script(script)).await;
         Msg::StartupScriptFinished { ok }
     }))
 }
@@ -2466,17 +2397,18 @@ fn create_session(
 }
 
 fn copy_optional_files(
+    io: &dyn TermIo,
     from_dir: &std::path::Path,
     to_dir: &std::path::Path,
     status: &mut Option<StatusMessage>,
 ) {
     for name in [".env", "config.yml"] {
         let source = from_dir.join(name);
-        if !source.exists() {
+        if !io.path_exists(&source) {
             continue;
         }
         let target = to_dir.join(name);
-        if let Err(err) = std::fs::copy(&source, &target) {
+        if let Err(err) = io.copy_optional_file(&source, &target) {
             *status = Some(StatusMessage::error(format!(
                 "Failed to copy {name}: {err}"
             )));
@@ -2510,8 +2442,8 @@ fn delete_selected(model: &mut Model) {
                 return;
             };
             let repo_path = model.projects[project_idx].path.clone();
-            let vcs = vcs::detect(&repo_path);
-            if let Err(err) = vcs::remove_worktree(&repo_path, &worktree_path, vcs) {
+            let vcs = model.io.detect_vcs_sync(&repo_path);
+            if let Err(err) = model.io.remove_worktree(&repo_path, &worktree_path, vcs) {
                 model.status = Some(StatusMessage::error(format!(
                     "Failed to remove worktree: {err}"
                 )));
@@ -2932,7 +2864,8 @@ fn main() -> Result<(), miette::Report> {
     };
 
     let remote_socket = remote_server.as_ref().map(|server| server.path.clone());
-    let mut model = Model::new_with_remote(remote_socket).expect("failed to create terminals");
+    let io = Arc::new(RealIo);
+    let mut model = Model::new_with_remote(io, remote_socket).expect("failed to create terminals");
     if remote_server.is_some() {
         model.set_remote_receiver(remote_receiver);
     }
@@ -2964,7 +2897,8 @@ mod tests {
     use taffy::compute_root_layout;
 
     fn test_model() -> Option<Model> {
-        match Model::new_without_persistence() {
+        let io = Arc::new(term_io::FakeIo::new());
+        match Model::new_with_io(io, None) {
             Ok(model) => Some(model),
             Err(err) => {
                 eprintln!("Skipping term test: {err}");

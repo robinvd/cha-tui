@@ -13,6 +13,14 @@
 - Only unix (macos/linux) has to be supported
 - Unless required dont use Color::Rgb, use the palette colors
 
+
+## Code style
+
+try to keep files to max 1000 lines (without tests).
+Prefer modules that own a full scope, in ELM this means putting state/update/view function in one module based on domain. not a seperate `state`/`update`/`view` modules. instead a `sidebar` module for example that fully owns the sidebar logic.
+
+Dont eagerly refactor existing files to use less lines. only new functionality.
+
 ## Running
 
 ### TUI
@@ -57,6 +65,8 @@ Notes on a subselection of crates that need extra info:
 a terminal multiplexer, with a sidebar for different projects/sessions
 
 by default logs tracing::info! etc to ./term_debug.log
+
+Any IO should be done using the TermIO trait so that tests dont actually change anything.
 
 ### vte + alacritty_terminal
 
