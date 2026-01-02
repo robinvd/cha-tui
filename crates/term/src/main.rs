@@ -15,7 +15,7 @@ mod vcs;
 
 use std::collections::HashMap;
 use std::io::{self};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[cfg(test)]
 use once_cell::sync::Lazy;
@@ -365,6 +365,20 @@ enum ToggleMode {
     Toggle,
 }
 
+#[derive(Clone)]
+struct StartupScriptRequest {
+    project_id: ProjectId,
+    worktree: Option<WorktreeId>,
+    session_id: SessionId,
+    workspace_path: PathBuf,
+}
+
+struct StartupScript {
+    script_path: PathBuf,
+    workspace_path: PathBuf,
+    env: HashMap<String, String>,
+}
+
 struct Model {
     projects: Vec<Project>,
     tree: TreeState<TreeId>,
@@ -380,10 +394,12 @@ struct Model {
     skip_persist: bool,
     /// When true, skip worktree discovery (used in tests).
     skip_worktrees: bool,
+    run_startup_scripts: bool,
     status: Option<StatusMessage>,
     keymap: Keymap,
     remote_socket: Option<PathBuf>,
     remote_receiver: Option<Receiver<RemoteEnvelope>>,
+    pending_startup_scripts: Vec<StartupScriptRequest>,
     #[cfg(test)]
     _test_guard: Option<std::sync::MutexGuard<'static, ()>>,
 }
@@ -429,10 +445,12 @@ impl Model {
             next_session_id: 1,
             skip_persist,
             skip_worktrees: skip_persist,
+            run_startup_scripts: !cfg!(test),
             status: None,
             keymap: Keymap::default(),
             remote_socket,
             remote_receiver: None,
+            pending_startup_scripts: Vec::new(),
             #[cfg(test)]
             _test_guard: test_guard,
         };
@@ -456,10 +474,10 @@ impl Model {
                 .and_then(|s| s.to_str())
                 .unwrap_or("project")
                 .to_string();
-            model.add_project(cwd, name)?;
+            model.add_project(cwd, name, None)?;
         } else {
             for project in persisted {
-                if let Err(err) = model.add_project(project.path, project.name) {
+                if let Err(err) = model.add_project(project.path, project.name, None) {
                     warn!(?err, "failed to restore project");
                 }
             }
@@ -470,7 +488,7 @@ impl Model {
                     .and_then(|s| s.to_str())
                     .unwrap_or("project")
                     .to_string();
-                model.add_project(cwd, name)?;
+                model.add_project(cwd, name, None)?;
             }
         }
         Ok(model)
@@ -480,7 +498,12 @@ impl Model {
         self.remote_receiver = Some(receiver);
     }
 
-    fn add_project(&mut self, path: PathBuf, name: String) -> std::io::Result<()> {
+    fn add_project(
+        &mut self,
+        path: PathBuf,
+        name: String,
+        transitions: Option<&mut Vec<Transition<Msg>>>,
+    ) -> std::io::Result<()> {
         let path = match path.canonicalize() {
             Ok(p) => p,
             Err(_) => path,
@@ -498,11 +521,23 @@ impl Model {
         let mut project = Project::new(project_id, name, path);
         project.worktrees_loaded = self.skip_worktrees;
         let session = self.spawn_session_for(&project, None)?;
+        let session_id = session.id;
+        let workspace_path = project.path.clone();
         project.add_session(None, session);
 
         self.projects.push(project);
         rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
         self.focus = Focus::Sidebar;
+
+        self.queue_startup_script(
+            StartupScriptRequest {
+                project_id,
+                worktree: None,
+                session_id,
+                workspace_path,
+            },
+            transitions,
+        );
 
         if !self.skip_persist
             && let Err(err) = save_projects(&self.projects)
@@ -535,6 +570,38 @@ impl Model {
             return HashMap::new();
         };
         remote_env_map(socket, project_id, worktree, session_id)
+    }
+
+    fn queue_startup_script(
+        &mut self,
+        request: StartupScriptRequest,
+        transitions: Option<&mut Vec<Transition<Msg>>>,
+    ) {
+        if !self.run_startup_scripts {
+            return;
+        }
+        if self.initial_update || transitions.is_none() {
+            self.pending_startup_scripts.push(request);
+            return;
+        }
+        if let Some(transition) = self.build_startup_script_transition(request) {
+            if let Some(transitions) = transitions {
+                transitions.push(transition);
+            }
+        }
+    }
+
+    fn build_startup_script_transition(
+        &self,
+        request: StartupScriptRequest,
+    ) -> Option<Transition<Msg>> {
+        let script_path = resolve_startup_script(&request.workspace_path)?;
+        let env = self.session_env(request.project_id, request.worktree, request.session_id);
+        Some(startup_script_transition(StartupScript {
+            script_path,
+            workspace_path: request.workspace_path,
+            env,
+        }))
     }
 
     fn spawn_session_for(
@@ -619,6 +686,15 @@ impl Model {
                 }
             };
             let tree_id = TreeId::Session(project_id, Some(wid), session.id);
+            self.queue_startup_script(
+                StartupScriptRequest {
+                    project_id,
+                    worktree: Some(wid),
+                    session_id: session.id,
+                    workspace_path: path,
+                },
+                Some(transitions),
+            );
             self.projects[project_index].add_session(Some(wid), session);
             if let Some(receiver) = self.wakeup_for(&tree_id) {
                 transitions.push(arm_wakeup(tree_id, receiver));
@@ -633,6 +709,7 @@ impl Model {
         project_id: ProjectId,
         name: String,
         vcs: VcsKind,
+        transitions: Option<&mut Vec<Transition<Msg>>>,
     ) -> Option<TreeId> {
         let project_index = self.projects.iter().position(|p| p.id == project_id)?;
         if self.projects[project_index]
@@ -674,6 +751,15 @@ impl Model {
         };
 
         let sid = session.id;
+        self.queue_startup_script(
+            StartupScriptRequest {
+                project_id,
+                worktree: Some(wid),
+                session_id: sid,
+                workspace_path: path,
+            },
+            transitions,
+        );
         self.projects[project_index].add_session(Some(wid), session);
         rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
         self.select_session(SessionKey {
@@ -924,6 +1010,9 @@ enum Msg {
     },
     Modal(ModalMsg),
     NewSession,
+    StartupScriptFinished {
+        ok: bool,
+    },
 }
 
 fn arm_wakeup(tree_id: TreeId, receiver: Receiver<()>) -> Transition<Msg> {
@@ -939,6 +1028,39 @@ fn arm_remote(receiver: Receiver<RemoteEnvelope>) -> Transition<Msg> {
             Ok(request) => Msg::RemoteRequest(request),
             Err(_) => Msg::RemoteClosed,
         }
+    }))
+}
+
+fn resolve_startup_script(workspace_path: &Path) -> Option<PathBuf> {
+    let project_script = workspace_path.join(".term").join("init_project");
+    if project_script.is_file() {
+        return Some(project_script);
+    }
+    let config_script = directories::BaseDirs::new()?
+        .home_dir()
+        .join(".config")
+        .join("term")
+        .join("init_project");
+    if config_script.is_file() {
+        return Some(config_script);
+    }
+    None
+}
+
+fn run_startup_script(script: StartupScript) -> bool {
+    let mut command = std::process::Command::new(&script.script_path);
+    command.current_dir(&script.workspace_path);
+    command.envs(script.env);
+    match command.status() {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    }
+}
+
+fn startup_script_transition(script: StartupScript) -> Transition<Msg> {
+    Transition::Task(Box::pin(async move {
+        let ok = smol::unblock(move || run_startup_script(script)).await;
+        Msg::StartupScriptFinished { ok }
     }))
 }
 
@@ -994,6 +1116,14 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         }
         if let Some(receiver) = model.remote_receiver.clone() {
             transitions.push(arm_remote(receiver));
+        }
+        if !model.pending_startup_scripts.is_empty() {
+            let pending = std::mem::take(&mut model.pending_startup_scripts);
+            for request in pending {
+                if let Some(transition) = model.build_startup_script_transition(request) {
+                    transitions.push(transition);
+                }
+            }
         }
     }
 
@@ -1244,7 +1374,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                             .map(|s| s.to_string())
                             .unwrap_or_else(|| path_str.clone());
 
-                        if let Err(err) = model.add_project(path, name) {
+                        if let Err(err) = model.add_project(path, name, Some(&mut transitions)) {
                             warn!(?err, "failed to add project");
                         } else if let Some(project_id) = model.projects.last().map(|p| p.id) {
                             if let Some(transition) = model.start_worktree_load(project_id) {
@@ -1264,7 +1394,8 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                         model.modal = None;
                     }
                     ModalResult::WorktreeSubmitted { project, name, vcs } => {
-                        if let Some(tree_id) = model.add_worktree(project, name, vcs)
+                        if let Some(tree_id) =
+                            model.add_worktree(project, name, vcs, Some(&mut transitions))
                             && let Some(receiver) = model.wakeup_for(&tree_id)
                         {
                             transitions.push(arm_wakeup(tree_id, receiver));
@@ -1308,6 +1439,11 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 insert_position,
                 &mut transitions,
             );
+        }
+        Msg::StartupScriptFinished { ok } => {
+            if !ok {
+                model.status = Some(StatusMessage::error("Startup script failed"));
+            }
         }
     }
 
@@ -1565,11 +1701,10 @@ fn handle_remote_new_project(
         })
         .unwrap_or_else(|| path_str.clone());
 
-    if let Err(err) = model.add_project(path, name) {
+    let mut transitions = Vec::new();
+    if let Err(err) = model.add_project(path, name, Some(&mut transitions)) {
         return (Transition::Continue, RemoteResponse::err(err.to_string()));
     }
-
-    let mut transitions = Vec::new();
     if let Some(project_id) = model.projects.last().map(|project| project.id) {
         if let Some(transition) = model.start_worktree_load(project_id) {
             transitions.push(transition);
@@ -1634,7 +1769,7 @@ fn handle_remote_new_worktree(
         .unwrap_or(VcsKind::Git);
 
     let mut transitions = Vec::new();
-    let Some(tree_id) = model.add_worktree(project_id, name, vcs) else {
+    let Some(tree_id) = model.add_worktree(project_id, name, vcs, Some(&mut transitions)) else {
         return (
             Transition::Continue,
             RemoteResponse::err("Failed to create worktree"),
@@ -3014,7 +3149,7 @@ mod tests {
         };
         let cwd = std::env::current_dir().expect("cwd available");
         model
-            .add_project(cwd, "secondary".to_string())
+            .add_project(cwd, "secondary".to_string(), None)
             .expect("project added");
 
         let primary_project = model.projects[0].id;
