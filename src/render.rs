@@ -119,6 +119,24 @@ impl<'a> RenderContext<'a> {
     pub fn scroll_x(&self) -> f32 {
         self.inherited_scroll_x
     }
+
+    pub fn sub_context<'b>(
+        &'b mut self,
+        origin: (usize, usize),
+        area: Rect,
+        inherited_scroll_y: f32,
+        inherited_scroll_x: f32,
+    ) -> RenderContext<'b> {
+        RenderContext {
+            buffer: self.buffer,
+            palette: self.palette,
+            layout: self.layout,
+            origin,
+            area,
+            inherited_scroll_y,
+            inherited_scroll_x,
+        }
+    }
 }
 
 pub struct Renderer<'a> {

@@ -5,3 +5,4 @@ pub mod process;
 pub mod scroll;
 pub mod terminal;
 pub mod tree;
+pub mod virtualized_column;
