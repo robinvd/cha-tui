@@ -261,7 +261,7 @@ impl TermIo for FakeIo {
         if let Some(binary) = binary {
             return TerminalState::spawn(binary, &[]);
         }
-        TerminalState::spawn("true", &[])
+        TerminalState::spawn("sleep", &["3600"])
     }
 
     fn foreground_process_name(&self, _terminal: &TerminalState) -> Option<String> {

@@ -408,6 +408,7 @@ struct SessionSync {
     changed: bool,
     bell: bool,
     notifications: Vec<TerminalNotification>,
+    active_removed: bool,
 }
 
 impl Model {
@@ -894,6 +895,22 @@ impl Model {
         let Some(project) = self.project_mut(*pid) else {
             return SessionSync::default();
         };
+        let exited = {
+            let Some(session) = project.session(*worktree, *sid) else {
+                return SessionSync::default();
+            };
+            !session.terminal.is_running()
+        };
+
+        if exited {
+            let mut sync = SessionSync::default();
+            sync.changed = project.remove_session(*worktree, *sid);
+            sync.active_removed = self.active.is_some_and(|active| {
+                active.project == *pid && active.worktree == *worktree && active.session == *sid
+            });
+            return sync;
+        }
+
         let Some(session) = project.session_mut(*worktree, *sid) else {
             return SessionSync::default();
         };
@@ -907,7 +924,6 @@ impl Model {
         sync.changed |= bell_sync.changed;
         sync.bell = bell_sync.triggered;
 
-        sync.changed |= session.sync_exited();
         sync.changed |= session.sync_activity(is_active);
 
         let notifications = session.take_notifications();
@@ -1256,6 +1272,20 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             let sync = model.sync_session_state(&id);
             if sync.changed {
                 rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+            }
+            if sync.active_removed
+                && model.focus.is_terminal()
+                && let Some(active) = model.active
+            {
+                transitions.push(update(
+                    model,
+                    Msg::Terminal {
+                        project: active.project,
+                        worktree: active.worktree,
+                        session: active.session,
+                        msg: TerminalMsg::FocusGained,
+                    },
+                ));
             }
             if sync.bell {
                 transitions.push(Transition::Bell);

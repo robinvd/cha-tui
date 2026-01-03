@@ -131,15 +131,6 @@ impl Session {
         false
     }
 
-    /// Check if process exited, returns true if state changed.
-    pub fn sync_exited(&mut self) -> bool {
-        if !self.terminal.is_running() && !self.exited {
-            self.exited = true;
-            return true;
-        }
-        false
-    }
-
     /// Update activity tracking for background sessions.
     /// Returns true if unread indicator changed.
     pub fn sync_activity(&mut self, is_active: bool) -> bool {
