@@ -38,5 +38,9 @@ pub use components::terminal::{
     encode_mouse_event, key_to_input, terminal,
 };
 pub use components::tree::{TreeMsg, TreeNode, TreeNodeKind, TreeState, TreeStyle, tree_view};
+pub use components::virtual_list::{
+    VirtualListAction, VirtualListEvent, VirtualListState,
+    default_keybindings as default_virtual_list_keybindings, virtual_list,
+};
 pub use components::virtualized_column::{VirtualizedColumn, virtualized_column};
 pub use scroll::ScrollAlignment;

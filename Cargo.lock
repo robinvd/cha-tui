@@ -973,8 +973,10 @@ dependencies = [
  "chatui",
  "color-eyre",
  "nucleo",
+ "parking_lot",
  "smol",
  "taffy",
+ "termwiz",
  "unicode-segmentation",
 ]
 

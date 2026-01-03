@@ -74,7 +74,7 @@ impl ScrollState {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ScrollMsg {
     AxisDelta { axis: ScrollAxis, amount: i32 },
     AxisDeltaPercent { axis: ScrollAxis, ratio: f64 },

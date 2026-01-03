@@ -2,61 +2,80 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use chatui::buffer::CellAttributes;
 use chatui::components::input::{InputMsg, InputState, InputStyle};
-use chatui::components::virtualized_column::virtualized_column;
-use chatui::dom::{Color, Node, Style, column, row, text};
+use chatui::components::virtual_list::{
+    VirtualListAction, VirtualListEvent, VirtualListState,
+    default_keybindings as default_list_keybindings, virtual_list,
+};
+use chatui::dom::{Color, Node, Style, TextSpan, column, row, text as dom_text};
 use chatui::event::{Event, Key, KeyCode, Size};
 use chatui::render::RenderContext;
-use chatui::{Transition, default_input_keybindings, input};
+use chatui::{ScrollMsg, Transition, block_with_title, default_input_keybindings, input};
 use nucleo::pattern::{CaseMatching, Normalization};
-use nucleo::{Config, Matcher, Nucleo, Utf32String};
+use nucleo::{Config, Injector, Matcher, Nucleo, Utf32String};
+use parking_lot::Mutex;
 use smol::channel;
-use taffy::style::AvailableSpace;
-use taffy::{Size as TaffySize, Style as TaffyStyle};
-use unicode_segmentation::UnicodeSegmentation;
+use taffy::prelude::TaffyZero;
+use taffy::style::Dimension;
+use termwiz::cell::grapheme_column_width;
 
 const HEADER_HEIGHT: usize = 1;
-const INPUT_HEIGHT: usize = 1;
+const INPUT_HEIGHT: usize = 3;
 const FOOTER_HEIGHT: usize = 1;
 
 #[derive(Clone)]
+pub struct FuzzyFinderInput {
+    injector: Injector<String>,
+}
+
+impl FuzzyFinderInput {
+    pub fn push_item(&self, line: impl Into<String>) {
+        let line = line.into();
+        self.injector.push(line, |text, cols| {
+            cols[0] = Utf32String::from(text.as_str());
+        });
+    }
+}
+
+#[derive(Clone)]
 pub struct FuzzyFinderHandle {
-    submitted: Rc<RefCell<Option<String>>>,
+    submitted: Arc<Mutex<Option<String>>>,
+    input: FuzzyFinderInput,
 }
 
 impl FuzzyFinderHandle {
     pub fn take_submission(&self) -> Option<String> {
-        self.submitted.borrow_mut().take()
+        self.submitted.lock().take()
+    }
+
+    pub fn push_item(&self, line: impl Into<String>) {
+        self.input.push_item(line);
     }
 }
 
-#[derive(Clone, Debug, Default)]
-struct SnapshotState {
-    matched_count: usize,
-}
-
 pub struct FuzzyFinder {
-    items: Arc<Vec<String>>,
-    matcher: Rc<RefCell<Nucleo<usize>>>,
+    matcher: Rc<RefCell<Nucleo<String>>>,
+    injector: Injector<String>,
     config: Config,
     input: InputState,
     input_style: InputStyle,
-    snapshot: SnapshotState,
+    matched_count: usize,
     notify_rx: channel::Receiver<()>,
-    selected: usize,
-    scroll_offset: f32,
+    list: VirtualListState,
     last_query: String,
-    listening: bool,
+    listening_matcher: bool,
     size: Size,
-    submitted: Rc<RefCell<Option<String>>>,
+    submitted: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Clone, Debug)]
 pub enum Msg {
     KeyPressed(Key),
     Input(InputMsg),
+    List(VirtualListAction),
     MatcherTick,
-    ListenerClosed,
+    MatcherListenerClosed,
     Resize(Size),
 }
 
@@ -69,8 +88,7 @@ pub fn map_event(event: Event) -> Option<Msg> {
 }
 
 impl FuzzyFinder {
-    pub fn new(items: Vec<String>) -> (Self, FuzzyFinderHandle) {
-        let items = Arc::new(items);
+    pub fn new() -> (Self, FuzzyFinderHandle) {
         let config = Config::DEFAULT;
         let (notify_tx, notify_rx) = channel::bounded(1);
         let notify = Arc::new(move || {
@@ -79,35 +97,39 @@ impl FuzzyFinder {
         let matcher = Nucleo::new(config.clone(), notify, None, 1);
         let injector = matcher.injector();
 
-        for (index, item) in items.iter().enumerate() {
-            let text = item.as_str();
-            injector.push(index, |_, cols| {
-                cols[0] = Utf32String::from(text);
-            });
-        }
-
-        let submitted = Rc::new(RefCell::new(None));
-        let mut finder = Self {
-            items,
+        let input = FuzzyFinderInput {
+            injector: injector.clone(),
+        };
+        let submitted = Arc::new(Mutex::new(None));
+        let finder = Self {
+            injector,
             matcher: Rc::new(RefCell::new(matcher)),
             config,
             input: InputState::new(),
             input_style: InputStyle::default(),
-            snapshot: SnapshotState::default(),
+            matched_count: 0,
             notify_rx,
-            selected: 0,
-            scroll_offset: 0.0,
+            list: VirtualListState::new(1),
             last_query: String::new(),
-            listening: false,
+            listening_matcher: false,
             size: Size {
                 width: 80,
                 height: 24,
             },
-            submitted: Rc::clone(&submitted),
+            submitted: Arc::clone(&submitted),
         };
-        finder.refresh_matches(true);
 
-        let handle = FuzzyFinderHandle { submitted };
+        let handle = FuzzyFinderHandle { submitted, input };
+        (finder, handle)
+    }
+
+    #[cfg(test)]
+    pub fn new_with_items(items: Vec<String>) -> (Self, FuzzyFinderHandle) {
+        let (mut finder, handle) = Self::new();
+        for item in items {
+            handle.push_item(item);
+        }
+        finder.refresh_matches(true);
         (finder, handle)
     }
 
@@ -139,17 +161,17 @@ impl FuzzyFinder {
 
             matcher.tick(10);
             if self.last_query.is_empty() {
-                self.items.len()
+                self.injector.injected_items() as usize
             } else {
                 matcher.snapshot().matched_item_count() as usize
             }
         };
-        self.snapshot.matched_count = matched_count;
+        self.matched_count = matched_count;
 
         if reset_selection || query_changed {
-            self.selected = 0;
+            self.list.reset();
         }
-        self.clamp_selection();
+        self.list.set_item_count(matched_count);
     }
 
     fn matching_options(&self) -> (CaseMatching, Normalization) {
@@ -171,62 +193,41 @@ impl FuzzyFinder {
         height.saturating_sub(HEADER_HEIGHT + INPUT_HEIGHT + FOOTER_HEIGHT)
     }
 
-    fn clamp_selection(&mut self) {
-        if self.snapshot.matched_count == 0 {
-            self.selected = 0;
-            self.scroll_offset = 0.0;
-            return;
-        }
-
-        if self.selected >= self.snapshot.matched_count {
-            self.selected = self.snapshot.matched_count.saturating_sub(1);
-        }
-        self.ensure_selection_visible();
-    }
-
-    fn ensure_selection_visible(&mut self) {
+    fn update_list_viewport(&mut self) {
         let view_height = self.list_height();
-        if view_height == 0 || self.snapshot.matched_count == 0 {
-            self.scroll_offset = 0.0;
-            return;
-        }
-
-        let mut scroll = self.scroll_offset as usize;
-        if self.selected < scroll {
-            scroll = self.selected;
-        } else if self.selected >= scroll + view_height {
-            scroll = self.selected.saturating_sub(view_height.saturating_sub(1));
-        }
-        self.scroll_offset = scroll as f32;
-    }
-
-    fn move_selection(&mut self, delta: isize) {
-        if self.snapshot.matched_count == 0 {
-            return;
-        }
-
-        let max = self.snapshot.matched_count as isize - 1;
-        let next = (self.selected as isize + delta).clamp(0, max);
-        self.selected = next as usize;
-        self.ensure_selection_visible();
+        let _ = self
+            .list
+            .update(VirtualListAction::Scroll(ScrollMsg::Resize {
+                viewport: Size {
+                    width: self.size.width,
+                    height: view_height.min(u16::MAX as usize) as u16,
+                },
+                content: Size {
+                    width: self.size.width,
+                    height: self.matched_count.min(u16::MAX as usize) as u16,
+                },
+            }));
     }
 
     fn submit_selection(&mut self) -> bool {
-        let index = if self.last_query.is_empty() {
-            self.items.get(self.selected)
+        let selected = self.list.selection();
+        let item = if self.last_query.is_empty() {
+            self.injector
+                .get(selected as u32)
+                .map(|item| item.data.clone())
         } else {
             let matcher = self.matcher.borrow();
             matcher
                 .snapshot()
-                .get_matched_item(self.selected as u32)
-                .and_then(|item| self.items.get(*item.data))
+                .get_matched_item(selected as u32)
+                .map(|item| item.data.clone())
         };
 
-        let Some(item) = index else {
+        let Some(item) = item else {
             return false;
         };
 
-        *self.submitted.borrow_mut() = Some(item.clone());
+        *self.submitted.lock() = Some(item);
         true
     }
 }
@@ -235,30 +236,37 @@ pub fn update(model: &mut FuzzyFinder, msg: Msg) -> Transition<Msg> {
     match msg {
         Msg::KeyPressed(key) => handle_key(model, key),
         Msg::Input(input_msg) => model.apply_input(input_msg),
+        Msg::List(action) => handle_list_action(model, action),
         Msg::MatcherTick => {
             model.refresh_matches(false);
-            Transition::Multiple(vec![Transition::Continue, listen_for_updates(model)])
+            Transition::Multiple(vec![
+                Transition::Continue,
+                listen_for_matcher_updates(model),
+            ])
         }
-        Msg::ListenerClosed => Transition::Continue,
+        Msg::MatcherListenerClosed => Transition::Continue,
         Msg::Resize(size) => {
             model.size = size;
-            model.ensure_selection_visible();
-            if model.listening {
-                Transition::Continue
-            } else {
-                model.listening = true;
-                Transition::Multiple(vec![Transition::Continue, listen_for_updates(model)])
+            model.update_list_viewport();
+
+            let mut transitions = vec![Transition::Continue];
+
+            if !model.listening_matcher {
+                model.listening_matcher = true;
+                transitions.push(listen_for_matcher_updates(model));
             }
+
+            Transition::Multiple(transitions)
         }
     }
 }
 
-fn listen_for_updates(model: &FuzzyFinder) -> Transition<Msg> {
+fn listen_for_matcher_updates(model: &FuzzyFinder) -> Transition<Msg> {
     let receiver = model.notify_rx.clone();
     Transition::Task(Box::pin(async move {
         match receiver.recv().await {
             Ok(()) => Msg::MatcherTick,
-            Err(_) => Msg::ListenerClosed,
+            Err(_) => Msg::MatcherListenerClosed,
         }
     }))
 }
@@ -270,40 +278,10 @@ fn handle_key(model: &mut FuzzyFinder, key: Key) -> Transition<Msg> {
 
     match key.code {
         KeyCode::Esc => Transition::Quit,
-        KeyCode::Enter => {
-            if model.submit_selection() {
-                Transition::Quit
-            } else {
-                Transition::Continue
-            }
-        }
-        KeyCode::Up => {
-            model.move_selection(-1);
-            Transition::Continue
-        }
-        KeyCode::Down => {
-            model.move_selection(1);
-            Transition::Continue
-        }
-        KeyCode::Char('n') if key.ctrl => {
-            model.move_selection(1);
-            Transition::Continue
-        }
-        KeyCode::Char('p') if key.ctrl => {
-            model.move_selection(-1);
-            Transition::Continue
-        }
-        KeyCode::Char('d') if key.ctrl => {
-            let jump = (model.list_height().max(2)) / 2;
-            model.move_selection(jump as isize);
-            Transition::Continue
-        }
-        KeyCode::Char('u') if key.ctrl => {
-            let jump = (model.list_height().max(2)) / 2;
-            model.move_selection(-(jump as isize));
-            Transition::Continue
-        }
         _ => {
+            if let Some(action) = default_list_keybindings(key, |msg| msg) {
+                return handle_list_action(model, action);
+            }
             if let Some(input_msg) = default_input_keybindings(&model.input, key, |msg| msg) {
                 return model.apply_input(input_msg);
             }
@@ -312,15 +290,30 @@ fn handle_key(model: &mut FuzzyFinder, key: Key) -> Transition<Msg> {
     }
 }
 
+fn handle_list_action(model: &mut FuzzyFinder, action: VirtualListAction) -> Transition<Msg> {
+    let event = model.list.update(action);
+    match event {
+        Some(VirtualListEvent::Activated(_)) => {
+            if model.submit_selection() {
+                Transition::Quit
+            } else {
+                Transition::Continue
+            }
+        }
+        Some(VirtualListEvent::SelectionChanged(_)) | None => Transition::Continue,
+    }
+}
+
 pub fn view(model: &FuzzyFinder) -> Node<Msg> {
     let header_style = Style {
         fg: Some(Color::BrightBlack),
         ..Style::default()
     };
-    let header = text::<Msg>("fuztea  Esc quits  Enter selects  Ctrl-n/p move  Ctrl-d/u page")
-        .with_style(header_style);
+    let header = dom_text::<Msg>("fuztea  Esc quits  Enter selects  Ctrl-n/p move  Ctrl-d/u page")
+        .with_style(header_style)
+        .with_flex_shrink(0.);
 
-    let input_label = text::<Msg>("Query:")
+    let input_label = dom_text::<Msg>("> ")
         .with_style(Style {
             bold: true,
             ..Style::default()
@@ -330,77 +323,86 @@ pub fn view(model: &FuzzyFinder) -> Node<Msg> {
     let input_field =
         input("query", &model.input, &model.input_style, Msg::Input).with_flex_grow(1.0);
 
-    let input_row = row(vec![input_label, input_field]);
+    let input_row = row(vec![input_label, input_field]).with_flex_shrink(0.);
+    let input_row = block_with_title("", vec![input_row]);
 
-    let matched_count = model.snapshot.matched_count;
-    let items_count = model.items.len();
-    let footer = text::<Msg>(format!("{matched_count}/{items_count} matches")).with_style(Style {
-        fg: Some(Color::BrightBlack),
-        dim: true,
-        ..Style::default()
-    });
+    let matched_count = model.matched_count;
+    let items_count = model.injector.injected_items() as usize;
+    let footer = dom_text::<Msg>(format!("{matched_count}/{items_count} matches"))
+        .with_style(Style {
+            fg: Some(Color::BrightBlack),
+            dim: true,
+            ..Style::default()
+        })
+        .with_flex_shrink(0.);
 
     let list = if matched_count == 0 {
-        text::<Msg>("No matches")
+        dom_text::<Msg>("No matches")
             .with_style(Style {
                 fg: Some(Color::BrightBlack),
                 dim: true,
                 ..Style::default()
             })
             .with_flex_grow(1.0)
+            .with_min_height(Dimension::ZERO)
+            .with_flex_basis(Dimension::ZERO)
     } else {
-        let items = Arc::clone(&model.items);
-        let matcher_nucleo = Rc::clone(&model.matcher);
-        let selected = model.selected;
-        let query_empty = model.last_query.is_empty();
-
-        let render_item = move |index: usize, ctx: &mut RenderContext<'_>| {
-            if query_empty {
-                if let Some(text) = items.get(index) {
-                    render_list_item(ctx, text, index == selected, None, None);
-                }
-            } else {
-                let matcher_ref = matcher_nucleo.borrow();
-                let snapshot = matcher_ref.snapshot();
-                if let Some(item) = snapshot.get_matched_item(index as u32)
-                    && let Some(text) = items.get(*item.data)
-                {
-                    render_list_item(ctx, text, index == selected, Some(item), Some(snapshot));
-                }
-            }
-        };
-
-        let measure_item = |_index: usize,
-                            _style: &TaffyStyle,
-                            known: TaffySize<Option<f32>>,
-                            available: TaffySize<AvailableSpace>| {
-            let width = known.width.unwrap_or(match available.width {
-                AvailableSpace::Definite(value) => value,
-                AvailableSpace::MinContent => 1.0,
-                AvailableSpace::MaxContent => 1.0,
-            });
-            TaffySize { width, height: 1.0 }
-        };
-
-        virtualized_column(matched_count, measure_item, render_item)
-            .with_scroll(model.scroll_offset)
+        let list_content = render_list(model);
+        list_content
+            .with_min_height(Dimension::ZERO)
             .with_flex_grow(1.0)
+            .with_flex_basis(Dimension::ZERO)
     };
 
     column(vec![header, input_row, list, footer]).with_fill()
 }
 
+fn render_list(model: &FuzzyFinder) -> Node<Msg> {
+    let injector = model.injector.clone();
+    let matcher_nucleo = Rc::clone(&model.matcher);
+    let query_empty = model.last_query.is_empty();
+
+    virtual_list(
+        "fuzzy-list",
+        &model.list,
+        Msg::List,
+        move |index, selected, ctx| {
+            if query_empty {
+                if let Some(item) = injector.get(index as u32) {
+                    render_list_item(ctx, item.data, selected, None);
+                }
+                return;
+            }
+
+            let matcher_ref = matcher_nucleo.borrow();
+            let snapshot = matcher_ref.snapshot();
+
+            if let Some(matched_item) = snapshot.get_matched_item(index as u32) {
+                let mut indices = Vec::new();
+                let mut matcher = Matcher::default();
+                matcher.config = Config::DEFAULT;
+
+                snapshot.pattern().column_pattern(0).indices(
+                    matched_item.matcher_columns[0].slice(..),
+                    &mut matcher,
+                    &mut indices,
+                );
+                indices.sort_unstable();
+                indices.dedup();
+
+                render_list_item(ctx, matched_item.data, selected, Some(indices));
+            }
+        },
+    )
+}
+
 fn render_list_item(
     ctx: &mut RenderContext<'_>,
-    text: &str,
+    item_text: &str,
     selected: bool,
-    item: Option<nucleo::Item<'_, usize>>,
-    snapshot: Option<&nucleo::Snapshot<usize>>,
+    match_indices: Option<Vec<u32>>,
 ) {
-    let area = ctx.area();
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
+    use unicode_segmentation::UnicodeSegmentation;
 
     let base_style = if selected {
         Style {
@@ -413,61 +415,114 @@ fn render_list_item(
         Style::default()
     };
 
-    let (origin_x, origin_y) = ctx.origin();
+    let match_style = Style {
+        fg: Some(Color::Magenta),
+        bold: true,
+        ..base_style
+    };
 
-    if let (Some(item), Some(snapshot)) = (item, snapshot) {
-        let mut indices = Vec::new();
-        let mut matcher = Matcher::default();
-        let config = Config::DEFAULT;
-        matcher.config = config;
+    let spans = if let Some(indices) = match_indices
+        && !indices.is_empty()
+    {
+        let mut spans = Vec::new();
+        let mut current_text = String::new();
+        let mut current_is_match = false;
+        let mut indices_iter = indices.iter().peekable();
 
-        snapshot.pattern().column_pattern(0).indices(
-            item.matcher_columns[0].slice(..),
-            &mut matcher,
-            &mut indices,
-        );
+        for (grapheme_idx, grapheme) in item_text.graphemes(true).enumerate() {
+            let grapheme_idx = grapheme_idx as u32;
+            let is_match = indices_iter.peek().is_some_and(|&&idx| idx == grapheme_idx);
 
-        if !indices.is_empty() {
-            indices.sort_unstable();
-            indices.dedup();
+            if is_match {
+                indices_iter.next();
+            }
 
-            let mut x = origin_x;
-            let mut indices_iter = indices.iter().peekable();
-
-            for (grapheme_idx, grapheme) in text.graphemes(true).enumerate() {
-                let grapheme_idx = grapheme_idx as u32;
-                let is_match = indices_iter.peek().is_some_and(|&&idx| idx == grapheme_idx);
-
-                if is_match {
-                    indices_iter.next();
-                }
-
-                let style = if is_match {
-                    Style {
-                        fg: Some(Color::Magenta),
-                        bold: true,
-                        ..base_style
-                    }
+            if is_match != current_is_match && !current_text.is_empty() {
+                let style = if current_is_match {
+                    match_style
                 } else {
                     base_style
                 };
-
-                let attrs = ctx.style_to_attributes(&style);
-                let grapheme_width = grapheme.chars().count().min(1);
-
-                if x + grapheme_width > origin_x + area.width {
-                    break;
-                }
-
-                ctx.write_text_length(x, origin_y, grapheme, &attrs, grapheme_width);
-                x += grapheme_width;
+                spans.push(TextSpan::new(&current_text, style));
+                current_text.clear();
             }
-            return;
+
+            current_text.push_str(grapheme);
+            current_is_match = is_match;
         }
+
+        if !current_text.is_empty() {
+            let style = if current_is_match {
+                match_style
+            } else {
+                base_style
+            };
+            spans.push(TextSpan::new(&current_text, style));
+        }
+
+        spans
+    } else {
+        vec![TextSpan::new(item_text, base_style)]
+    };
+
+    let area = ctx.area();
+    if area.width == 0 || area.height == 0 {
+        return;
     }
 
-    let attrs = ctx.style_to_attributes(&base_style);
-    ctx.write_text_length(origin_x, origin_y, text, &attrs, area.width);
+    if selected {
+        let attrs = ctx.style_to_attributes(&base_style);
+        fill_row(ctx, &attrs);
+    }
+
+    let mut cursor_x = area.x;
+    for span in spans {
+        if cursor_x >= area.x + area.width {
+            break;
+        }
+        let attrs = ctx.style_to_attributes(&span.style);
+        let max_width = area.x + area.width - cursor_x;
+        let used = write_span(ctx, cursor_x, area.y, &span.content, &attrs, max_width);
+        cursor_x = cursor_x.saturating_add(used);
+    }
+}
+
+fn fill_row(ctx: &mut RenderContext<'_>, attrs: &CellAttributes) {
+    let area = ctx.area();
+    let end_y = area.y.saturating_add(area.height);
+    let end_x = area.x.saturating_add(area.width);
+    for y in area.y..end_y {
+        for x in area.x..end_x {
+            ctx.write_char(x, y, ' ', attrs);
+        }
+    }
+}
+
+fn write_span(
+    ctx: &mut RenderContext<'_>,
+    x: usize,
+    y: usize,
+    text: &str,
+    attrs: &CellAttributes,
+    max_cells: usize,
+) -> usize {
+    if max_cells == 0 {
+        return 0;
+    }
+
+    let mut used = 0;
+    let mut buffer = String::new();
+    for ch in text.chars() {
+        let width = grapheme_column_width(&ch.to_string(), None).max(1);
+        if used + width > max_cells {
+            break;
+        }
+        buffer.push(ch);
+        used += width;
+    }
+
+    ctx.write_text_length(x, y, &buffer, attrs, max_cells);
+    used
 }
 
 #[cfg(test)]
@@ -475,10 +530,14 @@ mod tests {
     use super::*;
     use chatui::test_utils::render_node_to_string;
 
+    fn make_finder_with_items(items: Vec<String>) -> (FuzzyFinder, FuzzyFinderHandle) {
+        FuzzyFinder::new_with_items(items)
+    }
+
     #[test]
     fn view_renders_for_empty_and_filtered_queries() {
         let items = vec!["alpha".to_string(), "beta".to_string()];
-        let (mut model, _handle) = FuzzyFinder::new(items);
+        let (mut model, _handle) = make_finder_with_items(items);
         update(
             &mut model,
             Msg::Resize(Size {
@@ -502,5 +561,210 @@ mod tests {
         let mut node = view(&model);
         let rendered = render_node_to_string(&mut node, 40, 8).expect("render empty view");
         assert!(rendered.contains("No matches"));
+    }
+
+    #[test]
+    fn scrolling_shows_correct_items_after_selection_moves() {
+        let items: Vec<String> = (0..20).map(|i| format!("item-{i:02}")).collect();
+        let (mut model, _handle) = make_finder_with_items(items);
+
+        update(
+            &mut model,
+            Msg::Resize(Size {
+                width: 40,
+                height: 8,
+            }),
+        );
+
+        let mut node = view(&model);
+        let rendered = render_node_to_string(&mut node, 40, 8).expect("render");
+        assert!(
+            rendered.contains("item-00"),
+            "should show item-00:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("item-02"),
+            "should show item-02:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("item-10"),
+            "should NOT show item-10:\n{rendered}"
+        );
+
+        for _ in 0..10 {
+            update(&mut model, Msg::KeyPressed(Key::new(KeyCode::Down)));
+        }
+
+        let mut node = view(&model);
+        let rendered = render_node_to_string(&mut node, 40, 8).expect("render after scroll");
+        assert!(
+            rendered.contains("item-10"),
+            "should show item-10 after scrolling:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("item-00"),
+            "should NOT show item-00 after scrolling:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn scrolling_up_shows_earlier_items() {
+        let items: Vec<String> = (0..20).map(|i| format!("item-{i:02}")).collect();
+        let (mut model, _handle) = make_finder_with_items(items);
+
+        update(
+            &mut model,
+            Msg::Resize(Size {
+                width: 40,
+                height: 8,
+            }),
+        );
+
+        for _ in 0..15 {
+            update(&mut model, Msg::KeyPressed(Key::new(KeyCode::Down)));
+        }
+
+        let mut node = view(&model);
+        let rendered = render_node_to_string(&mut node, 40, 8).expect("render");
+        assert!(
+            rendered.contains("item-15"),
+            "should show item-15:\n{rendered}"
+        );
+
+        for _ in 0..10 {
+            update(&mut model, Msg::KeyPressed(Key::new(KeyCode::Up)));
+        }
+
+        let mut node = view(&model);
+        let rendered = render_node_to_string(&mut node, 40, 8).expect("render after scroll up");
+        assert!(
+            rendered.contains("item-05"),
+            "should show item-05 after scrolling up:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn page_down_scrolls_half_page() {
+        let items: Vec<String> = (0..30).map(|i| format!("item-{i:02}")).collect();
+        let (mut model, _handle) = make_finder_with_items(items);
+
+        update(
+            &mut model,
+            Msg::Resize(Size {
+                width: 40,
+                height: 10,
+            }),
+        );
+
+        let ctrl_d = Key::with_modifiers(KeyCode::Char('d'), true, false, false, false);
+        update(&mut model, Msg::KeyPressed(ctrl_d));
+
+        let selected = model.list.selection();
+        assert!(selected >= 2, "selection should jump: {}", selected);
+
+        let mut node = view(&model);
+        let rendered = render_node_to_string(&mut node, 40, 10).expect("render");
+        let selected_item = format!("item-{:02}", selected);
+        assert!(
+            rendered.contains(&selected_item),
+            "should show selected item {}:\n{}",
+            selected_item,
+            rendered
+        );
+    }
+
+    #[test]
+    fn scroll_state_updates_on_resize() {
+        let items: Vec<String> = (0..50).map(|i| format!("line-{i:02}")).collect();
+        let (mut model, _handle) = make_finder_with_items(items);
+
+        update(
+            &mut model,
+            Msg::Resize(Size {
+                width: 40,
+                height: 10,
+            }),
+        );
+
+        for _ in 0..30 {
+            update(&mut model, Msg::KeyPressed(Key::new(KeyCode::Down)));
+        }
+
+        assert_eq!(model.list.selection(), 30);
+
+        update(
+            &mut model,
+            Msg::Resize(Size {
+                width: 40,
+                height: 20,
+            }),
+        );
+
+        let mut node = view(&model);
+        let rendered = render_node_to_string(&mut node, 40, 20).expect("render");
+        assert!(
+            rendered.contains("line-30"),
+            "selected item should still be visible:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn selection_clamps_when_filtering_reduces_matches() {
+        let items: Vec<String> = (0..20).map(|i| format!("item-{i:02}")).collect();
+        let (mut model, _handle) = make_finder_with_items(items);
+
+        update(
+            &mut model,
+            Msg::Resize(Size {
+                width: 40,
+                height: 10,
+            }),
+        );
+
+        for _ in 0..15 {
+            update(&mut model, Msg::KeyPressed(Key::new(KeyCode::Down)));
+        }
+        assert_eq!(model.list.selection(), 15);
+
+        model.set_query("item-0");
+        assert!(
+            model.list.selection() < model.matched_count,
+            "selection {} should be less than matched_count {}",
+            model.list.selection(),
+            model.matched_count
+        );
+    }
+
+    #[test]
+    fn scrollable_content_clips_to_viewport_height() {
+        let items: Vec<String> = (0..100).map(|i| format!("item-{i:03}")).collect();
+        let (mut model, _handle) = make_finder_with_items(items);
+
+        update(
+            &mut model,
+            Msg::Resize(Size {
+                width: 40,
+                height: 10,
+            }),
+        );
+
+        let mut node = view(&model);
+        let rendered = render_node_to_string(&mut node, 40, 10).expect("render");
+
+        let lines: Vec<&str> = rendered.lines().collect();
+        assert_eq!(
+            lines.len(),
+            10,
+            "output should have exactly 10 lines:\n{rendered}"
+        );
+
+        assert!(
+            rendered.contains("item-000"),
+            "should show first item:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("item-050"),
+            "should NOT show middle item:\n{rendered}"
+        );
     }
 }

@@ -1,4 +1,4 @@
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, Write};
 
 use chatui::Program;
 use fuztea::{FuzzyFinder, map_event, update, view};
@@ -6,11 +6,17 @@ use fuztea::{FuzzyFinder, map_event, update, view};
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    let mut input = String::new();
-    io::stdin().read_to_string(&mut input)?;
-    let items = input.lines().map(|line| line.to_string()).collect();
+    let (model, handle) = FuzzyFinder::new();
+    let input_handle = handle.clone();
+    std::thread::spawn(move || {
+        let stdin = io::stdin();
+        for line in stdin.lock().lines() {
+            if let Ok(line) = line {
+                input_handle.push_item(line);
+            }
+        }
+    });
 
-    let (model, handle) = FuzzyFinder::new(items);
     let program = Program::new(model, update, view).map_event(map_event);
 
     program
