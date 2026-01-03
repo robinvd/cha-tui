@@ -1663,10 +1663,12 @@ fn handle_remote_new_session(
     );
 
     let response = if let Some(session_id) = session_id {
-        let session = model
-            .project(project_id)
-            .and_then(|project| project.session(worktree, session_id))
-            .map(|session| build_remote_session(project_id, worktree, session));
+        let session = model.project(project_id).and_then(|project| {
+            let worktree_ref = worktree.and_then(|wid| project.worktree(wid));
+            project
+                .session(worktree, session_id)
+                .map(|session| build_remote_session(project, worktree_ref, session))
+        });
         RemoteResponse::ok(Some(RemoteResult::CurrentSession { session }))
     } else {
         RemoteResponse::err("Failed to create session")
@@ -1715,8 +1717,12 @@ fn handle_remote_new_project(
     let response = model
         .active_session()
         .map(|(project, session)| {
+            let worktree = model
+                .active
+                .and_then(|active| active.worktree)
+                .and_then(|wid| project.worktree(wid));
             RemoteResponse::ok(Some(RemoteResult::CurrentSession {
-                session: Some(build_remote_session(project.id, None, session)),
+                session: Some(build_remote_session(project, worktree, session)),
             }))
         })
         .unwrap_or_else(|| RemoteResponse::ok(Some(RemoteResult::Ok { message: None })));
@@ -1770,12 +1776,12 @@ fn handle_remote_new_worktree(
     let response = model
         .active_session()
         .map(|(project, session)| {
+            let worktree = model
+                .active
+                .and_then(|active| active.worktree)
+                .and_then(|wid| project.worktree(wid));
             RemoteResponse::ok(Some(RemoteResult::CurrentSession {
-                session: Some(build_remote_session(
-                    project.id,
-                    model.active.and_then(|a| a.worktree),
-                    session,
-                )),
+                session: Some(build_remote_session(project, worktree, session)),
             }))
         })
         .unwrap_or_else(|| RemoteResponse::ok(Some(RemoteResult::Ok { message: None })));
@@ -1968,13 +1974,13 @@ fn handle_remote_query_sessions(
     for project in &model.projects {
         for session in &project.sessions {
             if matches_session_queries(&queries, project, None, session) {
-                sessions.push(build_remote_session(project.id, None, session));
+                sessions.push(build_remote_session(project, None, session));
             }
         }
         for worktree in &project.worktrees {
             for session in &worktree.sessions {
                 if matches_session_queries(&queries, project, Some(worktree), session) {
-                    sessions.push(build_remote_session(project.id, Some(worktree.id), session));
+                    sessions.push(build_remote_session(project, Some(worktree), session));
                 }
             }
         }
@@ -2147,15 +2153,13 @@ fn handle_remote_list_sessions(
     let sessions = model
         .project(project_id)
         .map(|project| {
-            let list = match worktree {
-                Some(wid) => project
-                    .worktree(wid)
-                    .map(|wt| wt.sessions.as_slice())
-                    .unwrap_or(&[]),
+            let worktree_ref = worktree.and_then(|wid| project.worktree(wid));
+            let list = match worktree_ref {
+                Some(worktree) => worktree.sessions.as_slice(),
                 None => project.sessions.as_slice(),
             };
             list.iter()
-                .map(|session| build_remote_session(project_id, worktree, session))
+                .map(|session| build_remote_session(project, worktree_ref, session))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -2168,7 +2172,11 @@ fn handle_remote_list_sessions(
 
 fn handle_remote_current_session(model: &Model) -> (Transition<Msg>, RemoteResponse) {
     let session = model.active_session().map(|(project, session)| {
-        build_remote_session(project.id, model.active.and_then(|a| a.worktree), session)
+        let worktree = model
+            .active
+            .and_then(|active| active.worktree)
+            .and_then(|wid| project.worktree(wid));
+        build_remote_session(project, worktree, session)
     });
     (
         Transition::Continue,
@@ -2226,13 +2234,18 @@ fn resolve_session_target(
 }
 
 fn build_remote_session(
-    project_id: ProjectId,
-    worktree: Option<WorktreeId>,
+    project: &Project,
+    worktree: Option<&Worktree>,
     session: &Session,
 ) -> RemoteSession {
+    let cwd = worktree
+        .map(|worktree| worktree.path.display().to_string())
+        .unwrap_or_else(|| project.path.display().to_string());
     RemoteSession {
-        project_id: project_id.0,
-        worktree_id: worktree.map(|id| id.0),
+        project_id: project.id.0,
+        project_name: project.name.clone(),
+        worktree_id: worktree.map(|worktree| worktree.id.0),
+        worktree_name: worktree.map(|worktree| worktree.name.clone()),
         session_id: session.id.0,
         number: session.number,
         title: session.title.clone(),
@@ -2241,6 +2254,7 @@ fn build_remote_session(
         exited: session.exited,
         bell: session.bell,
         has_unread_output: session.has_unread_output,
+        cwd,
     }
 }
 

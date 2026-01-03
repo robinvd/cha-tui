@@ -39,6 +39,7 @@ const REMOTE_ACTIONS: &[&str] = &[
     "session-new",
     "session-rename",
     "session-list",
+    "session-query",
     "session-get",
     "project-new",
     "project-list",
@@ -79,6 +80,15 @@ pub struct RemoteParams {
     pub input: Option<String>,
     #[facet(default)]
     pub bytes: Option<Vec<u8>>,
+    #[facet(default)]
+    pub query: Option<Vec<RemoteSessionQuery>>,
+}
+
+#[derive(Clone, Debug, Facet)]
+pub struct RemoteSessionQuery {
+    pub key: String,
+    pub operator: String,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, Default, Facet)]
@@ -157,8 +167,11 @@ pub struct RemoteWorktree {
 #[derive(Clone, Debug, Facet)]
 pub struct RemoteSession {
     pub project_id: u64,
+    pub project_name: String,
     #[facet(skip_serializing_if = Option::is_none)]
     pub worktree_id: Option<u64>,
+    #[facet(skip_serializing_if = Option::is_none)]
+    pub worktree_name: Option<String>,
     pub session_id: u64,
     pub number: usize,
     #[facet(skip_serializing_if = Option::is_none)]
@@ -169,6 +182,7 @@ pub struct RemoteSession {
     pub exited: bool,
     pub bell: bool,
     pub has_unread_output: bool,
+    pub cwd: String,
 }
 
 #[derive(Clone, Copy, Debug, Facet, PartialEq, Eq)]
@@ -222,6 +236,7 @@ pub struct RemoteClientArgs {
     pub content: Option<String>,
     pub input: Option<String>,
     pub bytes: Option<String>,
+    pub query: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -521,8 +536,42 @@ fn params_from_args(args: &RemoteClientArgs) -> color_eyre::Result<RemoteParams>
     if let Some(bytes) = &args.bytes {
         params.bytes = Some(parse_bytes_list(bytes).map_err(|err| color_eyre::eyre::eyre!(err))?);
     }
+    if !args.query.is_empty() {
+        params.query = Some(
+            parse_session_query(&args.query)
+                .map_err(|err| color_eyre::eyre::eyre!("Invalid session query: {err}"))?,
+        );
+    }
 
     Ok(params)
+}
+
+fn parse_session_query(entries: &[String]) -> Result<Vec<RemoteSessionQuery>, String> {
+    let mut queries = Vec::new();
+    for entry in entries {
+        let trimmed = entry.trim();
+        let (key, operator, value) = if let Some((key, value)) = trimmed.split_once("~=") {
+            (key, "~=", value)
+        } else if let Some((key, value)) = trimmed.split_once('=') {
+            (key, "=", value)
+        } else {
+            return Err(format!("expected key=value or key~=value, got '{entry}'"));
+        };
+        let key = key.trim();
+        let value = value.trim();
+        if key.is_empty() {
+            return Err(format!("missing key in '{entry}'"));
+        }
+        if value.is_empty() {
+            return Err(format!("missing value in '{entry}'"));
+        }
+        queries.push(RemoteSessionQuery {
+            key: key.to_string(),
+            operator: operator.to_string(),
+            value: value.to_string(),
+        });
+    }
+    Ok(queries)
 }
 
 fn env_id(var: &str) -> Option<u64> {
@@ -818,6 +867,7 @@ mod tests {
             content: None,
             input: None,
             bytes: None,
+            query: Vec::new(),
         }
     }
 
