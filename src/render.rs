@@ -5,7 +5,7 @@ use crate::event::Size;
 use crate::geometry::{Point, Rect};
 use crate::palette::{Palette, Rgba};
 
-use termwiz::cell::grapheme_column_width;
+use unicode_width::UnicodeWidthChar;
 
 use taffy::Layout as TaffyLayout;
 
@@ -314,9 +314,7 @@ impl<'a> Renderer<'a> {
                     let next_tab_stop = ((current_col / TAB_WIDTH) + 1) * TAB_WIDTH;
                     (next_tab_stop - current_col).max(1)
                 } else {
-                    let mut buf = [0u8; 4];
-                    let s = ch.encode_utf8(&mut buf);
-                    grapheme_column_width(s, None).max(1)
+                    UnicodeWidthChar::width(ch).unwrap_or(0).max(1)
                 };
 
                 if skip_cols >= w {
@@ -681,9 +679,7 @@ impl<'a> Renderer<'a> {
         let mut available_columns = clip.width.saturating_sub(2);
 
         for ch in title.chars() {
-            let mut buf = [0u8; 4];
-            let ch_str = ch.encode_utf8(&mut buf);
-            let width = grapheme_column_width(ch_str, None);
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0);
 
             if width > available_columns && width > 0 {
                 break;
@@ -826,11 +822,7 @@ mod tests {
 
     fn grapheme_width(text: &str) -> usize {
         text.chars()
-            .map(|ch| {
-                let mut buf = [0u8; 4];
-                let s = ch.encode_utf8(&mut buf);
-                grapheme_column_width(s, None).max(1)
-            })
+            .map(|ch| UnicodeWidthChar::width(ch).unwrap_or(0).max(1))
             .sum()
     }
 
@@ -1443,18 +1435,16 @@ mod tests {
         // 2. Measure as render_text does (char by char)
         let mut render_width = 0;
         for ch in text_content.chars() {
-            let mut buf = [0u8; 4];
-            let s = ch.encode_utf8(&mut buf);
-            render_width += grapheme_column_width(s, None).max(1);
+            render_width += UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
         }
         println!("Render width (char by char .max(1)): {}", render_width);
 
         // 3. Measure as write_text does
         let mut write_width = 0;
         for ch in text_content.chars() {
-            write_width += grapheme_column_width(&ch.to_string(), None);
+            write_width += UnicodeWidthChar::width(ch).unwrap_or(0);
         }
-        println!("Write width (grapheme_column_width): {}", write_width);
+        println!("Write width (unicode_width): {}", write_width);
 
         assert_eq!(
             measure_width, render_width,

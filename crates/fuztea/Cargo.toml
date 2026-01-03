@@ -11,4 +11,4 @@ parking_lot = "0.12"
 smol = "2"
 taffy = "0.9.1"
 unicode-segmentation = "1.12"
-termwiz = { version = "0.23.3", default-features = false, features = [] }
+unicode-width = "0.1.11"

@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use termwiz::cell::grapheme_column_width;
+use unicode_width::UnicodeWidthChar;
 
 use crate::error::ProgramError;
 use crate::palette::Rgba;
@@ -243,7 +243,7 @@ impl DoubleBuffer {
                 break;
             }
 
-            let width = grapheme_column_width(&ch.to_string(), None);
+            let width = UnicodeWidthChar::width(ch).unwrap_or(0);
 
             if width == 0 {
                 continue;
@@ -280,7 +280,7 @@ impl DoubleBuffer {
             return;
         }
 
-        let width = grapheme_column_width(&ch.to_string(), None);
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
         if width == 0 {
             return;
         }

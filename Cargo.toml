@@ -15,8 +15,8 @@ smallvec = "1.13"
 smol = "2"
 taffy = "0.9.1"
 termina = { version = "0.1.1", features = ["event-stream"] }
-termwiz = { version = "0.23.3", default-features = false, features = [] }
 tracing = "0.1"
+unicode-width = "0.1.11"
 vte = { path = "crates/vte", version = "0.15.0" }
 zed-sum-tree = "0.2.0"
 

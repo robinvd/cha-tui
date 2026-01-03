@@ -13,7 +13,7 @@ ropey = "1.6"
 similar = { version = "2.5", default-features = false, features = ["text", "inline"] }
 smol = "2"
 taffy = "0.9.1"
-termwiz = { version = "0.23.3", default-features = false, features = [] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 tree-house = { version = "0.3" }
+unicode-width = "0.1.11"

@@ -25,7 +25,7 @@ use taffy::{
     },
     tree::{Cache as TaffyCache, Layout as TaffyLayout, NodeId, TraversePartialTree},
 };
-use termwiz::cell::grapheme_column_width;
+use unicode_width::UnicodeWidthChar;
 
 const TAB_WIDTH: usize = 8;
 
@@ -170,9 +170,7 @@ fn text_span_display_width(span: &TextSpan) -> usize {
             if ch == '\t' {
                 return TAB_WIDTH;
             }
-            let mut buf = [0u8; 4];
-            let s = ch.encode_utf8(&mut buf);
-            grapheme_column_width(s, None).max(1)
+            UnicodeWidthChar::width(ch).unwrap_or(0).max(1)
         })
         .sum()
 }

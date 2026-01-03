@@ -1,7 +1,7 @@
 use ropey::Rope;
 use smallvec::{SmallVec, smallvec};
 use std::ops::Range;
-use termwiz::cell::grapheme_column_width;
+use unicode_width::UnicodeWidthChar;
 use zed_sum_tree::TreeMap;
 
 use crate::Style;
@@ -2935,9 +2935,7 @@ impl InputState {
         if ch == '\n' {
             return 0;
         }
-        let mut buf = [0u8; 4];
-        let s = ch.encode_utf8(&mut buf);
-        grapheme_column_width(s, None).max(1)
+        UnicodeWidthChar::width(ch).unwrap_or(0).max(1)
     }
 }
 

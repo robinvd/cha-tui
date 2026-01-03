@@ -18,7 +18,7 @@ use parking_lot::Mutex;
 use smol::channel;
 use taffy::prelude::TaffyZero;
 use taffy::style::Dimension;
-use termwiz::cell::grapheme_column_width;
+use unicode_width::UnicodeWidthChar;
 
 const HEADER_HEIGHT: usize = 1;
 const INPUT_HEIGHT: usize = 3;
@@ -513,7 +513,7 @@ fn write_span(
     let mut used = 0;
     let mut buffer = String::new();
     for ch in text.chars() {
-        let width = grapheme_column_width(&ch.to_string(), None).max(1);
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
         if used + width > max_cells {
             break;
         }
