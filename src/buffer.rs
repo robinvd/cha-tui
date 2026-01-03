@@ -90,8 +90,9 @@ impl Cell {
 }
 
 /// Cursor render shape options supported by the terminal
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CursorShape {
+    #[default]
     BlinkingBlock,
     SteadyBlock,
     BlinkingUnderline,
@@ -113,15 +114,10 @@ impl CursorShape {
     }
 }
 
-impl Default for CursorShape {
-    fn default() -> Self {
-        Self::BlinkingBlock
-    }
-}
-
 /// Cursor state tracked by the double buffer
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CursorState {
+    #[default]
     Hidden,
     Position {
         x: usize,
@@ -137,12 +133,6 @@ impl CursorState {
 
     pub fn positioned(x: usize, y: usize, shape: CursorShape) -> Self {
         Self::Position { x, y, shape }
-    }
-}
-
-impl Default for CursorState {
-    fn default() -> Self {
-        Self::Hidden
     }
 }
 

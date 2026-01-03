@@ -1,5 +1,6 @@
 //! Session manager demo with a sidebar tree and a single terminal pane.
 
+mod divider;
 mod focus;
 mod git;
 mod jj;
@@ -32,10 +33,12 @@ use facet_args as args;
 use smol::channel::Receiver;
 use tracing::warn;
 
+use chatui::dom::Style;
+use divider::{Divider, DividerOrientation, horizontal_divider, vertical_divider};
 use focus::Focus;
 use keymap::{Action, Keymap, Scope};
 use modal::{ModalMsg, ModalResult, ModalState, modal_handle_key, modal_update, modal_view};
-use project::{Layout, Project, ProjectId, SessionKey, StartupState, WorktreeId};
+use project::{Layout, Project, ProjectId, SessionKey, StartupState, Worktree, WorktreeId};
 use remote::{
     RemoteClientArgs, RemoteEnvelope, RemoteParams, RemoteProject, RemoteRequest, RemoteResponse,
     RemoteResult, RemoteServer, RemoteSession, RemoteStatus, RemoteWorktree, params_action_name,
@@ -256,6 +259,11 @@ enum SessionCommand {
         /// Worktree id (overrides TERM_WORKTREE_ID).
         #[facet(args::named)]
         worktree: Option<u64>,
+    },
+    /// Query sessions with key=value filters (e.g. title=api has-updates=true).
+    Query {
+        #[facet(args::positional)]
+        query: Vec<String>,
     },
     /// Show the current session.
     Get,
@@ -1486,6 +1494,7 @@ fn handle_remote_request(
         "session-new" => handle_remote_new_session(model, &params),
         "session-rename" => handle_remote_rename_session(model, &params),
         "session-list" => handle_remote_list_sessions(model, &params),
+        "session-query" => handle_remote_query_sessions(model, &params),
         "session-get" => handle_remote_current_session(model),
         "project-new" => handle_remote_new_project(model, &params),
         "project-list" => handle_remote_list_projects(model),
@@ -1929,6 +1938,194 @@ fn handle_remote_list_worktrees(
         Transition::Continue,
         RemoteResponse::ok(Some(RemoteResult::Worktrees { worktrees })),
     )
+}
+
+enum SessionQuery {
+    Title(String, MatchKind),
+    ProjectName(String, MatchKind),
+    WorkspaceName(String, MatchKind),
+    Cwd(String, MatchKind),
+    Id(u64),
+    HasUpdates(bool),
+    HasBell(bool),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum MatchKind {
+    Exact,
+    Substring,
+}
+
+fn handle_remote_query_sessions(
+    model: &Model,
+    params: &RemoteParams,
+) -> (Transition<Msg>, RemoteResponse) {
+    let queries = match parse_session_queries(params) {
+        Ok(queries) => queries,
+        Err(err) => return (Transition::Continue, RemoteResponse::err(err)),
+    };
+    let mut sessions = Vec::new();
+    for project in &model.projects {
+        for session in &project.sessions {
+            if matches_session_queries(&queries, project, None, session) {
+                sessions.push(build_remote_session(project.id, None, session));
+            }
+        }
+        for worktree in &project.worktrees {
+            for session in &worktree.sessions {
+                if matches_session_queries(&queries, project, Some(worktree), session) {
+                    sessions.push(build_remote_session(project.id, Some(worktree.id), session));
+                }
+            }
+        }
+    }
+
+    (
+        Transition::Continue,
+        RemoteResponse::ok(Some(RemoteResult::Sessions { sessions })),
+    )
+}
+
+fn parse_session_queries(params: &RemoteParams) -> Result<Vec<SessionQuery>, String> {
+    let Some(queries) = params.query.as_deref() else {
+        return Ok(Vec::new());
+    };
+    queries
+        .iter()
+        .map(parse_session_query)
+        .collect::<Result<Vec<_>, _>>()
+}
+
+fn parse_session_query(query: &remote::RemoteSessionQuery) -> Result<SessionQuery, String> {
+    let key = normalize_query_key(&query.key);
+    let value = query.value.trim();
+    let match_kind = parse_match_kind(query)?;
+    if value.is_empty() {
+        return Err(format!("query '{key}' requires a value"));
+    }
+    match key.as_str() {
+        "title" => Ok(SessionQuery::Title(value.to_string(), match_kind)),
+        "project" | "project name" => Ok(SessionQuery::ProjectName(value.to_string(), match_kind)),
+        "workspace" | "workspace name" | "worktree name" => {
+            Ok(SessionQuery::WorkspaceName(value.to_string(), match_kind))
+        }
+        "cwd" => Ok(SessionQuery::Cwd(value.to_string(), match_kind)),
+        "id" => {
+            ensure_exact_operator(&key, match_kind)?;
+            value
+                .parse::<u64>()
+                .map(SessionQuery::Id)
+                .map_err(|_| format!("invalid id value '{value}'"))
+        }
+        "has updates" | "updates" => {
+            ensure_exact_operator(&key, match_kind)?;
+            parse_query_bool(value)
+                .map(SessionQuery::HasUpdates)
+                .ok_or_else(|| format!("invalid has updates value '{value}'"))
+        }
+        "has bell" | "bell" => {
+            ensure_exact_operator(&key, match_kind)?;
+            parse_query_bool(value)
+                .map(SessionQuery::HasBell)
+                .ok_or_else(|| format!("invalid has bell value '{value}'"))
+        }
+        _ => Err(format!("unknown query key '{key}'")),
+    }
+}
+
+fn parse_match_kind(query: &remote::RemoteSessionQuery) -> Result<MatchKind, String> {
+    match query.operator.as_str() {
+        "=" => Ok(MatchKind::Exact),
+        "~=" => Ok(MatchKind::Substring),
+        other => Err(format!("unknown query operator '{other}'")),
+    }
+}
+
+fn ensure_exact_operator(key: &str, match_kind: MatchKind) -> Result<(), String> {
+    if match_kind == MatchKind::Exact {
+        Ok(())
+    } else {
+        Err(format!("query '{key}' requires '=' operator"))
+    }
+}
+
+fn normalize_query_key(key: &str) -> String {
+    let mut normalized = String::new();
+    for part in key
+        .split(|ch: char| ch.is_ascii_whitespace() || ch == '_' || ch == '-')
+        .filter(|part| !part.is_empty())
+    {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.push_str(&part.to_ascii_lowercase());
+    }
+    normalized
+}
+
+fn parse_query_bool(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "t" | "1" | "yes" | "y" | "on" => Some(true),
+        "false" | "f" | "0" | "no" | "n" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn matches_session_queries(
+    queries: &[SessionQuery],
+    project: &Project,
+    worktree: Option<&Worktree>,
+    session: &Session,
+) -> bool {
+    queries
+        .iter()
+        .all(|query| matches_session_query(query, project, worktree, session))
+}
+
+fn matches_session_query(
+    query: &SessionQuery,
+    project: &Project,
+    worktree: Option<&Worktree>,
+    session: &Session,
+) -> bool {
+    match query {
+        SessionQuery::Title(needle, match_kind) => {
+            matches_query_text(&session_title_for_query(session), needle, *match_kind)
+        }
+        SessionQuery::ProjectName(needle, match_kind) => {
+            matches_query_text(&project.name, needle, *match_kind)
+        }
+        SessionQuery::WorkspaceName(needle, match_kind) => worktree
+            .map(|worktree| matches_query_text(&worktree.name, needle, *match_kind))
+            .unwrap_or(false),
+        SessionQuery::Cwd(needle, match_kind) => {
+            let path = match worktree {
+                Some(worktree) => worktree.path.display().to_string(),
+                None => project.path.display().to_string(),
+            };
+            matches_query_text(&path, needle, *match_kind)
+        }
+        SessionQuery::Id(id) => session.id.0 == *id,
+        SessionQuery::HasUpdates(expected) => session.has_unread_output == *expected,
+        SessionQuery::HasBell(expected) => session.bell == *expected,
+    }
+}
+
+fn session_title_for_query(session: &Session) -> String {
+    session
+        .custom_title
+        .clone()
+        .or_else(|| session.title.clone())
+        .unwrap_or_else(|| session.display_name())
+}
+
+fn matches_query_text(value: &str, query: &str, match_kind: MatchKind) -> bool {
+    let value = value.to_ascii_lowercase();
+    let query = query.trim().to_ascii_lowercase();
+    match match_kind {
+        MatchKind::Exact => value == query,
+        MatchKind::Substring => value.contains(&query),
+    }
 }
 
 fn handle_remote_list_sessions(
@@ -2605,6 +2802,12 @@ fn terminal_pane_zoom(model: &Model) -> Node<Msg> {
     }
 }
 
+fn divider_style(_model: &Model) -> Style {
+    let mut style = section_style(false);
+    style.border = false;
+    style
+}
+
 fn terminal_pane_tall(model: &Model) -> Node<Msg> {
     let Some((project_id, worktree, active_session, sessions)) = model.active_container_sessions()
     else {
@@ -2634,13 +2837,25 @@ fn terminal_pane_tall(model: &Model) -> Node<Msg> {
     };
 
     let left = terminal_node(first);
-    let right_children: Vec<_> = iter.map(terminal_node).collect();
+    let divider_style = divider_style(model);
+    let mut right_children = Vec::new();
+    for session in iter {
+        if !right_children.is_empty() {
+            right_children.push(horizontal_divider(divider_style));
+        }
+        right_children.push(terminal_node(session));
+    }
     if right_children.is_empty() {
         return left.with_flex_grow(1.0);
     }
 
     let right = column(right_children).with_flex_grow(1.0);
-    row(vec![left.with_flex_grow(1.0), right]).with_flex_grow(1.0)
+    row(vec![
+        left.with_flex_grow(1.0),
+        vertical_divider(divider_style),
+        right,
+    ])
+    .with_flex_grow(1.0)
 }
 
 fn view(model: &Model) -> Node<Msg> {
@@ -2705,6 +2920,7 @@ fn remote_action_name(action: &RemoteCommand) -> &'static str {
             SessionCommand::Add { .. } => "session-new",
             SessionCommand::Rename { .. } => "session-rename",
             SessionCommand::List { .. } => "session-list",
+            SessionCommand::Query { .. } => "session-query",
             SessionCommand::Get => "session-get",
         },
         RemoteCommand::Project { command } => match command {
@@ -2757,6 +2973,7 @@ fn build_remote_client_args(remote: RemoteArgs) -> RemoteClientArgs {
         content: None,
         input: None,
         bytes: None,
+        query: Vec::new(),
     };
 
     match remote.action {
@@ -2875,6 +3092,11 @@ fn build_remote_client_args(remote: RemoteArgs) -> RemoteClientArgs {
         } => {
             args.project = project;
             args.worktree = worktree;
+        }
+        RemoteCommand::Session {
+            command: SessionCommand::Query { query },
+        } => {
+            args.query = query;
         }
         RemoteCommand::App { .. }
         | RemoteCommand::Focus { .. }
@@ -3009,6 +3231,14 @@ mod tests {
         y: f32,
     }
 
+    struct DividerLayout {
+        orientation: DividerOrientation,
+        width: f32,
+        height: f32,
+        x: f32,
+        y: f32,
+    }
+
     fn collect_terminal_layouts(
         node: &Node<Msg>,
         origin: (f32, f32),
@@ -3033,6 +3263,45 @@ mod tests {
                 collect_terminal_layouts(child, (x, y), layouts);
             }
         }
+    }
+
+    fn collect_divider_layouts(
+        node: &Node<Msg>,
+        origin: (f32, f32),
+        layouts: &mut Vec<DividerLayout>,
+    ) {
+        let layout = node.layout_state().layout;
+        let x = origin.0 + layout.location.x;
+        let y = origin.1 + layout.location.y;
+
+        if let Some(renderable) = node.as_renderable() {
+            if renderable.debug_label() == "divider" {
+                let divider = renderable
+                    .as_any()
+                    .downcast_ref::<Divider>()
+                    .expect("divider renderable");
+                layouts.push(DividerLayout {
+                    orientation: divider.orientation,
+                    width: layout.size.width,
+                    height: layout.size.height,
+                    x,
+                    y,
+                });
+            }
+        }
+
+        if let Some(element) = node.as_element() {
+            for child in &element.children {
+                collect_divider_layouts(child, (x, y), layouts);
+            }
+        }
+    }
+
+    fn char_at(lines: &[String], x: usize, y: usize) -> char {
+        lines[y]
+            .chars()
+            .nth(x)
+            .unwrap_or_else(|| panic!("missing char at {x}, {y}"))
     }
 
     #[test]
@@ -3241,6 +3510,77 @@ mod tests {
             model.tree.selected(),
             Some(&TreeId::Session(project_id, None, first_session))
         );
+    }
+
+    #[test]
+    fn remote_session_query_filters_sessions() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        let project_id = activate_first_project(&mut model);
+        model.projects[0].name = "alpha".to_string();
+
+        let worktree_id = match model.add_worktree(project_id, "dev".to_string(), VcsKind::Git) {
+            Some(TreeId::Worktree(_, worktree_id)) => worktree_id,
+            _ => panic!("expected worktree to be created"),
+        };
+        model.tree.select(TreeId::Worktree(project_id, worktree_id));
+        update(&mut model, Msg::NewSession);
+
+        let (session_id, worktree_path) = {
+            let worktree = model
+                .projects
+                .get_mut(0)
+                .and_then(|project| project.worktree_mut(worktree_id))
+                .expect("worktree exists");
+            let session = worktree
+                .sessions
+                .first_mut()
+                .expect("worktree session exists");
+            session.custom_title = Some("backend".to_string());
+            session.has_unread_output = true;
+            session.bell = true;
+            (session.id.0, worktree.path.display().to_string())
+        };
+
+        let params = RemoteParams {
+            query: Some(vec![
+                remote::RemoteSessionQuery {
+                    key: "project name".to_string(),
+                    operator: "~=".to_string(),
+                    value: "alp".to_string(),
+                },
+                remote::RemoteSessionQuery {
+                    key: "workspace name".to_string(),
+                    operator: "=".to_string(),
+                    value: "dev".to_string(),
+                },
+                remote::RemoteSessionQuery {
+                    key: "cwd".to_string(),
+                    operator: "=".to_string(),
+                    value: worktree_path,
+                },
+                remote::RemoteSessionQuery {
+                    key: "has updates".to_string(),
+                    operator: "=".to_string(),
+                    value: "true".to_string(),
+                },
+                remote::RemoteSessionQuery {
+                    key: "has bell".to_string(),
+                    operator: "=".to_string(),
+                    value: "true".to_string(),
+                },
+            ]),
+            ..RemoteParams::default()
+        };
+
+        let (_, response) = handle_remote_query_sessions(&model, &params);
+        assert!(response.ok, "expected ok response, got {response:?}");
+        let Some(RemoteResult::Sessions { sessions }) = response.result else {
+            panic!("expected session list response");
+        };
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].session_id, session_id);
     }
 
     #[test]
@@ -3573,8 +3913,8 @@ mod tests {
         assert_eq!(left.x, 0.0);
         assert_eq!(left.width, 40.0);
         assert_eq!(left.height, 20.0);
-        assert_eq!(right.x, 40.0);
-        assert_eq!(right.width, 40.0);
+        assert_eq!(right.x, 41.0);
+        assert_eq!(right.width, 39.0);
         assert_eq!(right.height, 20.0);
     }
 
@@ -3626,12 +3966,77 @@ mod tests {
         assert_eq!(left.height, 30.0);
 
         right.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap());
-        assert_eq!(right[0].x, 45.0);
-        assert_eq!(right[1].x, 45.0);
-        assert_eq!(right[0].width, 45.0);
-        assert_eq!(right[1].width, 45.0);
+        assert_eq!(right[0].x, 46.0);
+        assert_eq!(right[1].x, 46.0);
+        assert_eq!(right[0].width, 44.0);
+        assert_eq!(right[1].width, 44.0);
         assert_eq!(right[0].height, 15.0);
-        assert_eq!(right[1].height, 15.0);
+        assert_eq!(right[1].height, 14.0);
+    }
+
+    #[test]
+    fn renders_tall_layout_session_borders() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        activate_first_project(&mut model);
+        update(&mut model, Msg::NewSession);
+        update(&mut model, Msg::NewSession);
+
+        let mut node = terminal_pane(&model).with_fill();
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: taffy::AvailableSpace::Definite(40.0),
+                height: taffy::AvailableSpace::Definite(10.0),
+            },
+        );
+        round_layout(&mut node);
+
+        let mut divider_layouts = Vec::new();
+        collect_divider_layouts(&node, (0.0, 0.0), &mut divider_layouts);
+        assert_eq!(divider_layouts.len(), 2);
+
+        let mut buffer = DoubleBuffer::new(40, 10);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
+        renderer
+            .render(&node, Size::new(40, 10))
+            .expect("render should succeed");
+
+        let lines: Vec<String> = renderer
+            .buffer()
+            .to_string()
+            .lines()
+            .map(|s| s.to_owned())
+            .collect();
+
+        let mut vertical_count = 0;
+        let mut horizontal_count = 0;
+        for divider in &divider_layouts {
+            let x = divider.x as usize;
+            let y = divider.y as usize;
+            let width = divider.width as usize;
+            let height = divider.height as usize;
+            match divider.orientation {
+                DividerOrientation::Vertical => {
+                    vertical_count += 1;
+                    for row in y..y + height {
+                        assert_eq!(char_at(&lines, x, row), '│');
+                    }
+                }
+                DividerOrientation::Horizontal => {
+                    horizontal_count += 1;
+                    for col in x..x + width {
+                        assert_eq!(char_at(&lines, col, y), '─');
+                    }
+                }
+            }
+        }
+
+        assert_eq!(vertical_count, 1);
+        assert_eq!(horizontal_count, 1);
     }
 
     #[test]
