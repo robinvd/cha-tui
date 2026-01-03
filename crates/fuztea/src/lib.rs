@@ -14,7 +14,6 @@ use chatui::render::RenderContext;
 use chatui::{ScrollMsg, Transition, block_with_title, default_input_keybindings, input};
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Injector, Matcher, Nucleo, Utf32String};
-use parking_lot::Mutex;
 use smol::channel;
 use taffy::prelude::TaffyZero;
 use taffy::style::Dimension;
@@ -40,15 +39,10 @@ impl FuzzyFinderInput {
 
 #[derive(Clone)]
 pub struct FuzzyFinderHandle {
-    submitted: Arc<Mutex<Option<String>>>,
     input: FuzzyFinderInput,
 }
 
 impl FuzzyFinderHandle {
-    pub fn take_submission(&self) -> Option<String> {
-        self.submitted.lock().take()
-    }
-
     pub fn push_item(&self, line: impl Into<String>) {
         self.input.push_item(line);
     }
@@ -66,7 +60,7 @@ pub struct FuzzyFinder {
     last_query: String,
     listening_matcher: bool,
     size: Size,
-    submitted: Arc<Mutex<Option<String>>>,
+    submitted: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -100,7 +94,6 @@ impl FuzzyFinder {
         let input = FuzzyFinderInput {
             injector: injector.clone(),
         };
-        let submitted = Arc::new(Mutex::new(None));
         let finder = Self {
             injector,
             matcher: Rc::new(RefCell::new(matcher)),
@@ -116,10 +109,10 @@ impl FuzzyFinder {
                 width: 80,
                 height: 24,
             },
-            submitted: Arc::clone(&submitted),
+            submitted: None,
         };
 
-        let handle = FuzzyFinderHandle { submitted, input };
+        let handle = FuzzyFinderHandle { input };
         (finder, handle)
     }
 
@@ -136,6 +129,10 @@ impl FuzzyFinder {
     pub fn set_query(&mut self, query: impl Into<String>) {
         self.input.set_value(query.into());
         self.refresh_matches(true);
+    }
+
+    pub fn submission(&self) -> Option<&str> {
+        self.submitted.as_ref().map(|s| s.as_str())
     }
 
     fn apply_input(&mut self, msg: InputMsg) -> Transition<Msg> {
@@ -227,7 +224,7 @@ impl FuzzyFinder {
             return false;
         };
 
-        *self.submitted.lock() = Some(item);
+        self.submitted = Some(item);
         true
     }
 }

@@ -29,7 +29,7 @@ Just like other Elm-style UIs there are 3 components to a program
 ```rust
 // Program::new
 pub fn new(
-    model: Model,
+    model: &mut Model,
     update: impl FnMut(&mut Model, Msg) -> Transition<Msg> + 'static,
     view: impl Fn(&Model) -> Node<Msg> + 'static,
 ) -> Self {

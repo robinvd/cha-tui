@@ -63,8 +63,8 @@ struct ScrollEffect<Msg> {
     offset: f32,
 }
 
-pub struct Program<Model, Msg> {
-    model: Model,
+pub struct Program<'a, Model, Msg> {
+    model: &'a mut Model,
     update: UpdateFn<Model, Msg>,
     view: ViewFn<Model, Msg>,
     event_mapper: EventFn<Msg>,
@@ -79,9 +79,9 @@ pub struct Program<Model, Msg> {
     pending_terminal_actions: Vec<TerminalAction>,
 }
 
-impl<Model, Msg: 'static> Program<Model, Msg> {
+impl<'a, Model, Msg: 'static> Program<'a, Model, Msg> {
     pub fn new(
-        model: Model,
+        model: &'a mut Model,
         update: impl FnMut(&mut Model, Msg) -> Transition<Msg> + 'static,
         view: impl Fn(&Model) -> Node<Msg> + 'static,
     ) -> Self {
@@ -253,7 +253,7 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
                 }
                 Awaited::Event(None) => break,
                 Awaited::Message(Ok(msg)) => {
-                    let transition = (self.update)(&mut self.model, msg);
+                    let transition = (self.update)(self.model, msg);
                     let (task_quit, task_render) = self.resolve_transition(transition);
                     loop_needs_render |= task_render;
                     loop_should_quit |= task_quit;
@@ -347,7 +347,7 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
             && let Some(mouse_messages) = self.handle_mouse_event(mouse_event)
         {
             for message in mouse_messages {
-                let transition = (self.update)(&mut self.model, message);
+                let transition = (self.update)(self.model, message);
                 let (t_needs_quit, t_needs_render) = self.resolve_transition(transition);
                 needs_render |= t_needs_render;
                 needs_quit |= t_needs_quit;
@@ -355,7 +355,7 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
         }
 
         if let Some(message) = msg {
-            let transition = (self.update)(&mut self.model, message);
+            let transition = (self.update)(self.model, message);
             let (t_needs_quit, t_needs_render) = self.resolve_transition(transition);
             needs_render |= t_needs_render;
             needs_quit |= t_needs_quit;
@@ -438,7 +438,7 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
         while self.executor.try_tick() {}
 
         while let Ok(msg) = self.task_queue_recv.try_recv() {
-            let transition = (self.update)(&mut self.model, msg);
+            let transition = (self.update)(self.model, msg);
             let (task_quit, task_render) = self.resolve_transition(transition);
             quit |= task_quit;
             needs_render |= task_render;
@@ -516,7 +516,7 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
     }
 
     fn rebuild_view(&mut self) {
-        let new_view = (self.view)(&self.model);
+        let new_view = (self.view)(self.model);
 
         if let Some(existing_view) = self.current_view.take() {
             let patched = crate::dom::patch::patch(existing_view, new_view);
@@ -553,7 +553,7 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
 
             let mut quit = false;
             for msg in pending_resize_msgs {
-                let transition = (self.update)(&mut self.model, msg);
+                let transition = (self.update)(self.model, msg);
                 let (task_quit, _) = self.resolve_transition(transition);
                 if task_quit {
                     quit = true;
@@ -572,7 +572,7 @@ impl<Model, Msg: 'static> Program<Model, Msg> {
 
         for effect in scroll_effects {
             let message = (effect.callback)(effect.offset);
-            let transition = (self.update)(&mut self.model, message);
+            let transition = (self.update)(self.model, message);
             let (task_quit, _) = self.resolve_transition(transition);
             if task_quit {
                 self.queued_quit = true;
@@ -929,12 +929,12 @@ mod tests {
 
     #[test]
     fn send_updates_model_and_rerenders() {
-        let mut program =
-            Program::new(CounterModel::default(), update, view).map_event(|event| match event {
-                Event::Key(key) if matches!(key.code, KeyCode::Char('+')) => Some(Msg::Increment),
-                Event::Key(key) if matches!(key.code, KeyCode::Char('q')) => Some(Msg::Quit),
-                _ => None,
-            });
+        let mut model = CounterModel::default();
+        let mut program = Program::new(&mut model, update, view).map_event(|event| match event {
+            Event::Key(key) if matches!(key.code, KeyCode::Char('+')) => Some(Msg::Increment),
+            Event::Key(key) if matches!(key.code, KeyCode::Char('q')) => Some(Msg::Quit),
+            _ => None,
+        });
         let mut buffer = DoubleBuffer::new(10, 2);
 
         let quit = program
@@ -975,7 +975,8 @@ mod tests {
 
     #[test]
     fn mouse_click_triggers_on_click_handler() {
-        let mut program = Program::new(ClickModel::default(), click_update, click_view);
+        let mut model = ClickModel::default();
+        let mut program = Program::new(&mut model, click_update, click_view);
         let mut buffer = DoubleBuffer::new(4, 2);
 
         program
@@ -1062,11 +1063,8 @@ mod tests {
 
     #[test]
     fn double_click_triggers_handler() {
-        let mut program = Program::new(
-            DoubleClickModel::default(),
-            double_click_update,
-            double_click_view,
-        );
+        let mut model = DoubleClickModel::default();
+        let mut program = Program::new(&mut model, double_click_update, double_click_view);
         let mut buffer = DoubleBuffer::new(4, 2);
 
         program
@@ -1101,11 +1099,8 @@ mod tests {
 
     #[test]
     fn double_click_requires_same_position() {
-        let mut program = Program::new(
-            DoubleClickModel::default(),
-            double_click_update,
-            double_click_view,
-        );
+        let mut model = DoubleClickModel::default();
+        let mut program = Program::new(&mut model, double_click_update, double_click_view);
         let mut buffer = DoubleBuffer::new(4, 2);
 
         program
@@ -1192,12 +1187,12 @@ mod tests {
 
     #[test]
     fn task_transition_schedules_follow_up_message() {
-        let mut program = Program::new(TaskModel::default(), task_update, task_view).map_event(
-            |event| match event {
+        let mut model = TaskModel::default();
+        let mut program =
+            Program::new(&mut model, task_update, task_view).map_event(|event| match event {
                 Event::Key(key) if matches!(key.code, KeyCode::Enter) => Some(TaskMsg::Start),
                 _ => None,
-            },
-        );
+            });
 
         let mut buffer = DoubleBuffer::new(4, 2);
         program

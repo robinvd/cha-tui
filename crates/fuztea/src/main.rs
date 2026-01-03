@@ -6,7 +6,7 @@ use fuztea::{FuzzyFinder, map_event, update, view};
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
 
-    let (model, handle) = FuzzyFinder::new();
+    let (mut model, handle) = FuzzyFinder::new();
     let input_handle = handle.clone();
     std::thread::spawn(move || {
         let stdin = io::stdin();
@@ -17,13 +17,13 @@ fn main() -> color_eyre::Result<()> {
         }
     });
 
-    let program = Program::new(model, update, view).map_event(map_event);
+    let program = Program::new(&mut model, update, view).map_event(map_event);
 
     program
         .run()
         .map_err(|err| color_eyre::eyre::eyre!(format!("{err:?}")))?;
 
-    if let Some(output) = handle.take_submission() {
+    if let Some(output) = model.submission() {
         let mut stdout = io::stdout();
         writeln!(stdout, "{output}")?;
     }

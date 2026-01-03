@@ -152,7 +152,8 @@ fn main() -> Result<()> {
 
     init_tracing()?;
 
-    let mut program = Program::new(Model::new(view_mode), update, view).map_event(map_event);
+    let mut model = Model::new(view_mode);
+    let mut program = Program::new(&mut model, update, view).map_event(map_event);
 
     if let Err(error) = smol::block_on(program.run_async()) {
         eprintln!("Program exited with error: {:?}", error);

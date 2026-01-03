@@ -322,7 +322,8 @@ fn main() -> color_eyre::Result<()> {
     install_panic_hook()?;
     init_tracing()?;
 
-    let mut program = Program::new(seed_model(), update, view).map_event(map_event);
+    let mut model = seed_model();
+    let mut program = Program::new(&mut model, update, view).map_event(map_event);
 
     tracing::info!("Starting TODO program");
 

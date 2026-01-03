@@ -681,8 +681,8 @@ fn main() -> color_eyre::Result<()> {
         .map(PathBuf::from)
         .ok_or_else(|| color_eyre::eyre::eyre!("usage: text_editor <path>"))?;
 
-    let model = Model::load(path)?;
-    let program = Program::new(model, update, view).map_event(|event| match event {
+    let mut model = Model::load(path)?;
+    let program = Program::new(&mut model, update, view).map_event(|event| match event {
         Event::Key(key) => Some(Msg::KeyPressed(key)),
         _ => None,
     });

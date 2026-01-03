@@ -3192,7 +3192,7 @@ fn main() -> Result<(), miette::Report> {
         model.set_remote_receiver(remote_receiver);
     }
 
-    let program = Program::new(model, update, view).map_event(|event| match event {
+    let program = Program::new(&mut model, update, view).map_event(|event| match event {
         Event::Key(key) => Some(Msg::Key(key)),
         Event::Paste(text) => Some(Msg::Paste(text)),
         Event::FocusGained => Some(Msg::FocusGained),

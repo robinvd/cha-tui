@@ -273,8 +273,8 @@ fn main() -> Result<()> {
     let server_label = args.server.clone();
     let (command_tx, event_rx) = start_agent_thread(args)?;
 
-    let model = Model::new(event_rx, command_tx, server_label.clone());
-    let mut program = Program::new(model, update, view).map_event(map_event);
+    let mut model = Model::new(event_rx, command_tx, server_label.clone());
+    let mut program = Program::new(&mut model, update, view).map_event(map_event);
 
     if let Err(err) = smol::block_on(program.run_async()) {
         eprintln!("Program exited with error: {:?}", err);

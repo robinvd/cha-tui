@@ -264,8 +264,8 @@ fn main() {
             .unwrap_or_else(|| PathBuf::from("."))
     };
 
-    let model = Model::new(initial_dir);
-    let program = Program::new(model, update, view).map_event(|event| match event {
+    let mut model = Model::new(initial_dir);
+    let program = Program::new(&mut model, update, view).map_event(|event| match event {
         Event::Key(Key {
             code: KeyCode::Char('q'),
             ..

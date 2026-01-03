@@ -3,7 +3,7 @@
 ## Spec
 - written in rust
 - Provide a minimal Elm-style terminal UI framework without exposing terminal backend types to applications.
-- Core runtime lives in `src/program.rs`: `Program::new(model, update, view)` wires the loop, `Program::map_event` installs a translator from `event::Event` to application messages, `Program::run` drives a buffered terminal (alternate screen + raw mode) using the renderer, and `Program::send` replays events for tests.
+- Core runtime lives in `src/program.rs`: `Program::new(&mut model, update, view)` wires the loop, `Program::map_event` installs a translator from `event::Event` to application messages, `Program::run` drives a buffered terminal (alternate screen + raw mode) using the renderer, and `Program::send` replays events for tests.
 - State transitions use `Transition::{Continue, Quit}`; updates mutate the model directly. Rendering is triggered for resize events or `Transition::Continue` results.
 - DOM primitives reside in `src/dom/mod.rs`: `Node` carries shared state and wraps `NodeContent::{Element, Text}`, alongside `ElementKind::{Column, Row, Block}`, `Style`, and `Attributes`. Helpers include `text`, `column`, `row`, `block`, with builder-like APIs (`Node::with_style`, `Attributes::with_style`, etc.). Layout is minimal—columns stack children, rows share width evenly, blocks add a border and render inner content.
 - Events in `src/event.rs`: `Event::{Key, Resize}`, `Key` (code + ctrl/alt/shift), `KeyCode` (basic navigation + char), `Size`. Convenience constructors ensure default modifiers.
