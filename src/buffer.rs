@@ -219,15 +219,27 @@ impl DoubleBuffer {
         }
     }
 
-    /// Write text at the given position in the back buffer
-    pub fn write_text(&mut self, x: usize, y: usize, text: &str, attrs: &CellAttributes) {
+    /// Write text at the given position in the back buffer, clamped to max_cells.
+    pub fn write_text_length(
+        &mut self,
+        x: usize,
+        y: usize,
+        text: &str,
+        attrs: &CellAttributes,
+        max_cells: usize,
+    ) {
         if y >= self.height {
+            return;
+        }
+
+        let limit = self.width.min(x.saturating_add(max_cells));
+        if x >= limit {
             return;
         }
 
         let mut col = x;
         for ch in text.chars() {
-            if col >= self.width {
+            if col >= limit {
                 break;
             }
 
@@ -237,9 +249,9 @@ impl DoubleBuffer {
                 continue;
             }
 
-            if col + width > self.width {
+            if col + width > limit {
                 // Not enough space for this char, so we fill remaining space with blanks
-                for i in col..self.width {
+                for i in col..limit {
                     self.back[y][i] = Cell::blank();
                 }
                 break;
@@ -254,6 +266,12 @@ impl DoubleBuffer {
 
             col += width;
         }
+    }
+
+    /// Write text at the given position in the back buffer
+    pub fn write_text(&mut self, x: usize, y: usize, text: &str, attrs: &CellAttributes) {
+        let max_cells = self.width.saturating_sub(x);
+        self.write_text_length(x, y, text, attrs, max_cells);
     }
 
     /// Write a single character at the given position in the back buffer

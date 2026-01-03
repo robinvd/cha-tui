@@ -96,6 +96,17 @@ impl<'a> RenderContext<'a> {
         self.buffer.write_text(x, y, text, attrs);
     }
 
+    pub fn write_text_length(
+        &mut self,
+        x: usize,
+        y: usize,
+        text: &str,
+        attrs: &CellAttributes,
+        max_cells: usize,
+    ) {
+        self.buffer.write_text_length(x, y, text, attrs, max_cells);
+    }
+
     pub fn write_char(&mut self, x: usize, y: usize, ch: char, attrs: &CellAttributes) {
         self.buffer.write_char(x, y, ch, attrs);
     }

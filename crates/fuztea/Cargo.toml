@@ -1,0 +1,12 @@
+[package]
+name = "fuztea"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chatui = { path = "../.." }
+color-eyre = "0.6.5"
+nucleo = "0.5.0"
+smol = "2"
+taffy = "0.9.1"
+unicode-segmentation = "1.12"
