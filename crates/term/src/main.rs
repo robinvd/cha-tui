@@ -34,7 +34,7 @@ use smol::channel::Receiver;
 use tracing::warn;
 
 use chatui::dom::Style;
-use divider::{Divider, DividerOrientation, horizontal_divider, vertical_divider};
+use divider::{horizontal_divider, vertical_divider};
 use focus::Focus;
 use keymap::{Action, Keymap, Scope};
 use modal::{ModalMsg, ModalResult, ModalState, modal_handle_key, modal_update, modal_view};
@@ -2782,6 +2782,7 @@ fn terminal_pane(model: &Model) -> Node<Msg> {
     match model.active_layout() {
         Layout::Zoom => terminal_pane_zoom(model),
         Layout::Tall => terminal_pane_tall(model),
+        Layout::Wide => terminal_pane_wide(model),
     }
 }
 
@@ -2868,6 +2869,56 @@ fn terminal_pane_tall(model: &Model) -> Node<Msg> {
         left.with_flex_grow(1.0),
         vertical_divider(divider_style),
         right,
+    ])
+    .with_flex_grow(1.0)
+}
+
+fn terminal_pane_wide(model: &Model) -> Node<Msg> {
+    let Some((project_id, worktree, active_session, sessions)) = model.active_container_sessions()
+    else {
+        return terminal_pane_placeholder(model);
+    };
+
+    let mut iter = sessions.iter();
+    let Some(first) = iter.next() else {
+        return terminal_pane_placeholder(model);
+    };
+
+    let terminal_node = |session: &Session| {
+        let sid = session.id;
+        let is_active = sid == active_session;
+        let is_focused = model.focus.is_terminal() && is_active;
+        terminal("terminal", &session.terminal, is_focused, move |msg| {
+            Msg::Terminal {
+                project: project_id,
+                worktree,
+                session: sid,
+                msg,
+            }
+        })
+        .with_id_mixin("terminal", sid.0)
+        .with_flex_grow(1.0)
+        .with_style(section_style(is_focused))
+    };
+
+    let top = terminal_node(first);
+    let divider_style = divider_style(model);
+    let mut bottom_children = Vec::new();
+    for session in iter {
+        if !bottom_children.is_empty() {
+            bottom_children.push(vertical_divider(divider_style));
+        }
+        bottom_children.push(terminal_node(session));
+    }
+    if bottom_children.is_empty() {
+        return top.with_flex_grow(1.0);
+    }
+
+    let bottom = row(bottom_children).with_flex_grow(1.0);
+    column(vec![
+        top.with_flex_grow(1.0),
+        horizontal_divider(divider_style),
+        bottom,
     ])
     .with_flex_grow(1.0)
 }
@@ -3125,7 +3176,6 @@ fn build_remote_client_args(remote: RemoteArgs) -> RemoteClientArgs {
 }
 
 fn main() -> Result<(), miette::Report> {
-    // color_eyre::install().expect("failed to install color-eyre");
     miette::set_panic_hook();
 
     // let args: Args = match args::from_std_args() {
@@ -3930,6 +3980,105 @@ mod tests {
         assert_eq!(right.x, 41.0);
         assert_eq!(right.width, 39.0);
         assert_eq!(right.height, 20.0);
+    }
+
+    #[test]
+    fn terminal_wide_layout_two_sessions() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        let project_id = activate_first_project(&mut model);
+        update(&mut model, Msg::NewSession);
+        let first_session = model.projects[0].sessions[0].id;
+        model.select_session(SessionKey {
+            project: project_id,
+            worktree: None,
+            session: first_session,
+        });
+        model.toggle_active_layout();
+
+        let mut node = terminal_pane(&model).with_fill();
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: taffy::AvailableSpace::Definite(80.0),
+                height: taffy::AvailableSpace::Definite(20.0),
+            },
+        );
+        round_layout(&mut node);
+
+        let mut layouts = Vec::new();
+        collect_terminal_layouts(&node, (0.0, 0.0), &mut layouts);
+        assert_eq!(layouts.len(), 2);
+
+        layouts.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap());
+        let top = &layouts[0];
+        let bottom = &layouts[1];
+
+        assert_eq!(top.y, 0.0);
+        assert_eq!(top.width, 80.0);
+        assert_eq!(top.height, 10.0);
+        assert_eq!(bottom.y, 11.0);
+        assert_eq!(bottom.width, 80.0);
+        assert_eq!(bottom.height, 9.0);
+    }
+
+    #[test]
+    fn terminal_wide_layout_three_sessions() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        let project_id = activate_first_project(&mut model);
+        update(&mut model, Msg::NewSession);
+        update(&mut model, Msg::NewSession);
+        let second_session = model.projects[0].sessions[1].id;
+        model.select_session(SessionKey {
+            project: project_id,
+            worktree: None,
+            session: second_session,
+        });
+        model.toggle_active_layout();
+
+        let mut node = terminal_pane(&model).with_fill();
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: taffy::AvailableSpace::Definite(90.0),
+                height: taffy::AvailableSpace::Definite(30.0),
+            },
+        );
+        round_layout(&mut node);
+
+        let mut layouts = Vec::new();
+        collect_terminal_layouts(&node, (0.0, 0.0), &mut layouts);
+        assert_eq!(layouts.len(), 3);
+
+        let mut top = Vec::new();
+        let mut bottom = Vec::new();
+        for layout in &layouts {
+            if layout.y == 0.0 {
+                top.push(layout);
+            } else {
+                bottom.push(layout);
+            }
+        }
+
+        assert_eq!(top.len(), 1);
+        assert_eq!(bottom.len(), 2);
+
+        let top = top[0];
+        assert_eq!(top.width, 90.0);
+        assert_eq!(top.height, 15.0);
+
+        bottom.sort_by(|a, b| a.x.partial_cmp(&b.x).unwrap());
+        assert_eq!(bottom[0].y, 16.0);
+        assert_eq!(bottom[1].y, 16.0);
+        assert_eq!(bottom[0].width, 45.0);
+        assert_eq!(bottom[1].width, 44.0);
+        assert_eq!(bottom[0].height, 14.0);
+        assert_eq!(bottom[1].height, 14.0);
     }
 
     #[test]
