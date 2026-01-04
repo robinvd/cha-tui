@@ -36,6 +36,8 @@ pub enum Action {
     NextSession,
     PrevSession,
     ToggleTerminalLock,
+    StripScrollLeft,
+    StripScrollRight,
 }
 
 /// Normalized representation of a key chord.
@@ -458,6 +460,20 @@ pub static DEFAULT_BINDINGS: &[Binding] = &[
         action: Action::ToggleTerminalLock,
         description: "lock terminal",
         show_in_status: true,
+    },
+    Binding {
+        scope: Scope::Terminal,
+        chord: KeyChord::ctrl(KeyCode::Left),
+        action: Action::StripScrollLeft,
+        description: "scroll left",
+        show_in_status: false,
+    },
+    Binding {
+        scope: Scope::Terminal,
+        chord: KeyChord::ctrl(KeyCode::Right),
+        action: Action::StripScrollRight,
+        description: "scroll right",
+        show_in_status: false,
     },
     // Terminal locked scope
     Binding {

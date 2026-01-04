@@ -20,13 +20,15 @@ use std::io::{self};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use taffy::Dimension;
+use taffy::{Dimension, FlexWrap};
+
+const STRIP_TILE_FRACTION: f32 = 0.8;
 
 use chatui::event::{Event, Key, KeyCode};
 use chatui::{
-    InputMsg, InputState, Node, Program, ScrollMsg, ScrollState, TerminalMsg, TerminalNotification,
-    Transition, TreeMsg, TreeState, block_with_title, column, default_terminal_keybindings, row,
-    terminal, text,
+    InputMsg, InputState, Node, Program, ScrollAxis, ScrollMsg, ScrollState, ScrollTarget,
+    TerminalMsg, TerminalNotification, Transition, TreeMsg, TreeState, block_with_title, column,
+    default_terminal_keybindings, row, scrollable_content, terminal, text,
 };
 use facet::Facet;
 use facet_args as args;
@@ -409,6 +411,7 @@ struct Model {
     keymap: Keymap,
     remote_socket: Option<PathBuf>,
     remote_receiver: Option<Receiver<RemoteEnvelope>>,
+    strip_scroll: ScrollState,
 }
 
 #[derive(Default)]
@@ -444,6 +447,7 @@ impl Model {
             keymap: Keymap::default(),
             remote_socket,
             remote_receiver: None,
+            strip_scroll: ScrollState::horizontal(),
         };
 
         let persisted = match model.io.load_projects() {
@@ -844,11 +848,17 @@ impl Model {
         self.tree
             .select(TreeId::Session(key.project, key.worktree, key.session));
 
+        if self.active_layout() == Layout::Strip {
+            self.strip_scroll.ensure_visible(
+                "terminal-strip",
+                ScrollTarget::with_mixin("terminal", key.session.0),
+            );
+        }
+
         if cleared_bell || cleared_unread {
             rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
         }
     }
-
     fn set_focus(&mut self, focus: Focus) {
         self.focus = focus;
     }
@@ -870,6 +880,13 @@ impl Model {
                 worktree,
                 session: sid,
             });
+
+            if self.active_layout() == Layout::Strip {
+                self.strip_scroll.ensure_visible(
+                    "terminal-strip",
+                    ScrollTarget::with_mixin("terminal", sid.0),
+                );
+            }
 
             if cleared_bell || cleared_unread {
                 rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
@@ -1026,6 +1043,7 @@ enum Msg {
         worktree: Option<WorktreeId>,
         ok: bool,
     },
+    StripScroll(ScrollMsg),
 }
 
 fn arm_wakeup(tree_id: TreeId, receiver: Receiver<()>) -> Transition<Msg> {
@@ -1258,6 +1276,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             }
         },
         Msg::TreeScroll(scroll_msg) => model.tree_scroll.update(scroll_msg),
+        Msg::StripScroll(scroll_msg) => model.strip_scroll.update(scroll_msg),
         Msg::Terminal {
             project,
             worktree,
@@ -2596,6 +2615,24 @@ fn handle_action(
             model.set_focus(new_focus);
             Transition::Continue
         }
+        Action::StripScrollLeft => {
+            if model.active_layout() == Layout::Strip {
+                model.strip_scroll.update(ScrollMsg::AxisDeltaPercent {
+                    axis: ScrollAxis::Horizontal,
+                    ratio: -0.5,
+                });
+            }
+            Transition::Continue
+        }
+        Action::StripScrollRight => {
+            if model.active_layout() == Layout::Strip {
+                model.strip_scroll.update(ScrollMsg::AxisDeltaPercent {
+                    axis: ScrollAxis::Horizontal,
+                    ratio: 0.5,
+                });
+            }
+            Transition::Continue
+        }
     }
 }
 
@@ -2783,6 +2820,7 @@ fn terminal_pane(model: &Model) -> Node<Msg> {
         Layout::Zoom => terminal_pane_zoom(model),
         Layout::Tall => terminal_pane_tall(model),
         Layout::Wide => terminal_pane_wide(model),
+        Layout::Strip => terminal_pane_strip(model),
     }
 }
 
@@ -2920,6 +2958,64 @@ fn terminal_pane_wide(model: &Model) -> Node<Msg> {
         horizontal_divider(divider_style),
         bottom,
     ])
+    .with_flex_grow(1.0)
+}
+
+fn terminal_pane_strip(model: &Model) -> Node<Msg> {
+    let Some((project_id, worktree, active_session, sessions)) = model.active_container_sessions()
+    else {
+        return terminal_pane_placeholder(model);
+    };
+
+    let mut iter = sessions.iter();
+    let Some(first) = iter.next() else {
+        return terminal_pane_placeholder(model);
+    };
+
+    let tile_width = Dimension::percent(STRIP_TILE_FRACTION);
+
+    let terminal_node = |session: &Session| {
+        let sid = session.id;
+        let is_active = sid == active_session;
+        let is_focused = model.focus.is_terminal() && is_active;
+        terminal("terminal", &session.terminal, is_focused, move |msg| {
+            Msg::Terminal {
+                project: project_id,
+                worktree,
+                session: sid,
+                msg,
+            }
+        })
+        .with_id_mixin("terminal", sid.0)
+        .with_width(tile_width)
+        .with_flex_grow(0.0)
+        .with_flex_shrink(0.0)
+        .with_style(section_style(is_focused))
+    };
+
+    let divider_style = divider_style(model);
+    let mut children = Vec::new();
+    children.push(terminal_node(first));
+    for session in iter {
+        children.push(
+            vertical_divider(divider_style)
+                .with_flex_grow(0.0)
+                .with_flex_shrink(0.0),
+        );
+        children.push(terminal_node(session));
+    }
+
+    let content = row(children)
+        .with_flex_grow(1.0)
+        .with_flex_wrap(FlexWrap::NoWrap);
+
+    scrollable_content(
+        "terminal-strip",
+        &model.strip_scroll,
+        3,
+        Msg::StripScroll,
+        content,
+    )
     .with_flex_grow(1.0)
 }
 
@@ -3261,11 +3357,13 @@ fn main() -> Result<(), miette::Report> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::divider::{Divider, DividerOrientation};
     use chatui::buffer::DoubleBuffer;
     use chatui::dom::rounding::round_layout;
     use chatui::event::{KeyCode, Size};
     use chatui::palette::Palette;
     use chatui::render::Renderer;
+    use chatui::test_utils::render_node_to_lines;
     use taffy::compute_root_layout;
 
     fn test_model() -> Option<Model> {
@@ -4262,5 +4360,109 @@ mod tests {
         }
         expected.push(bottom);
         assert_eq!(lines, expected,);
+    }
+
+    #[test]
+    fn strip_layout_renders_correctly() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        let _project_id = activate_first_project(&mut model);
+
+        // Switch to strip layout
+        model.toggle_active_layout(); // Tall -> Wide
+        model.toggle_active_layout(); // Wide -> Strip
+        assert_eq!(model.active_layout(), Layout::Strip);
+
+        // Add multiple sessions to test strip layout
+        update(&mut model, Msg::NewSession);
+        update(&mut model, Msg::NewSession);
+        update(&mut model, Msg::NewSession);
+
+        // Create a test view
+        let mut node = terminal_pane(&model);
+
+        // Layout with a reasonable size
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: taffy::AvailableSpace::Definite(100.0),
+                height: taffy::AvailableSpace::Definite(24.0),
+            },
+        );
+        round_layout(&mut node);
+
+        // Render to check for visual issues (content may be empty in test environment)
+        let _lines = render_node_to_lines(&mut node, 100, 24).expect("render should succeed");
+
+        // Check that the node has reasonable dimensions
+        let layout = node.layout_state().layout;
+        assert!(layout.size.width > 0.0, "Strip should have positive width");
+        assert!(
+            layout.size.height > 0.0,
+            "Strip should have positive height"
+        );
+
+        // Check that terminals are properly sized and positioned
+        let terminal_layouts = collect_terminal_layouts_strip(&node);
+        assert!(
+            !terminal_layouts.is_empty(),
+            "Should have terminal layouts in strip layout"
+        );
+
+        // All terminals should have positive dimensions
+        for layout in &terminal_layouts {
+            assert!(layout.width > 0.0, "Terminal should have positive width");
+            assert!(layout.height > 0.0, "Terminal should have positive height");
+        }
+
+        // In strip layout, terminals should be arranged horizontally
+        // Check that they have reasonable positioning
+        if terminal_layouts.len() > 1 {
+            for i in 1..terminal_layouts.len() {
+                let prev = &terminal_layouts[i - 1];
+                let curr = &terminal_layouts[i];
+                // Terminals should be positioned at different x coordinates
+                assert!(
+                    curr.x > prev.x,
+                    "Terminals should be arranged horizontally in strip layout"
+                );
+            }
+        }
+    }
+
+    /// Helper to collect terminal layouts from the strip view
+    fn collect_terminal_layouts_strip(node: &Node<Msg>) -> Vec<TerminalLayout> {
+        let mut layouts = Vec::new();
+        collect_terminal_layouts_recursive_strip(node, (0.0, 0.0), &mut layouts);
+        layouts
+    }
+
+    fn collect_terminal_layouts_recursive_strip(
+        node: &Node<Msg>,
+        origin: (f32, f32),
+        layouts: &mut Vec<TerminalLayout>,
+    ) {
+        let layout = node.layout_state().layout;
+        let x = origin.0 + layout.location.x;
+        let y = origin.1 + layout.location.y;
+
+        if let Some(renderable) = node.as_renderable() {
+            if renderable.debug_label() == "terminal" {
+                layouts.push(TerminalLayout {
+                    width: layout.size.width,
+                    height: layout.size.height,
+                    x,
+                    y,
+                });
+            }
+        }
+        if let Some(element) = node.as_element() {
+            let new_origin = (origin.0 + layout.location.x, origin.1 + layout.location.y);
+            for child in &element.children {
+                collect_terminal_layouts_recursive_strip(child, new_origin, layouts);
+            }
+        }
     }
 }

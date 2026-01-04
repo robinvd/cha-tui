@@ -9,6 +9,7 @@ pub enum Layout {
     Zoom,
     Tall,
     Wide,
+    Strip,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,7 +24,8 @@ impl Layout {
         match self {
             Layout::Zoom => Layout::Tall,
             Layout::Tall => Layout::Wide,
-            Layout::Wide => Layout::Zoom,
+            Layout::Wide => Layout::Strip,
+            Layout::Strip => Layout::Zoom,
         }
     }
 
@@ -32,6 +34,7 @@ impl Layout {
             Layout::Zoom => "zoom",
             Layout::Tall => "tall",
             Layout::Wide => "wide",
+            Layout::Strip => "strip",
         }
     }
 }
