@@ -308,18 +308,18 @@ impl Drop for RemoteServer {
     }
 }
 
-pub fn run_remote(args: RemoteClientArgs) -> color_eyre::Result<()> {
+pub fn run_remote(args: RemoteClientArgs) -> miette::Result<()> {
     let socket = resolve_socket(&args)?;
     let format = select_output_format(io::stdout().is_terminal(), args.json, args.text)
-        .map_err(|err| color_eyre::eyre::eyre!(err))?;
-    validate_action(&args.action).map_err(|err| color_eyre::eyre::eyre!(err))?;
+        .map_err(|err| miette::miette!(err))?;
+    validate_action(&args.action).map_err(|err| miette::miette!(err))?;
     let params = params_from_args(&args)?;
     let request = RemoteRequest {
         version: REMOTE_PROTOCOL_VERSION,
         action: args.action,
         params,
     };
-    let payload = facet_json::to_string(&request).map_err(|err| color_eyre::eyre::eyre!(err))?;
+    let payload = facet_json::to_string(&request).map_err(|err| miette::miette!(err))?;
     let response = send_request(&socket, &payload)?;
 
     match format {
@@ -331,7 +331,7 @@ pub fn run_remote(args: RemoteClientArgs) -> color_eyre::Result<()> {
                 Ok(parsed) => parsed,
                 Err(err) => {
                     let snippet = response_snippet(&response);
-                    return Err(color_eyre::eyre::eyre!(
+                    return Err(miette::miette!(
                         "Failed to parse response: {err}\nRaw response (truncated): {snippet}"
                     ));
                 }
@@ -480,19 +480,19 @@ fn socket_path() -> io::Result<PathBuf> {
         .join(format!("term-{}.sock", std::process::id())))
 }
 
-fn resolve_socket(args: &RemoteClientArgs) -> color_eyre::Result<PathBuf> {
+fn resolve_socket(args: &RemoteClientArgs) -> miette::Result<PathBuf> {
     if let Some(socket) = &args.socket {
         return Ok(PathBuf::from(socket));
     }
     if let Some(socket) = std::env::var_os(ENV_REMOTE_SOCKET) {
         return Ok(PathBuf::from(socket));
     }
-    Err(color_eyre::eyre::eyre!(
+    Err(miette::miette!(
         "TERM_REMOTE_SOCKET is not set and no --socket provided"
     ))
 }
 
-fn params_from_args(args: &RemoteClientArgs) -> color_eyre::Result<RemoteParams> {
+fn params_from_args(args: &RemoteClientArgs) -> miette::Result<RemoteParams> {
     let mut params = RemoteParams::default();
     let explicit_project = args.project.is_some();
     let explicit_worktree = args.worktree.is_some();
@@ -534,12 +534,12 @@ fn params_from_args(args: &RemoteClientArgs) -> color_eyre::Result<RemoteParams>
         params.input = Some(input.clone());
     }
     if let Some(bytes) = &args.bytes {
-        params.bytes = Some(parse_bytes_list(bytes).map_err(|err| color_eyre::eyre::eyre!(err))?);
+        params.bytes = Some(parse_bytes_list(bytes).map_err(|err| miette::miette!(err))?);
     }
     if !args.query.is_empty() {
         params.query = Some(
             parse_session_query(&args.query)
-                .map_err(|err| color_eyre::eyre::eyre!("Invalid session query: {err}"))?,
+                .map_err(|err| miette::miette!("Invalid session query: {err}"))?,
         );
     }
 
@@ -579,22 +579,28 @@ fn env_id(var: &str) -> Option<u64> {
     value.parse::<u64>().ok()
 }
 
-fn send_request(socket: &PathBuf, payload: &str) -> color_eyre::Result<String> {
-    let mut stream = UnixStream::connect(socket)?;
-    stream.write_all(payload.as_bytes())?;
-    stream.shutdown(std::net::Shutdown::Write)?;
+fn send_request(socket: &PathBuf, payload: &str) -> miette::Result<String> {
+    let mut stream = UnixStream::connect(socket).map_err(|err| miette::miette!(err))?;
+    stream
+        .write_all(payload.as_bytes())
+        .map_err(|err| miette::miette!(err))?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|err| miette::miette!(err))?;
     let mut response = String::new();
-    stream.read_to_string(&mut response)?;
+    stream
+        .read_to_string(&mut response)
+        .map_err(|err| miette::miette!(err))?;
     Ok(response)
 }
 
-fn print_response_text(response: &RemoteResponse) -> color_eyre::Result<()> {
+fn print_response_text(response: &RemoteResponse) -> miette::Result<()> {
     if !response.ok {
         let message = response
             .error
             .clone()
             .unwrap_or_else(|| "remote request failed".to_string());
-        return Err(color_eyre::eyre::eyre!(message));
+        return Err(miette::miette!(message));
     }
 
     match response.result.as_ref() {

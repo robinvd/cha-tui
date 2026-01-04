@@ -8,6 +8,7 @@ use super::session::{Session, SessionId};
 pub enum Layout {
     Zoom,
     Tall,
+    Wide,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -21,7 +22,8 @@ impl Layout {
     pub fn toggle(self) -> Self {
         match self {
             Layout::Zoom => Layout::Tall,
-            Layout::Tall => Layout::Zoom,
+            Layout::Tall => Layout::Wide,
+            Layout::Wide => Layout::Zoom,
         }
     }
 
@@ -29,6 +31,7 @@ impl Layout {
         match self {
             Layout::Zoom => "zoom",
             Layout::Tall => "tall",
+            Layout::Wide => "wide",
         }
     }
 }

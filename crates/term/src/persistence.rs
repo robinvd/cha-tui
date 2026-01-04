@@ -1,20 +1,20 @@
 //! Persistence layer for saving and loading project configuration.
 
-use serde::{Deserialize, Serialize};
+use facet::Facet;
 use std::path::PathBuf;
 use std::{fs, io};
 
 use super::project::Project;
 
 /// Serializable representation of a project for persistence.
-#[derive(Serialize, Deserialize)]
+#[derive(Facet)]
 pub struct PersistedProject {
     pub name: String,
     pub path: PathBuf,
 }
 
 /// Root structure for the persisted state file.
-#[derive(Serialize, Deserialize, Default)]
+#[derive(Default, Facet)]
 pub struct PersistedState {
     pub projects: Vec<PersistedProject>,
 }
@@ -42,7 +42,7 @@ pub fn load_projects() -> io::Result<Vec<PersistedProject>> {
     }
 
     let data = fs::read_to_string(&path)?;
-    let state: PersistedState = serde_json::from_str(&data)
+    let state: PersistedState = facet_json::from_str(&data)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     Ok(state.projects)
 }
@@ -64,7 +64,7 @@ pub fn save_projects(projects: &[Project]) -> io::Result<()> {
     let state = PersistedState {
         projects: persisted_projects,
     };
-    let data = serde_json::to_string_pretty(&state).map_err(io::Error::other)?;
+    let data = facet_json::to_string(&state).map_err(io::Error::other)?;
     fs::write(path, data)?;
     Ok(())
 }

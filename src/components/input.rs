@@ -1,8 +1,8 @@
 use ropey::Rope;
 use smallvec::{SmallVec, smallvec};
+use std::collections::BTreeMap;
 use std::ops::Range;
 use unicode_width::UnicodeWidthChar;
-use zed_sum_tree::TreeMap;
 
 use crate::Style;
 use crate::buffer::{CellAttributes, CursorShape};
@@ -459,6 +459,10 @@ struct GutterMetrics {
     digits: usize,
 }
 
+fn map_from_entries<K: Ord, V>(entries: Vec<(K, V)>) -> BTreeMap<K, V> {
+    entries.into_iter().collect()
+}
+
 impl GutterMetrics {
     fn none() -> Self {
         Self {
@@ -506,7 +510,7 @@ impl GutterState {
 /// Highlight layers keyed by [`HighlightLayerId`].
 #[derive(Clone, Debug, Default)]
 struct HighlightStore {
-    layers: TreeMap<HighlightLayerId, HighlightLayer>,
+    layers: BTreeMap<HighlightLayerId, HighlightLayer>,
     layer_order: Vec<HighlightLayerId>,
 }
 
@@ -644,7 +648,7 @@ impl HighlightStore {
 
     fn sync_layer_order(&mut self) {
         self.layer_order
-            .retain(|layer_id| self.layers.get(layer_id).is_some());
+            .retain(|layer_id| self.layers.contains_key(layer_id));
 
         for (id, _) in self.layers.iter() {
             if !self.layer_order.contains(id) {
@@ -677,7 +681,7 @@ impl HighlightStore {
                 retained.push((*id, layer));
             }
         }
-        self.layers = TreeMap::from_ordered_entries(retained);
+        self.layers = map_from_entries(retained);
         self.sync_layer_order();
     }
 
@@ -720,7 +724,7 @@ impl HighlightStore {
             }
             updated.push((*id, layer));
         }
-        self.layers = TreeMap::from_ordered_entries(updated);
+        self.layers = map_from_entries(updated);
     }
 }
 
@@ -878,7 +882,7 @@ impl<'a> LayerCursor<'a> {
 /// Storage for inline hints (LSP-style inlay text).
 #[derive(Clone, Debug, Default)]
 struct InlineHintStore {
-    hints: TreeMap<InlineHintId, InlineHint>,
+    hints: BTreeMap<InlineHintId, InlineHint>,
 }
 
 /// Immutable inline hint injected by tooling.
@@ -1112,8 +1116,7 @@ impl InlineHintStore {
 
         let mut prepared: Vec<PreparedInlineHint> = self
             .hints
-            .iter()
-            .map(|(_, hint)| hint)
+            .values()
             .filter(|hint| matches!(hint.placement, InlineHintPlacement::Inline))
             .filter_map(|hint| {
                 let anchor = hint.range.start.min(len_chars);
@@ -1153,7 +1156,7 @@ impl InlineHintStore {
             hint.range.end = new_start.max(new_end);
             updated.push((*id, hint));
         }
-        self.hints = TreeMap::from_ordered_entries(updated);
+        self.hints = map_from_entries(updated);
     }
 
     fn prepare_hint(hint: &InlineHint, rope: &Rope, len_chars: usize) -> PreparedInlineHint {
