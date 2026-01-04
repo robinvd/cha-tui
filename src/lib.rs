@@ -32,7 +32,9 @@ pub use components::input::{
     default_keybindings as default_input_keybindings, input,
 };
 pub use components::paragraph::{Paragraph, paragraph, rich_paragraph};
-pub use components::scroll::{ScrollMsg, ScrollState, scrollable_content};
+pub use components::scroll::{
+    ScrollAxis, ScrollMsg, ScrollState, ScrollTarget, scrollable_content,
+};
 pub use components::terminal::{
     TermMode, TerminalMsg, TerminalNotification, TerminalState, default_terminal_keybindings,
     encode_mouse_event, key_to_input, terminal,

@@ -9,6 +9,17 @@ use unicode_width::UnicodeWidthChar;
 
 use taffy::Layout as TaffyLayout;
 
+/// Scroll state passed through the render tree
+#[derive(Clone, Copy, Default)]
+struct ScrollState {
+    /// Vertical scroll offset for content
+    scroll_y: f32,
+    /// Horizontal scroll offset for content
+    scroll_x: f32,
+    /// Horizontal scroll offset for position adjustment (0 if not in scroll context)
+    scroll_x_for_position: f32,
+}
+
 fn color_to_rgba(palette: &Palette, color: Color) -> Rgba {
     match color {
         Color::Reset => palette.foreground,
@@ -179,7 +190,13 @@ impl<'a> Renderer<'a> {
             width,
             height,
         };
-        self.render_node(root, Point { x: 0, y: 0 }, clip, 0.0, 0.0, false);
+        self.render_node(
+            root,
+            Point { x: 0, y: 0 },
+            clip,
+            ScrollState::default(),
+            false,
+        );
 
         Ok(())
     }
@@ -189,18 +206,19 @@ impl<'a> Renderer<'a> {
         node: &Node<Msg>,
         parent_origin: Point,
         clip: Rect,
-        inherited_scroll_y: f32,
-        inherited_scroll_x: f32,
+        scroll: ScrollState,
         clear: bool,
     ) {
         let layout = node.layout_state.layout;
         let is_scroll_y = node.layout_state.style.overflow.y == taffy::Overflow::Scroll;
         let is_scroll_x = node.layout_state.style.overflow.x == taffy::Overflow::Scroll;
-        let child_scroll_y = (inherited_scroll_y - layout.location.y).max(0.0);
-        let child_scroll_x = inherited_scroll_x.max(0.0);
+        let child_scroll_y = (scroll.scroll_y - layout.location.y).max(0.0);
+        let child_scroll_x = scroll.scroll_x.max(0.0);
+        // Use scroll_x_for_position to adjust screen position
+        let adjusted_x = (layout.location.x - scroll.scroll_x_for_position).max(0.0);
         let node_origin = Point {
-            x: parent_origin.x + layout.location.x as usize,
-            y: parent_origin.y + (layout.location.y - inherited_scroll_y).max(0.0) as usize,
+            x: parent_origin.x + adjusted_x as usize,
+            y: parent_origin.y + (layout.location.y - scroll.scroll_y).max(0.0) as usize,
         };
 
         let Some(mut area) = rect_from_layout(&layout, node_origin) else {
@@ -243,7 +261,7 @@ impl<'a> Renderer<'a> {
                         None
                     };
                 self.apply_overlay_style(area, &element.attrs.style);
-                let next_scroll = if is_scroll_y {
+                let next_scroll_y = if is_scroll_y {
                     child_scroll_y + node.scroll_y
                 } else {
                     child_scroll_y
@@ -253,7 +271,12 @@ impl<'a> Renderer<'a> {
                 } else {
                     child_scroll_x
                 };
-                self.render_element(element, node_origin, area, next_scroll, next_scroll_x);
+                let child_scroll = ScrollState {
+                    scroll_y: next_scroll_y,
+                    scroll_x: next_scroll_x,
+                    scroll_x_for_position: 0.0, // Will be set by render_children if needed
+                };
+                self.render_element(element, node_origin, area, child_scroll, is_scroll_x);
                 if is_scroll_y {
                     self.render_scrollbar(node_origin, area, &layout, node.scroll_y, border_style);
                 }
@@ -360,21 +383,19 @@ impl<'a> Renderer<'a> {
         element: &ElementNode<Msg>,
         parent_origin: Point,
         clip: Rect,
-        scroll_y: f32,
-        scroll_x: f32,
+        scroll: ScrollState,
+        adjust_child_scroll_by_position: bool,
     ) {
         match element.kind {
-            ElementKind::Block => {
-                self.render_block(element, parent_origin, clip, scroll_y, scroll_x)
-            }
-            ElementKind::Modal => self.render_modal(element, parent_origin, clip, scroll_y),
+            ElementKind::Block => self.render_block(element, parent_origin, clip, scroll),
+            ElementKind::Modal => self.render_modal(element, parent_origin, clip, scroll.scroll_y),
             ElementKind::Column | ElementKind::Row | ElementKind::Table => self.render_children(
                 &element.children,
                 parent_origin,
                 clip,
-                scroll_y,
-                scroll_x,
+                scroll,
                 false,
+                adjust_child_scroll_by_position,
             ),
         }
     }
@@ -384,12 +405,29 @@ impl<'a> Renderer<'a> {
         children: &[Node<Msg>],
         parent_origin: Point,
         clip: Rect,
-        scroll_y: f32,
-        scroll_x: f32,
+        scroll: ScrollState,
         clear: bool,
+        adjust_scroll_by_position: bool,
     ) {
         for child in children {
-            self.render_node(child, parent_origin, clip, scroll_y, scroll_x, clear);
+            let child_scroll = if adjust_scroll_by_position {
+                let child_x = child.layout_state.layout.location.x;
+                ScrollState {
+                    scroll_y: scroll.scroll_y,
+                    // Content scroll: reduced by child's position
+                    scroll_x: (scroll.scroll_x - child_x).max(0.0),
+                    // Position scroll: full scroll, used to shift child's screen position
+                    scroll_x_for_position: scroll.scroll_x,
+                }
+            } else {
+                // No adjustment: pass scroll as-is, no position adjustment
+                ScrollState {
+                    scroll_y: scroll.scroll_y,
+                    scroll_x: scroll.scroll_x,
+                    scroll_x_for_position: 0.0,
+                }
+            };
+            self.render_node(child, parent_origin, clip, child_scroll, clear);
         }
     }
 
@@ -589,7 +627,12 @@ impl<'a> Renderer<'a> {
         scroll_y: f32,
     ) {
         self.apply_overlay_style(clip, &element.attrs.style);
-        self.render_children(&element.children, parent_origin, clip, scroll_y, 0.0, true);
+        let scroll = ScrollState {
+            scroll_y,
+            scroll_x: 0.0,
+            scroll_x_for_position: 0.0,
+        };
+        self.render_children(&element.children, parent_origin, clip, scroll, true, false);
     }
 
     fn render_block<Msg>(
@@ -597,8 +640,7 @@ impl<'a> Renderer<'a> {
         element: &ElementNode<Msg>,
         parent_origin: Point,
         clip: Rect,
-        scroll_y: f32,
-        scroll_x: f32,
+        scroll: ScrollState,
     ) {
         self.draw_border(clip, &element.attrs.style);
         if let Some(title) = &element.title {
@@ -621,9 +663,9 @@ impl<'a> Renderer<'a> {
             &element.children,
             child_origin,
             child_area,
-            scroll_y,
-            scroll_x,
+            scroll,
             false,
+            false, // Don't adjust scroll by position for block children
         );
     }
 

@@ -1615,7 +1615,7 @@ impl Renderable for TerminalRenderable {
         let width = known_dimensions
             .width
             .unwrap_or(match available_space.width {
-                taffy::AvailableSpace::Definite(w) => w,
+                taffy::AvailableSpace::Definite(_) => self.cols as f32,
                 taffy::AvailableSpace::MinContent => 1.,
                 taffy::AvailableSpace::MaxContent => 100.,
             });
@@ -1623,7 +1623,7 @@ impl Renderable for TerminalRenderable {
         let height = known_dimensions
             .height
             .unwrap_or(match available_space.height {
-                taffy::AvailableSpace::Definite(h) => h,
+                taffy::AvailableSpace::Definite(_) => self.rows as f32,
                 taffy::AvailableSpace::MinContent => 1.,
                 taffy::AvailableSpace::MaxContent => 100.,
             });
@@ -1680,6 +1680,8 @@ impl Renderable for TerminalRenderable {
         default_attrs.set_foreground(default_fg);
         default_attrs.set_background(default_bg);
 
+        // Get horizontal scroll offset (already adjusted for node position by render context)
+        let scroll_x = ctx.scroll_x().max(0.0).round() as usize;
         // Clear the area with default background
         for row in 0..area.height {
             for col in 0..area.width {
@@ -1699,7 +1701,15 @@ impl Renderable for TerminalRenderable {
             if screen_y < 0 || screen_y >= area.height as i32 {
                 continue;
             }
-            if x >= area.width {
+
+            // Skip cells before horizontal scroll offset
+            if x < scroll_x {
+                continue;
+            }
+
+            // Calculate rendered x position (account for horizontal scroll)
+            let rendered_x = x - scroll_x;
+            if rendered_x >= area.width {
                 continue;
             }
 
@@ -1709,7 +1719,7 @@ impl Renderable for TerminalRenderable {
             ) {
                 if let Some(cell) = ctx
                     .buffer()
-                    .get_cell_mut(area.x + x, area.y + screen_y as usize)
+                    .get_cell_mut(area.x + rendered_x, area.y + screen_y as usize)
                 {
                     cell.zero_width = true;
                 }
@@ -1744,7 +1754,7 @@ impl Renderable for TerminalRenderable {
             }
 
             let ch = cell.c;
-            ctx.write_char(area.x + x, area.y + screen_y as usize, ch, &attrs);
+            ctx.write_char(area.x + rendered_x, area.y + screen_y as usize, ch, &attrs);
         }
 
         // Render cursor only if focused
@@ -1753,18 +1763,22 @@ impl Renderable for TerminalRenderable {
             // Convert cursor line to screen coordinate
             let cursor_screen_y = cursor.point.line.0 + display_offset;
 
+            // Check if cursor is within horizontal scroll viewport
+            let cursor_rendered_x = cursor_x.saturating_sub(scroll_x);
+
             if cursor_screen_y >= 0
                 && cursor_screen_y < area.height as i32
-                && cursor_x < area.width
+                && cursor_x >= scroll_x
+                && cursor_rendered_x < area.width
                 && cursor.shape != AlacCursorShape::Hidden
             {
                 tracing::info!(
                     "cursor {}:{}",
-                    area.x + cursor_x,
+                    area.x + cursor_rendered_x,
                     area.y + cursor_screen_y as usize
                 );
                 ctx.set_cursor(
-                    area.x + cursor_x,
+                    area.x + cursor_rendered_x,
                     area.y + cursor_screen_y as usize,
                     Self::convert_cursor_shape(cursor.shape),
                 );
@@ -2605,5 +2619,300 @@ mod tests {
         let key = Key::new(KeyCode::CapsLock);
         let input = legacy_key_input(key);
         assert_eq!(input, None);
+    }
+
+    #[test]
+    fn terminal_in_horizontal_scroll() {
+        use crate::components::scroll;
+        use crate::dom::rounding::round_layout;
+        use crate::test_utils::render_node_to_string;
+        use crate::{ScrollMsg, ScrollState, Size};
+        use std::time::Duration;
+        use taffy::{AvailableSpace, compute_root_layout};
+
+        // Create a terminal with wide content (numbers 1-9 repeated to reach 120 chars)
+        let state = TerminalState::spawn(
+            "sh",
+            &[
+                "-c",
+                "python3 -c \"print(''.join(str((i % 9) + 1) for i in range(120)))\"",
+            ],
+        )
+        .expect("failed to spawn terminal");
+
+        // Wait for the output to be processed
+        let receiver = state.wakeup_receiver();
+        let _ = smol::block_on(async {
+            smol::future::or(
+                async {
+                    receiver.recv().await.ok();
+                    true
+                },
+                async {
+                    smol::Timer::after(Duration::from_secs(2)).await;
+                    false
+                },
+            )
+            .await
+        });
+
+        // Wrap terminal in a horizontal scrollable
+        let mut scroll_state = ScrollState::horizontal();
+        scroll_state.update(ScrollMsg::Resize {
+            viewport: Size {
+                width: 20, // Narrow viewport
+                height: 10,
+            },
+            content: Size {
+                width: 100, // Wide content
+                height: 10,
+            },
+        });
+
+        // Test with no horizontal scroll offset - should show "12345678912345678912"
+        {
+            scroll_state.update(ScrollMsg::AxisJumpTo {
+                axis: scroll::ScrollAxis::Horizontal,
+                offset: 0.0,
+            });
+
+            let term_node = terminal::<()>("term", &state, false, |_| ());
+            let mut node =
+                scroll::scrollable_content("scroll-container", &scroll_state, 3, |_| (), term_node);
+
+            compute_root_layout(
+                &mut node,
+                u64::MAX.into(),
+                taffy::Size {
+                    width: AvailableSpace::Definite(20.0),
+                    height: AvailableSpace::Definite(10.0),
+                },
+            );
+            round_layout(&mut node);
+
+            let rendered = render_node_to_string(&mut node, 20, 10).expect("render should succeed");
+
+            // First line should show first 20 characters
+            let first_line = rendered.lines().next().unwrap_or("");
+            let expected = "12345678912345678912";
+            assert_eq!(
+                first_line, expected,
+                "At scroll offset 0, should show first 20 chars. Got:\n{rendered}"
+            );
+        }
+
+        // Test with horizontal scroll offset 50 - should show characters 50-69
+        {
+            scroll_state.update(ScrollMsg::AxisJumpTo {
+                axis: scroll::ScrollAxis::Horizontal,
+                offset: 50.0,
+            });
+
+            let term_node = terminal::<()>("term", &state, false, |_| ());
+            let mut node =
+                scroll::scrollable_content("scroll-container", &scroll_state, 3, |_| (), term_node);
+
+            compute_root_layout(
+                &mut node,
+                u64::MAX.into(),
+                taffy::Size {
+                    width: AvailableSpace::Definite(20.0),
+                    height: AvailableSpace::Definite(10.0),
+                },
+            );
+            round_layout(&mut node);
+
+            let rendered = render_node_to_string(&mut node, 20, 10).expect("render should succeed");
+
+            // At offset 50, position 50 is '7' (50 % 9 = 5, 5+1 = 6... wait, let me recalculate)
+            // Position 50: (50 % 9) + 1 = (5) + 1 = 6
+            // Positions 50-69: 6 7 8 9 1 2 3 4 5 6 7 8 9 1 2 3 4 5 6 7
+            let first_line = rendered.lines().next().unwrap_or("");
+            let expected = "67891234567891234567";
+            assert_eq!(
+                first_line, expected,
+                "At scroll offset 50, should show characters 50-69. Got:\n{rendered}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_terminals_in_horizontal_scroll() {
+        use crate::components::scroll;
+        use crate::dom::rounding::round_layout;
+        use crate::dom::row;
+        use crate::test_utils::render_node_to_string;
+        use crate::{ScrollMsg, ScrollState, Size};
+        use std::time::Duration;
+        use taffy::{AvailableSpace, Dimension, compute_root_layout};
+
+        // Create two terminals with distinct content
+        let state1 = TerminalState::spawn("sh", &["-c", "python3 -c \"print('A' * 40)\""])
+            .expect("failed to spawn terminal 1");
+
+        let state2 = TerminalState::spawn("sh", &["-c", "python3 -c \"print('B' * 40)\""])
+            .expect("failed to spawn terminal 2");
+
+        // Wait for output
+        for state in [&state1, &state2] {
+            let receiver = state.wakeup_receiver();
+            let _ = smol::block_on(async {
+                smol::future::or(
+                    async {
+                        receiver.recv().await.ok();
+                        true
+                    },
+                    async {
+                        smol::Timer::after(Duration::from_secs(2)).await;
+                        false
+                    },
+                )
+                .await
+            });
+        }
+
+        // Create a horizontal scroll container with two terminals side-by-side
+        // Each terminal is 30 cols wide, but viewport is only 20 cols
+        let mut scroll_state = ScrollState::horizontal();
+        scroll_state.update(ScrollMsg::Resize {
+            viewport: Size {
+                width: 20,
+                height: 5,
+            },
+            content: Size {
+                width: 60, // Two terminals of 30 each
+                height: 5,
+            },
+        });
+
+        // At scroll offset 0, we should see the first terminal (A's)
+        {
+            scroll_state.update(ScrollMsg::AxisJumpTo {
+                axis: scroll::ScrollAxis::Horizontal,
+                offset: 0.0,
+            });
+
+            let term1 = terminal::<()>("term1", &state1, false, |_| ())
+                .with_width(Dimension::length(30.0))
+                .with_flex_shrink(0.0)
+                .with_flex_grow(0.0);
+            let term2 = terminal::<()>("term2", &state2, false, |_| ())
+                .with_width(Dimension::length(30.0))
+                .with_flex_shrink(0.0)
+                .with_flex_grow(0.0);
+
+            let content = row(vec![term1, term2]);
+            let mut node =
+                scroll::scrollable_content("scroll-container", &scroll_state, 3, |_| (), content);
+
+            compute_root_layout(
+                &mut node,
+                u64::MAX.into(),
+                taffy::Size {
+                    width: AvailableSpace::Definite(20.0),
+                    height: AvailableSpace::Definite(5.0),
+                },
+            );
+            round_layout(&mut node);
+
+            let rendered = render_node_to_string(&mut node, 20, 5).expect("render should succeed");
+
+            // First line should contain only A's
+            let first_line = rendered.lines().next().unwrap_or("");
+            assert!(
+                first_line.chars().all(|c| c == 'A' || c == ' '),
+                "At scroll offset 0, should only see first terminal (A's). Got:\n{rendered}"
+            );
+            assert!(
+                first_line.contains('A'),
+                "Should see at least one 'A' at offset 0. Got:\n{rendered}"
+            );
+        }
+
+        // At scroll offset 30, we should see the second terminal (B's)
+        {
+            scroll_state.update(ScrollMsg::AxisJumpTo {
+                axis: scroll::ScrollAxis::Horizontal,
+                offset: 30.0,
+            });
+
+            let term1 = terminal::<()>("term1", &state1, false, |_| ())
+                .with_width(Dimension::length(30.0))
+                .with_flex_shrink(0.0)
+                .with_flex_grow(0.0);
+            let term2 = terminal::<()>("term2", &state2, false, |_| ())
+                .with_width(Dimension::length(30.0))
+                .with_flex_shrink(0.0)
+                .with_flex_grow(0.0);
+
+            let content = row(vec![term1, term2]);
+            let mut node =
+                scroll::scrollable_content("scroll-container", &scroll_state, 3, |_| (), content);
+
+            compute_root_layout(
+                &mut node,
+                u64::MAX.into(),
+                taffy::Size {
+                    width: AvailableSpace::Definite(20.0),
+                    height: AvailableSpace::Definite(5.0),
+                },
+            );
+            round_layout(&mut node);
+
+            let rendered = render_node_to_string(&mut node, 20, 5).expect("render should succeed");
+
+            // First line should contain only B's (we've scrolled past terminal 1)
+            let first_line = rendered.lines().next().unwrap_or("");
+            assert!(
+                first_line.chars().all(|c| c == 'B' || c == ' '),
+                "At scroll offset 30, should only see second terminal (B's). Got:\n{rendered}"
+            );
+            assert!(
+                first_line.contains('B'),
+                "Should see at least one 'B' at offset 30. Got:\n{rendered}"
+            );
+        }
+
+        // At scroll offset 10, we should see partial first terminal (A's) and partial second terminal (B's)
+        {
+            scroll_state.update(ScrollMsg::AxisJumpTo {
+                axis: scroll::ScrollAxis::Horizontal,
+                offset: 10.0,
+            });
+
+            let term1 = terminal::<()>("term1", &state1, false, |_| ())
+                .with_width(Dimension::length(30.0))
+                .with_flex_shrink(0.0)
+                .with_flex_grow(0.0);
+            let term2 = terminal::<()>("term2", &state2, false, |_| ())
+                .with_width(Dimension::length(30.0))
+                .with_flex_shrink(0.0)
+                .with_flex_grow(0.0);
+
+            let content = row(vec![term1, term2]);
+            let mut node =
+                scroll::scrollable_content("scroll-container", &scroll_state, 3, |_| (), content);
+
+            compute_root_layout(
+                &mut node,
+                u64::MAX.into(),
+                taffy::Size {
+                    width: AvailableSpace::Definite(20.0),
+                    height: AvailableSpace::Definite(5.0),
+                },
+            );
+            round_layout(&mut node);
+
+            let rendered = render_node_to_string(&mut node, 20, 5).expect("render should succeed");
+
+            // First line should start with A's (from remaining of terminal 1)
+            // Viewport is 20 cols, scroll offset is 10
+            // Terminal 1 starts at 0, so we see cols 10-29 (20 cols of A's)
+            let first_line = rendered.lines().next().unwrap_or("");
+            assert!(
+                first_line.contains('A'),
+                "At scroll offset 10, should still see A's from first terminal. Got:\n{rendered}"
+            );
+        }
     }
 }
