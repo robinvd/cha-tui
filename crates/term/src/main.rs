@@ -1013,6 +1013,7 @@ impl Model {
 #[derive(Clone, Debug)]
 enum Msg {
     FocusSidebar,
+    FocusTerminal(SessionKey),
     Key(Key),
     Paste(String),
     RemoteRequest(RemoteEnvelope),
@@ -1087,6 +1088,7 @@ fn clear_status_on_input(model: &mut Model, msg: &Msg) {
             | Msg::Tree(_)
             | Msg::Modal(_)
             | Msg::FocusSidebar
+            | Msg::FocusTerminal(_)
             | Msg::OpenNewProject
             | Msg::OpenNewWorktree { .. }
             | Msg::NewSession
@@ -1149,6 +1151,38 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 ));
             }
             model.set_focus(Focus::Sidebar);
+        }
+        Msg::FocusTerminal(target) => {
+            let was_terminal = model.focus.is_terminal();
+            let previous = model.active;
+
+            if previous != Some(target) {
+                if was_terminal && let Some(active) = previous {
+                    transitions.push(update(
+                        model,
+                        Msg::Terminal {
+                            project: active.project,
+                            worktree: active.worktree,
+                            session: active.session,
+                            msg: TerminalMsg::FocusLost,
+                        },
+                    ));
+                }
+                model.select_session(target);
+            }
+
+            model.set_focus(Focus::Terminal);
+            if !was_terminal || previous != Some(target) {
+                transitions.push(update(
+                    model,
+                    Msg::Terminal {
+                        project: target.project,
+                        worktree: target.worktree,
+                        session: target.session,
+                        msg: TerminalMsg::FocusGained,
+                    },
+                ));
+            }
         }
         Msg::Paste(text) => {
             if model.modal.is_some() {
@@ -2850,6 +2884,13 @@ fn terminal_pane_zoom(model: &Model) -> Node<Msg> {
         .with_id_mixin("terminal", sid.0)
         .with_flex_grow(1.0)
         .with_style(section_style(is_focused))
+        .on_click(move || {
+            Msg::FocusTerminal(SessionKey {
+                project: pid,
+                worktree,
+                session: sid,
+            })
+        })
     } else {
         terminal_pane_placeholder(model)
     }
@@ -2887,6 +2928,13 @@ fn terminal_pane_tall(model: &Model) -> Node<Msg> {
         .with_id_mixin("terminal", sid.0)
         .with_flex_grow(1.0)
         .with_style(section_style(is_focused))
+        .on_click(move || {
+            Msg::FocusTerminal(SessionKey {
+                project: project_id,
+                worktree,
+                session: sid,
+            })
+        })
     };
 
     let left = terminal_node(first);
@@ -2937,6 +2985,13 @@ fn terminal_pane_wide(model: &Model) -> Node<Msg> {
         .with_id_mixin("terminal", sid.0)
         .with_flex_grow(1.0)
         .with_style(section_style(is_focused))
+        .on_click(move || {
+            Msg::FocusTerminal(SessionKey {
+                project: project_id,
+                worktree,
+                session: sid,
+            })
+        })
     };
 
     let top = terminal_node(first);
@@ -2991,6 +3046,13 @@ fn terminal_pane_strip(model: &Model) -> Node<Msg> {
         .with_flex_grow(0.0)
         .with_flex_shrink(0.0)
         .with_style(section_style(is_focused))
+        .on_click(move || {
+            Msg::FocusTerminal(SessionKey {
+                project: project_id,
+                worktree,
+                session: sid,
+            })
+        })
     };
 
     let divider_style = divider_style(model);
