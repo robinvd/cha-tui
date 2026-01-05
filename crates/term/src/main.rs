@@ -513,6 +513,10 @@ impl Model {
 
         if let Err(err) = self.io.save_projects(&self.projects) {
             warn!(?err, "failed to save projects");
+            self.status = Some(StatusMessage::error(format!(
+                "err saving projects: {}",
+                err
+            )));
         }
         Ok(())
     }
