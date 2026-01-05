@@ -10,8 +10,9 @@ use chatui::components::virtual_list::{
 };
 use chatui::dom::{Color, Node, Style, TextSpan, column, row, text as dom_text};
 use chatui::event::{Event, Key, KeyCode, Size};
+use chatui::program::TaskFn;
 use chatui::render::RenderContext;
-use chatui::{ScrollMsg, Transition, block_with_title, default_input_keybindings, input};
+use chatui::{ScrollMsg, block_with_title, default_input_keybindings, input};
 use nucleo::pattern::{CaseMatching, Normalization};
 use nucleo::{Config, Injector, Matcher, Nucleo, Utf32String};
 use smol::channel;
@@ -64,7 +65,7 @@ pub struct FuzzyFinder {
 }
 
 #[derive(Clone, Debug)]
-pub enum Msg {
+pub enum FuzzyFinderMsg {
     KeyPressed(Key),
     Input(InputMsg),
     List(VirtualListAction),
@@ -73,10 +74,10 @@ pub enum Msg {
     Resize(Size),
 }
 
-pub fn map_event(event: Event) -> Option<Msg> {
+pub fn map_event(event: Event) -> Option<FuzzyFinderMsg> {
     match event {
-        Event::Key(key) => Some(Msg::KeyPressed(key)),
-        Event::Resize(size) => Some(Msg::Resize(size)),
+        Event::Key(key) => Some(FuzzyFinderMsg::KeyPressed(key)),
+        Event::Resize(size) => Some(FuzzyFinderMsg::Resize(size)),
         _ => None,
     }
 }
@@ -135,11 +136,10 @@ impl FuzzyFinder {
         self.submitted.as_ref().map(|s| s.as_str())
     }
 
-    fn apply_input(&mut self, msg: InputMsg) -> Transition<Msg> {
+    fn apply_input(&mut self, msg: InputMsg) {
         if self.input.update(msg) {
             self.refresh_matches(true);
         }
-        Transition::Continue
     }
 
     fn refresh_matches(&mut self, reset_selection: bool) {
@@ -229,103 +229,122 @@ impl FuzzyFinder {
     }
 }
 
-pub fn update(model: &mut FuzzyFinder, msg: Msg) -> Transition<Msg> {
+pub enum FuzzyFinderEvent<Msg> {
+    Continue,
+    Cancel,
+    Select,
+    Activate,
+    Task(TaskFn<Msg>),
+}
+
+pub fn update<Msg>(
+    model: &mut FuzzyFinder,
+    msg: FuzzyFinderMsg,
+    map_msg: impl Fn(FuzzyFinderMsg) -> Msg + 'static,
+) -> FuzzyFinderEvent<Msg> {
     match msg {
-        Msg::KeyPressed(key) => handle_key(model, key),
-        Msg::Input(input_msg) => model.apply_input(input_msg),
-        Msg::List(action) => handle_list_action(model, action),
-        Msg::MatcherTick => {
+        FuzzyFinderMsg::KeyPressed(key) => return handle_key(model, key),
+        FuzzyFinderMsg::Input(input_msg) => model.apply_input(input_msg),
+        FuzzyFinderMsg::List(action) => return handle_list_action(model, action),
+        FuzzyFinderMsg::MatcherTick => {
             model.refresh_matches(false);
-            Transition::Multiple(vec![
-                Transition::Continue,
-                listen_for_matcher_updates(model),
-            ])
+            return FuzzyFinderEvent::Task(listen_for_matcher_updates(model, map_msg));
         }
-        Msg::MatcherListenerClosed => Transition::Continue,
-        Msg::Resize(size) => {
+        FuzzyFinderMsg::MatcherListenerClosed => {}
+        FuzzyFinderMsg::Resize(size) => {
             model.size = size;
             model.update_list_viewport();
 
-            let mut transitions = vec![Transition::Continue];
-
             if !model.listening_matcher {
                 model.listening_matcher = true;
-                transitions.push(listen_for_matcher_updates(model));
+                return FuzzyFinderEvent::Task(listen_for_matcher_updates(model, map_msg));
             }
-
-            Transition::Multiple(transitions)
         }
-    }
+    };
+    FuzzyFinderEvent::Continue
 }
 
-fn listen_for_matcher_updates(model: &FuzzyFinder) -> Transition<Msg> {
+fn listen_for_matcher_updates<Msg>(
+    model: &FuzzyFinder,
+    map_msg: impl Fn(FuzzyFinderMsg) -> Msg + 'static,
+) -> TaskFn<Msg> {
     let receiver = model.notify_rx.clone();
-    Transition::Task(Box::pin(async move {
-        match receiver.recv().await {
-            Ok(()) => Msg::MatcherTick,
-            Err(_) => Msg::MatcherListenerClosed,
-        }
-    }))
+    Box::pin(async move {
+        map_msg(match receiver.recv().await {
+            Ok(()) => FuzzyFinderMsg::MatcherTick,
+            Err(_) => FuzzyFinderMsg::MatcherListenerClosed,
+        })
+    })
 }
 
-fn handle_key(model: &mut FuzzyFinder, key: Key) -> Transition<Msg> {
+fn handle_key<Msg>(model: &mut FuzzyFinder, key: Key) -> FuzzyFinderEvent<Msg> {
     if key.ctrl && matches!(key.code, KeyCode::Char('c') | KeyCode::Char('q')) {
-        return Transition::Quit;
+        return FuzzyFinderEvent::Cancel;
     }
 
     match key.code {
-        KeyCode::Esc => Transition::Quit,
+        KeyCode::Esc => FuzzyFinderEvent::Cancel,
         _ => {
             if let Some(action) = default_list_keybindings(key, |msg| msg) {
                 return handle_list_action(model, action);
             }
             if let Some(input_msg) = default_input_keybindings(&model.input, key, |msg| msg) {
-                return model.apply_input(input_msg);
+                model.apply_input(input_msg);
             }
-            Transition::Continue
+            FuzzyFinderEvent::Continue
         }
     }
 }
 
-fn handle_list_action(model: &mut FuzzyFinder, action: VirtualListAction) -> Transition<Msg> {
+fn handle_list_action<Msg>(
+    model: &mut FuzzyFinder,
+    action: VirtualListAction,
+) -> FuzzyFinderEvent<Msg> {
     let event = model.list.update(action);
     match event {
         Some(VirtualListEvent::Activated(_)) => {
             if model.submit_selection() {
-                Transition::Quit
+                FuzzyFinderEvent::Activate
             } else {
-                Transition::Continue
+                FuzzyFinderEvent::Continue
             }
         }
-        Some(VirtualListEvent::SelectionChanged(_)) | None => Transition::Continue,
+        Some(VirtualListEvent::SelectionChanged(_)) | None => FuzzyFinderEvent::Continue,
     }
 }
 
-pub fn view(model: &FuzzyFinder) -> Node<Msg> {
+pub fn view(model: &FuzzyFinder) -> Node<FuzzyFinderMsg> {
     let header_style = Style {
         fg: Some(Color::BrightBlack),
         ..Style::default()
     };
-    let header = dom_text::<Msg>("fuztea  Esc quits  Enter selects  Ctrl-n/p move  Ctrl-d/u page")
-        .with_style(header_style)
-        .with_flex_shrink(0.);
+    let header = dom_text::<FuzzyFinderMsg>(
+        "fuztea  Esc quits  Enter selects  Ctrl-n/p move  Ctrl-d/u page",
+    )
+    .with_style(header_style)
+    .with_flex_shrink(0.);
 
-    let input_label = dom_text::<Msg>("> ")
+    let input_label = dom_text::<FuzzyFinderMsg>("> ")
         .with_style(Style {
             bold: true,
             ..Style::default()
         })
         .with_flex_grow(0.0);
 
-    let input_field =
-        input("query", &model.input, &model.input_style, Msg::Input).with_flex_grow(1.0);
+    let input_field = input(
+        "query",
+        &model.input,
+        &model.input_style,
+        FuzzyFinderMsg::Input,
+    )
+    .with_flex_grow(1.0);
 
     let input_row = row(vec![input_label, input_field]).with_flex_shrink(0.);
     let input_row = block_with_title("", vec![input_row]);
 
     let matched_count = model.matched_count;
     let items_count = model.injector.injected_items() as usize;
-    let footer = dom_text::<Msg>(format!("{matched_count}/{items_count} matches"))
+    let footer = dom_text::<FuzzyFinderMsg>(format!("{matched_count}/{items_count} matches"))
         .with_style(Style {
             fg: Some(Color::BrightBlack),
             dim: true,
@@ -334,7 +353,7 @@ pub fn view(model: &FuzzyFinder) -> Node<Msg> {
         .with_flex_shrink(0.);
 
     let list = if matched_count == 0 {
-        dom_text::<Msg>("No matches")
+        dom_text::<FuzzyFinderMsg>("No matches")
             .with_style(Style {
                 fg: Some(Color::BrightBlack),
                 dim: true,
@@ -354,7 +373,7 @@ pub fn view(model: &FuzzyFinder) -> Node<Msg> {
     column(vec![header, input_row, list, footer]).with_fill()
 }
 
-fn render_list(model: &FuzzyFinder) -> Node<Msg> {
+fn render_list(model: &FuzzyFinder) -> Node<FuzzyFinderMsg> {
     let injector = model.injector.clone();
     let matcher_nucleo = Rc::clone(&model.matcher);
     let query_empty = model.last_query.is_empty();
@@ -362,7 +381,7 @@ fn render_list(model: &FuzzyFinder) -> Node<Msg> {
     virtual_list(
         "fuzzy-list",
         &model.list,
-        Msg::List,
+        FuzzyFinderMsg::List,
         move |index, selected, ctx| {
             if query_empty {
                 if let Some(item) = injector.get(index as u32) {
@@ -535,12 +554,14 @@ mod tests {
     fn view_renders_for_empty_and_filtered_queries() {
         let items = vec!["alpha".to_string(), "beta".to_string()];
         let (mut model, _handle) = make_finder_with_items(items);
+        let map_msg = |msg| msg;
         update(
             &mut model,
-            Msg::Resize(Size {
+            FuzzyFinderMsg::Resize(Size {
                 width: 40,
                 height: 8,
             }),
+            map_msg,
         );
 
         let mut node = view(&model);
@@ -564,13 +585,15 @@ mod tests {
     fn scrolling_shows_correct_items_after_selection_moves() {
         let items: Vec<String> = (0..20).map(|i| format!("item-{i:02}")).collect();
         let (mut model, _handle) = make_finder_with_items(items);
+        let map_msg = |msg| msg;
 
         update(
             &mut model,
-            Msg::Resize(Size {
+            FuzzyFinderMsg::Resize(Size {
                 width: 40,
                 height: 8,
             }),
+            map_msg,
         );
 
         let mut node = view(&model);
@@ -589,7 +612,11 @@ mod tests {
         );
 
         for _ in 0..10 {
-            update(&mut model, Msg::KeyPressed(Key::new(KeyCode::Down)));
+            update(
+                &mut model,
+                FuzzyFinderMsg::KeyPressed(Key::new(KeyCode::Down)),
+                map_msg,
+            );
         }
 
         let mut node = view(&model);
@@ -608,17 +635,23 @@ mod tests {
     fn scrolling_up_shows_earlier_items() {
         let items: Vec<String> = (0..20).map(|i| format!("item-{i:02}")).collect();
         let (mut model, _handle) = make_finder_with_items(items);
+        let map_msg = |msg| msg;
 
         update(
             &mut model,
-            Msg::Resize(Size {
+            FuzzyFinderMsg::Resize(Size {
                 width: 40,
                 height: 8,
             }),
+            map_msg,
         );
 
         for _ in 0..15 {
-            update(&mut model, Msg::KeyPressed(Key::new(KeyCode::Down)));
+            update(
+                &mut model,
+                FuzzyFinderMsg::KeyPressed(Key::new(KeyCode::Down)),
+                map_msg,
+            );
         }
 
         let mut node = view(&model);
@@ -629,7 +662,11 @@ mod tests {
         );
 
         for _ in 0..10 {
-            update(&mut model, Msg::KeyPressed(Key::new(KeyCode::Up)));
+            update(
+                &mut model,
+                FuzzyFinderMsg::KeyPressed(Key::new(KeyCode::Up)),
+                map_msg,
+            );
         }
 
         let mut node = view(&model);
@@ -644,17 +681,19 @@ mod tests {
     fn page_down_scrolls_half_page() {
         let items: Vec<String> = (0..30).map(|i| format!("item-{i:02}")).collect();
         let (mut model, _handle) = make_finder_with_items(items);
+        let map_msg = |msg| msg;
 
         update(
             &mut model,
-            Msg::Resize(Size {
+            FuzzyFinderMsg::Resize(Size {
                 width: 40,
                 height: 10,
             }),
+            map_msg,
         );
 
         let ctrl_d = Key::with_modifiers(KeyCode::Char('d'), true, false, false, false);
-        update(&mut model, Msg::KeyPressed(ctrl_d));
+        update(&mut model, FuzzyFinderMsg::KeyPressed(ctrl_d), map_msg);
 
         let selected = model.list.selection();
         assert!(selected >= 2, "selection should jump: {}", selected);
@@ -674,27 +713,34 @@ mod tests {
     fn scroll_state_updates_on_resize() {
         let items: Vec<String> = (0..50).map(|i| format!("line-{i:02}")).collect();
         let (mut model, _handle) = make_finder_with_items(items);
+        let map_msg = |msg| msg;
 
         update(
             &mut model,
-            Msg::Resize(Size {
+            FuzzyFinderMsg::Resize(Size {
                 width: 40,
                 height: 10,
             }),
+            map_msg,
         );
 
         for _ in 0..30 {
-            update(&mut model, Msg::KeyPressed(Key::new(KeyCode::Down)));
+            update(
+                &mut model,
+                FuzzyFinderMsg::KeyPressed(Key::new(KeyCode::Down)),
+                map_msg,
+            );
         }
 
         assert_eq!(model.list.selection(), 30);
 
         update(
             &mut model,
-            Msg::Resize(Size {
+            FuzzyFinderMsg::Resize(Size {
                 width: 40,
                 height: 20,
             }),
+            map_msg,
         );
 
         let mut node = view(&model);
@@ -709,17 +755,23 @@ mod tests {
     fn selection_clamps_when_filtering_reduces_matches() {
         let items: Vec<String> = (0..20).map(|i| format!("item-{i:02}")).collect();
         let (mut model, _handle) = make_finder_with_items(items);
+        let map_msg = |msg| msg;
 
         update(
             &mut model,
-            Msg::Resize(Size {
+            FuzzyFinderMsg::Resize(Size {
                 width: 40,
                 height: 10,
             }),
+            map_msg,
         );
 
         for _ in 0..15 {
-            update(&mut model, Msg::KeyPressed(Key::new(KeyCode::Down)));
+            update(
+                &mut model,
+                FuzzyFinderMsg::KeyPressed(Key::new(KeyCode::Down)),
+                map_msg,
+            );
         }
         assert_eq!(model.list.selection(), 15);
 
@@ -736,13 +788,15 @@ mod tests {
     fn scrollable_content_clips_to_viewport_height() {
         let items: Vec<String> = (0..100).map(|i| format!("item-{i:03}")).collect();
         let (mut model, _handle) = make_finder_with_items(items);
+        let map_msg = |msg| msg;
 
         update(
             &mut model,
-            Msg::Resize(Size {
+            FuzzyFinderMsg::Resize(Size {
                 width: 40,
                 height: 10,
             }),
+            map_msg,
         );
 
         let mut node = view(&model);
