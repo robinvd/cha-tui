@@ -3,6 +3,7 @@ use std::future::Future;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::process::Stdio;
 
 use chatui::TerminalState;
 use tracing::warn;
@@ -106,6 +107,7 @@ impl TermIo for RealIo {
 
     fn run_startup_script(&self, script: StartupScript) -> bool {
         let mut command = std::process::Command::new(&script.script_path);
+        command.stdout(Stdio::null()).stderr(Stdio::null());
         command.current_dir(&script.workspace_path);
         command.envs(script.env);
         match command.status() {
