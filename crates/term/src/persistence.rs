@@ -1,19 +1,46 @@
 //! Persistence layer for saving and loading project configuration.
 
 use facet::Facet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::{fs, io};
 
 use super::project::Project;
 
-/// Serializable representation of a project for persistence.
+#[derive(Facet)]
+#[facet(transparent)]
+struct PathProxy(String);
+
+impl TryFrom<PathProxy> for PathBuf {
+    type Error = io::Error;
+
+    fn try_from(proxy: PathProxy) -> Result<Self, Self::Error> {
+        Ok(PathBuf::from(proxy.0))
+    }
+}
+
+impl TryFrom<&Path> for PathProxy {
+    type Error = std::convert::Infallible;
+
+    fn try_from(path: &Path) -> Result<Self, Self::Error> {
+        Ok(PathProxy(path.to_string_lossy().into_owned()))
+    }
+}
+
+impl TryFrom<&PathBuf> for PathProxy {
+    type Error = std::convert::Infallible;
+
+    fn try_from(path: &PathBuf) -> Result<Self, Self::Error> {
+        Self::try_from(path.as_path())
+    }
+}
+
 #[derive(Facet)]
 pub struct PersistedProject {
     pub name: String,
+    #[facet(proxy = PathProxy)]
     pub path: PathBuf,
 }
 
-/// Root structure for the persisted state file.
 #[derive(Default, Facet)]
 pub struct PersistedState {
     pub projects: Vec<PersistedProject>,
@@ -21,8 +48,15 @@ pub struct PersistedState {
 
 /// Returns the path to the configuration file.
 pub fn config_path() -> io::Result<PathBuf> {
-    if let Some(dir) = std::env::var_os("CHATUI_CONFIG_DIR") {
-        return Ok(PathBuf::from(dir).join("term_projects.json"));
+    config_path_with_root(None)
+}
+
+pub fn config_path_with_root(root: Option<&Path>) -> io::Result<PathBuf> {
+    if let Some(dir) = root {
+        return Ok(dir.join("term_projects.json"));
+    }
+    if let Some(dir) = std::env::var_os("CHATUI_CONFIG_DIR").map(PathBuf::from) {
+        return Ok(dir.join("term_projects.json"));
     }
 
     let result = directories::ProjectDirs::from("", "", "chatui")
@@ -36,7 +70,11 @@ pub fn config_path() -> io::Result<PathBuf> {
 
 /// Load projects from the configuration file.
 pub fn load_projects() -> io::Result<Vec<PersistedProject>> {
-    let path = config_path()?;
+    load_projects_from_root(None)
+}
+
+pub fn load_projects_from_root(root: Option<&Path>) -> io::Result<Vec<PersistedProject>> {
+    let path = config_path_with_root(root)?;
     if !path.exists() {
         return Ok(Vec::new());
     }
@@ -49,7 +87,11 @@ pub fn load_projects() -> io::Result<Vec<PersistedProject>> {
 
 /// Save projects to the configuration file.
 pub fn save_projects(projects: &[Project]) -> io::Result<()> {
-    let path = config_path()?;
+    save_projects_to_root(projects, None)
+}
+
+pub fn save_projects_to_root(projects: &[Project], root: Option<&Path>) -> io::Result<()> {
+    let path = config_path_with_root(root)?;
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
