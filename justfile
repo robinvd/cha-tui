@@ -23,5 +23,5 @@ test:
     cargo test --workspace --lib --bins --tests
 
 quality-check: test
-    cargo fmt
-    cargo clippy
+    cargo fmt --workspace
+    cargo clippy --workspace

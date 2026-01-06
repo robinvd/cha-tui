@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 
+#[cfg(test)]
+use std::sync::Mutex;
+
 use chatui::TerminalState;
 use tracing::warn;
 
@@ -174,19 +177,44 @@ impl TermIo for RealIo {
 }
 
 #[cfg(test)]
-pub struct FakeIo;
+pub struct FakeIo {
+    saved_projects: Mutex<Vec<Vec<(String, PathBuf)>>>,
+    test_dir: PathBuf,
+}
 
 #[cfg(test)]
 impl FakeIo {
     pub fn new() -> Self {
-        Self
+        Self {
+            saved_projects: Mutex::new(Vec::new()),
+            test_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")),
+        }
+    }
+
+    pub fn with_test_dir(path: PathBuf) -> Self {
+        Self {
+            saved_projects: Mutex::new(Vec::new()),
+            test_dir: path,
+        }
+    }
+
+    pub fn saved_projects_snapshots(&self) -> Vec<Vec<(String, PathBuf)>> {
+        self.saved_projects.lock().unwrap().clone()
+    }
+
+    fn record_save(&self, projects: &[Project]) {
+        let snapshot = projects
+            .iter()
+            .map(|project| (project.name.clone(), project.path.clone()))
+            .collect();
+        self.saved_projects.lock().unwrap().push(snapshot);
     }
 }
 
 #[cfg(test)]
 impl TermIo for FakeIo {
     fn current_dir(&self) -> io::Result<PathBuf> {
-        std::env::current_dir()
+        Ok(self.test_dir.clone())
     }
 
     fn canonicalize_dir(&self, path: &Path) -> io::Result<PathBuf> {
@@ -209,7 +237,8 @@ impl TermIo for FakeIo {
         Ok(Vec::new())
     }
 
-    fn save_projects(&self, _projects: &[Project]) -> io::Result<()> {
+    fn save_projects(&self, projects: &[Project]) -> io::Result<()> {
+        self.record_save(projects);
         Ok(())
     }
 

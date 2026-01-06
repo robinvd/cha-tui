@@ -3424,12 +3424,16 @@ fn main() -> Result<(), miette::Report> {
 mod tests {
     use super::*;
     use crate::divider::{Divider, DividerOrientation};
+    use crate::persistence::{load_projects_from_root, save_projects_to_root};
     use chatui::buffer::DoubleBuffer;
     use chatui::dom::rounding::round_layout;
     use chatui::event::{KeyCode, Size};
     use chatui::palette::Palette;
     use chatui::render::Renderer;
     use chatui::test_utils::render_node_to_lines;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
     use taffy::compute_root_layout;
 
     fn test_model() -> Option<Model> {
@@ -3530,6 +3534,57 @@ mod tests {
             .chars()
             .nth(x)
             .unwrap_or_else(|| panic!("missing char at {x}, {y}"))
+    }
+
+    #[test]
+    fn saving_projects_after_adding_project_persists_all_projects() {
+        let io = Arc::new(term_io::FakeIo::with_test_dir(PathBuf::from(
+            "/tmp/project",
+        )));
+        let Ok(mut model) = Model::new_with_io(io.clone(), None) else {
+            eprintln!("Skipping term test: failed to build model");
+            return;
+        };
+
+        let initial = io.saved_projects_snapshots();
+        assert_eq!(initial.len(), 1);
+        assert_eq!(initial[0].len(), 1);
+        assert_eq!(initial[0][0].0, "project");
+        assert_eq!(initial[0][0].1, PathBuf::from("/tmp/project"));
+
+        model
+            .add_project(PathBuf::from("/tmp/second"), "second".to_string())
+            .expect("add project");
+
+        let snapshots = io.saved_projects_snapshots();
+        assert_eq!(snapshots.len(), 2);
+        let last = snapshots.last().expect("snapshot present");
+        assert_eq!(last.len(), 2);
+        assert_eq!(last[0].0, "project");
+        assert_eq!(last[1].0, "second");
+        assert_eq!(last[1].1, PathBuf::from("/tmp/second"));
+    }
+
+    #[test]
+    fn load_and_save_projects_use_config_root() {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_nanos();
+        let base = PathBuf::from(format!("/tmp/term-test-{now}"));
+        let config_root = base.join("config");
+        let project_path = base.join("workspace");
+        fs::create_dir_all(&project_path).expect("workspace dir");
+
+        let project = Project::new(ProjectId(1), "demo".to_string(), project_path.clone());
+        save_projects_to_root(&[project], Some(&config_root)).expect("save");
+
+        let persisted = load_projects_from_root(Some(&config_root)).expect("load");
+        assert_eq!(persisted.len(), 1);
+        assert_eq!(persisted[0].name, "demo");
+        assert_eq!(persisted[0].path, project_path);
+
+        fs::remove_dir_all(base).ok();
     }
 
     #[test]
