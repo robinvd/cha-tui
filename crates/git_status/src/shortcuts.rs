@@ -1,6 +1,6 @@
 use super::{
-    CommitMsg, DeleteMsg, DiffMsg, GlobalMsg, Key, KeyCode, Model, Msg, NavigationMsg, ScrollAxis,
-    ScrollMsg,
+    CommitMsg, DeleteMsg, DiffMsg, FuzzyMsg, GlobalMsg, Key, KeyCode, Model, Msg, NavigationMsg,
+    ScrollAxis, ScrollMsg,
 };
 
 #[derive(Clone)]
@@ -439,6 +439,18 @@ const NORMAL_SHORTCUTS: &[Shortcut] = &[
         msg: Some(Msg::Commit(CommitMsg::Open)),
     },
     Shortcut {
+        label: "/",
+        description: "Fuzzy find file",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('/'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Fuzzy(FuzzyMsg::Open)),
+    },
+    Shortcut {
         label: "Shift-D",
         description: "Delete changes",
         show_in_bar: true,
@@ -698,6 +710,18 @@ const DIFF_VIEW_SHORTCUTS: &[Shortcut] = &[
             ModifierRequirement::Any,
         )),
         msg: Some(Msg::Diff(DiffMsg::ToggleLineNumbers)),
+    },
+    Shortcut {
+        label: "/",
+        description: "Fuzzy find file",
+        show_in_bar: true,
+        binding: Some(Binding::new(
+            KeyCode::Char('/'),
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Disabled,
+            ModifierRequirement::Any,
+        )),
+        msg: Some(Msg::Fuzzy(FuzzyMsg::Open)),
     },
 ];
 

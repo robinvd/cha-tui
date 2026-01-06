@@ -35,6 +35,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use crate::git::{FileEntry, GitStatus, LoadedContent};
+use fuztea::{FuzzyFinder, FuzzyFinderEvent, FuzzyFinderMsg};
 use smol::unblock;
 mod shortcuts;
 
@@ -110,7 +111,6 @@ impl ViewMode {
     }
 }
 
-#[derive(Default)]
 struct WorkingTreeState {
     unstaged: Vec<FileEntry>,
     staged: Vec<FileEntry>,
@@ -123,15 +123,48 @@ struct WorkingTreeState {
     commit_modal: Option<CommitModal>,
     delete_modal: Option<DeleteModal>,
     current_branch: Option<String>,
+    fuzzy_finder: Option<FuzzyFinderState>,
 }
 
-#[derive(Default)]
+impl Default for WorkingTreeState {
+    fn default() -> Self {
+        Self {
+            unstaged: Vec::new(),
+            staged: Vec::new(),
+            unstaged_tree: TreeState::default(),
+            staged_tree: TreeState::default(),
+            unstaged_initialized: false,
+            staged_initialized: false,
+            unstaged_scroll: ScrollState::default(),
+            staged_scroll: ScrollState::default(),
+            commit_modal: None,
+            delete_modal: None,
+            current_branch: None,
+            fuzzy_finder: None,
+        }
+    }
+}
+
 struct DiffModeState {
     spec: String,
     changed: Vec<FileEntry>,
     changed_tree: TreeState<FileNodeId>,
     changed_initialized: bool,
     changed_scroll: ScrollState,
+    fuzzy_finder: Option<FuzzyFinderState>,
+}
+
+impl Default for DiffModeState {
+    fn default() -> Self {
+        Self {
+            spec: String::new(),
+            changed: Vec::new(),
+            changed_tree: TreeState::default(),
+            changed_initialized: false,
+            changed_scroll: ScrollState::default(),
+            fuzzy_finder: None,
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -178,6 +211,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         Msg::Diff(diff_msg) => handle_diff_msg(model, diff_msg),
         Msg::Commit(commit_msg) => handle_commit_msg(model, commit_msg),
         Msg::Delete(delete_msg) => handle_delete_msg(model, delete_msg),
+        Msg::Fuzzy(fuzzy_msg) => handle_fuzzy_msg(model, fuzzy_msg),
         Msg::Section { focus, msg } => handle_section_msg(model, focus, msg),
         Msg::DiffLoaded { request_id, result } => model.handle_diff_loaded(request_id, result),
         Msg::StatusLoaded {
@@ -318,7 +352,24 @@ fn handle_delete_msg(model: &mut Model, msg: DeleteMsg) -> Transition<Msg> {
     }
 }
 
+fn handle_fuzzy_msg(model: &mut Model, msg: FuzzyMsg) -> Transition<Msg> {
+    match msg {
+        FuzzyMsg::Open => {
+            model.open_fuzzy_finder();
+            Transition::Continue
+        }
+        FuzzyMsg::Inner(inner_msg) => model.handle_fuzzy_inner(inner_msg),
+        FuzzyMsg::Accept => model.accept_fuzzy_finder(),
+        FuzzyMsg::Cancel => model.cancel_fuzzy_finder(),
+    }
+}
+
 fn handle_key(model: &mut Model, key: Key) -> Transition<Msg> {
+    // If the fuzzy finder is active, it consumes all keys.
+    if model.fuzzy_finder().is_some() {
+        return handle_fuzzy_key(model, key);
+    }
+
     // If the delete modal is active, it consumes keys like Enter/Esc/Y/N.
     if model.delete_modal().is_some() {
         return handle_delete_modal_key(model, key);
@@ -358,6 +409,11 @@ fn handle_delete_modal_key(model: &mut Model, key: Key) -> Transition<Msg> {
         KeyCode::Char('n') | KeyCode::Char('N') => update(model, Msg::Delete(DeleteMsg::Cancel)),
         _ => Transition::Continue,
     }
+}
+
+fn handle_fuzzy_key(model: &mut Model, key: Key) -> Transition<Msg> {
+    let inner_msg = FuzzyFinderMsg::KeyPressed(key);
+    update(model, Msg::Fuzzy(FuzzyMsg::Inner(inner_msg)))
 }
 
 fn view(model: &Model) -> Node<Msg> {
@@ -432,8 +488,9 @@ fn view(model: &Model) -> Node<Msg> {
         .with_fill()
         .with_id("root");
 
-    // Stack any active modal dialogs on top of the base UI (only in working tree mode).
+    // Stack any active modal dialogs on top of the base UI.
     let mut layered = base;
+
     if let Some(wt) = model.view_mode.working_tree() {
         if let Some(modal) = &wt.commit_modal {
             layered = column(vec![layered, render_commit_modal(modal)])
@@ -451,28 +508,43 @@ fn view(model: &Model) -> Node<Msg> {
 }
 
 fn render_left_pane(model: &Model) -> Node<Msg> {
+    let fuzzy_state = model.fuzzy_finder();
+    let fuzzy_focus = fuzzy_state.map(|s| s.original_focus);
     match &model.view_mode {
-        ViewMode::Diff(diff) => render_changed_pane(diff),
-        ViewMode::WorkingTree(wt) => render_working_tree_pane(wt, model.focus),
+        ViewMode::Diff(diff) => render_changed_pane(diff, fuzzy_state),
+        ViewMode::WorkingTree(wt) => render_working_tree_pane(wt, model.focus, fuzzy_focus),
     }
 }
 
-fn render_working_tree_pane(wt: &WorkingTreeState, focus: Focus) -> Node<Msg> {
-    let unstaged_list = render_file_tree(
-        Model::UNSTAGED_ITEM_ID,
-        &wt.unstaged_tree,
-        focus == Focus::Unstaged,
-        |tree_msg| Msg::Section {
-            focus: Focus::Unstaged,
-            msg: SectionMsg::Tree(tree_msg),
-        },
-    )
+fn render_working_tree_pane(
+    wt: &WorkingTreeState,
+    focus: Focus,
+    fuzzy_focus: Option<Focus>,
+) -> Node<Msg> {
+    let unstaged_content = if fuzzy_focus == Some(Focus::Unstaged) {
+        render_fuzzy_finder_inline(wt.fuzzy_finder.as_ref().unwrap())
+    } else {
+        render_file_tree(
+            Model::UNSTAGED_ITEM_ID,
+            &wt.unstaged_tree,
+            focus == Focus::Unstaged,
+            |tree_msg| Msg::Section {
+                focus: Focus::Unstaged,
+                msg: SectionMsg::Tree(tree_msg),
+            },
+        )
+    }
     .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
     .with_flex_basis(Dimension::ZERO);
 
+    let unstaged_title = if fuzzy_focus == Some(Focus::Unstaged) {
+        "Find in Unstaged"
+    } else {
+        "Unstaged Changes"
+    };
     let unstaged = block_with_title(
-        "Unstaged Changes",
+        unstaged_title,
         vec![
             scrollable_content(
                 "unstaged-section-content",
@@ -482,7 +554,7 @@ fn render_working_tree_pane(wt: &WorkingTreeState, focus: Focus) -> Node<Msg> {
                     focus: Focus::Unstaged,
                     msg: scroll_msg,
                 },
-                unstaged_list,
+                unstaged_content,
             )
             .with_min_height(Dimension::ZERO)
             .with_flex_grow(1.)
@@ -494,21 +566,30 @@ fn render_working_tree_pane(wt: &WorkingTreeState, focus: Focus) -> Node<Msg> {
     .with_flex_basis(Dimension::ZERO)
     .with_id("unstaged-section");
 
-    let staged_list = render_file_tree(
-        Model::STAGED_ITEM_ID,
-        &wt.staged_tree,
-        focus == Focus::Staged,
-        |tree_msg| Msg::Section {
-            focus: Focus::Staged,
-            msg: SectionMsg::Tree(tree_msg),
-        },
-    )
+    let staged_content = if fuzzy_focus == Some(Focus::Staged) {
+        render_fuzzy_finder_inline(wt.fuzzy_finder.as_ref().unwrap())
+    } else {
+        render_file_tree(
+            Model::STAGED_ITEM_ID,
+            &wt.staged_tree,
+            focus == Focus::Staged,
+            |tree_msg| Msg::Section {
+                focus: Focus::Staged,
+                msg: SectionMsg::Tree(tree_msg),
+            },
+        )
+    }
     .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
     .with_flex_basis(Dimension::ZERO);
 
+    let staged_title = if fuzzy_focus == Some(Focus::Staged) {
+        "Find in Staged"
+    } else {
+        "Staged Changes"
+    };
     let staged = block_with_title(
-        "Staged Changes",
+        staged_title,
         vec![
             scrollable_content(
                 "staged-section-content",
@@ -518,7 +599,7 @@ fn render_working_tree_pane(wt: &WorkingTreeState, focus: Focus) -> Node<Msg> {
                     focus: Focus::Staged,
                     msg: scroll_msg,
                 },
-                staged_list,
+                staged_content,
             )
             .with_min_height(Dimension::ZERO)
             .with_flex_grow(1.)
@@ -537,22 +618,32 @@ fn render_working_tree_pane(wt: &WorkingTreeState, focus: Focus) -> Node<Msg> {
     .with_id("left-pane")
 }
 
-fn render_changed_pane(diff: &DiffModeState) -> Node<Msg> {
-    let changed_list = render_file_tree(
-        Model::CHANGED_ITEM_ID,
-        &diff.changed_tree,
-        true,
-        |tree_msg| Msg::Section {
-            focus: Focus::Changed,
-            msg: SectionMsg::Tree(tree_msg),
-        },
-    )
+fn render_changed_pane(diff: &DiffModeState, fuzzy_state: Option<&FuzzyFinderState>) -> Node<Msg> {
+    let is_fuzzy_active = fuzzy_state.is_some();
+    let changed_content = if is_fuzzy_active {
+        render_fuzzy_finder_inline(fuzzy_state.unwrap())
+    } else {
+        render_file_tree(
+            Model::CHANGED_ITEM_ID,
+            &diff.changed_tree,
+            true,
+            |tree_msg| Msg::Section {
+                focus: Focus::Changed,
+                msg: SectionMsg::Tree(tree_msg),
+            },
+        )
+    }
     .with_min_height(Dimension::ZERO)
     .with_flex_grow(1.)
     .with_flex_basis(Dimension::ZERO);
 
+    let title = if is_fuzzy_active {
+        "Find in Changed"
+    } else {
+        "Changed"
+    };
     let changed = block_with_title(
-        "Changed",
+        title,
         vec![
             scrollable_content(
                 Model::CHANGED_CONTAINER_ID,
@@ -562,7 +653,7 @@ fn render_changed_pane(diff: &DiffModeState) -> Node<Msg> {
                     focus: Focus::Changed,
                     msg: scroll_msg,
                 },
-                changed_list,
+                changed_content,
             )
             .with_min_height(Dimension::ZERO)
             .with_flex_grow(1.)
@@ -813,6 +904,10 @@ fn render_delete_modal(state: &DeleteModal) -> Node<Msg> {
             .with_id("delete-modal-block"),
     ])
     .with_id("delete-modal")
+}
+
+fn render_fuzzy_finder_inline(state: &FuzzyFinderState) -> Node<Msg> {
+    fuztea::view(&state.finder, |msg| Msg::Fuzzy(FuzzyMsg::Inner(msg)))
 }
 
 fn title_style() -> Style {
@@ -1234,6 +1329,12 @@ impl DeleteModal {
     }
 }
 
+struct FuzzyFinderState {
+    finder: FuzzyFinder,
+    original_focus: Focus,
+    original_selection: Option<FileNodeId>,
+}
+
 #[derive(Default)]
 struct Model {
     view_mode: ViewMode,
@@ -1495,6 +1596,141 @@ impl Model {
     fn close_delete_modal(&mut self) {
         if let Some(state) = self.view_mode.working_tree_mut() {
             state.delete_modal = None;
+        }
+    }
+
+    fn fuzzy_finder(&self) -> Option<&FuzzyFinderState> {
+        match &self.view_mode {
+            ViewMode::WorkingTree(state) => state.fuzzy_finder.as_ref(),
+            ViewMode::Diff(state) => state.fuzzy_finder.as_ref(),
+        }
+    }
+
+    fn fuzzy_finder_mut(&mut self) -> Option<&mut FuzzyFinderState> {
+        match &mut self.view_mode {
+            ViewMode::WorkingTree(state) => state.fuzzy_finder.as_mut(),
+            ViewMode::Diff(state) => state.fuzzy_finder.as_mut(),
+        }
+    }
+
+    fn open_fuzzy_finder(&mut self) {
+        let entries = self.entries_for_focus(self.focus);
+        if entries.is_empty() {
+            return;
+        }
+
+        let (mut finder, handle) = FuzzyFinder::new();
+        for entry in entries {
+            handle.push_item(entry.path.clone());
+        }
+        finder.tick();
+
+        let original_selection = self.selected_id(self.focus);
+        let fuzzy_state = FuzzyFinderState {
+            finder,
+            original_focus: self.focus,
+            original_selection,
+        };
+
+        match &mut self.view_mode {
+            ViewMode::WorkingTree(state) => state.fuzzy_finder = Some(fuzzy_state),
+            ViewMode::Diff(state) => state.fuzzy_finder = Some(fuzzy_state),
+        }
+    }
+
+    fn close_fuzzy_finder(&mut self) {
+        match &mut self.view_mode {
+            ViewMode::WorkingTree(state) => state.fuzzy_finder = None,
+            ViewMode::Diff(state) => state.fuzzy_finder = None,
+        }
+    }
+
+    fn handle_fuzzy_inner(&mut self, msg: FuzzyFinderMsg) -> Transition<Msg> {
+        let Some(fuzzy_state) = self.fuzzy_finder_mut() else {
+            return Transition::Continue;
+        };
+
+        let event = fuztea::update(&mut fuzzy_state.finder, msg, |inner| {
+            Msg::Fuzzy(FuzzyMsg::Inner(inner))
+        });
+
+        match event {
+            FuzzyFinderEvent::Continue => Transition::Continue,
+            FuzzyFinderEvent::Cancel => update(self, Msg::Fuzzy(FuzzyMsg::Cancel)),
+            FuzzyFinderEvent::Select => {
+                self.update_diff_for_fuzzy_selection();
+                Transition::Continue
+            }
+            FuzzyFinderEvent::Activate => update(self, Msg::Fuzzy(FuzzyMsg::Accept)),
+            FuzzyFinderEvent::Task(task) => Transition::Task(task),
+        }
+    }
+
+    fn update_diff_for_fuzzy_selection(&mut self) {
+        let current_path = {
+            let Some(fuzzy_state) = self.fuzzy_finder() else {
+                return;
+            };
+            fuzzy_state.finder.current_selection()
+        };
+
+        let Some(path) = current_path else {
+            return;
+        };
+
+        let focus = self.focus;
+        let id = FileNodeId::File(path);
+        self.select_tree_id(focus, &id);
+        self.update_diff_sync(false);
+    }
+
+    fn accept_fuzzy_finder(&mut self) -> Transition<Msg> {
+        let selected_path = {
+            let Some(fuzzy_state) = self.fuzzy_finder() else {
+                return Transition::Continue;
+            };
+            fuzzy_state.finder.submission().map(String::from)
+        };
+
+        let Some(path) = selected_path else {
+            return self.cancel_fuzzy_finder();
+        };
+
+        let focus = self.focus;
+        self.close_fuzzy_finder();
+
+        let id = FileNodeId::File(path);
+        self.select_tree_id(focus, &id);
+        self.queue_scroll_for_focus(focus);
+
+        match self.start_diff_refresh(false) {
+            Some(task) => Transition::Task(task),
+            None => Transition::Continue,
+        }
+    }
+
+    fn cancel_fuzzy_finder(&mut self) -> Transition<Msg> {
+        let (original_focus, original_selection) = {
+            let Some(fuzzy_state) = self.fuzzy_finder() else {
+                return Transition::Continue;
+            };
+            (
+                fuzzy_state.original_focus,
+                fuzzy_state.original_selection.clone(),
+            )
+        };
+
+        self.close_fuzzy_finder();
+
+        if let Some(id) = original_selection {
+            self.focus = original_focus;
+            self.select_tree_id(original_focus, &id);
+            self.queue_scroll_for_focus(original_focus);
+        }
+
+        match self.start_diff_refresh(false) {
+            Some(task) => Transition::Task(task),
+            None => Transition::Continue,
         }
     }
 
@@ -2218,6 +2454,7 @@ enum Msg {
     Diff(DiffMsg),
     Commit(CommitMsg),
     Delete(DeleteMsg),
+    Fuzzy(FuzzyMsg),
     Section {
         focus: Focus,
         msg: SectionMsg,
@@ -2275,6 +2512,14 @@ enum CommitMsg {
 enum DeleteMsg {
     Open,
     Confirm,
+    Cancel,
+}
+
+#[derive(Clone, Debug)]
+enum FuzzyMsg {
+    Open,
+    Inner(FuzzyFinderMsg),
+    Accept,
     Cancel,
 }
 

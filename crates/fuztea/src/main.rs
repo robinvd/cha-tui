@@ -1,7 +1,7 @@
 use std::io::{self, BufRead, Write};
 
 use chatui::Program;
-use fuztea::{FuzzyFinder, FuzzyFinderEvent, map_event, update, view};
+use fuztea::{FuzzyFinder, FuzzyFinderEvent, FuzzyFinderMsg, map_event, update, view};
 
 fn main() -> color_eyre::Result<()> {
     color_eyre::install()?;
@@ -26,7 +26,7 @@ fn main() -> color_eyre::Result<()> {
             FuzzyFinderEvent::Activate => chatui::Transition::Quit,
             FuzzyFinderEvent::Task(task) => chatui::Transition::Task(task),
         },
-        view,
+        |model| view(model, |msg: FuzzyFinderMsg| msg),
     )
     .map_event(map_event);
 

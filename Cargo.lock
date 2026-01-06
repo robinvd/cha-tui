@@ -854,6 +854,7 @@ dependencies = [
  "chatui",
  "facet",
  "facet-args",
+ "fuztea",
  "miette",
  "once_cell",
  "ropey",

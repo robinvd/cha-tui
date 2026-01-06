@@ -129,20 +129,26 @@ impl FuzzyFinder {
 
     pub fn set_query(&mut self, query: impl Into<String>) {
         self.input.set_value(query.into());
-        self.refresh_matches(true);
+        let _ = self.refresh_matches(true);
+    }
+
+    pub fn tick(&mut self) {
+        let _ = self.refresh_matches(true);
     }
 
     pub fn submission(&self) -> Option<&str> {
         self.submitted.as_ref().map(|s| s.as_str())
     }
 
-    fn apply_input(&mut self, msg: InputMsg) {
+    fn apply_input(&mut self, msg: InputMsg) -> bool {
         if self.input.update(msg) {
-            self.refresh_matches(true);
+            return self.refresh_matches(true);
         }
+        false
     }
 
-    fn refresh_matches(&mut self, reset_selection: bool) {
+    fn refresh_matches(&mut self, reset_selection: bool) -> bool {
+        let previous_selection = self.current_selection();
         let query = self.input.value();
         let query_changed = query != self.last_query;
         let matched_count = {
@@ -168,7 +174,11 @@ impl FuzzyFinder {
         if reset_selection || query_changed {
             self.list.reset();
         }
-        self.list.set_item_count(matched_count);
+        let selection_event = self.list.set_item_count(matched_count);
+        let selection_changed = selection_event.is_some();
+
+        let current_selection = self.current_selection();
+        selection_changed || current_selection != previous_selection
     }
 
     fn matching_options(&self) -> (CaseMatching, Normalization) {
@@ -227,6 +237,21 @@ impl FuzzyFinder {
         self.submitted = Some(item);
         true
     }
+
+    pub fn current_selection(&self) -> Option<String> {
+        let selected = self.list.selection();
+        if self.last_query.is_empty() {
+            self.injector
+                .get(selected as u32)
+                .map(|item| item.data.clone())
+        } else {
+            let matcher = self.matcher.borrow();
+            matcher
+                .snapshot()
+                .get_matched_item(selected as u32)
+                .map(|item| item.data.clone())
+        }
+    }
 }
 
 pub enum FuzzyFinderEvent<Msg> {
@@ -244,7 +269,11 @@ pub fn update<Msg>(
 ) -> FuzzyFinderEvent<Msg> {
     match msg {
         FuzzyFinderMsg::KeyPressed(key) => return handle_key(model, key),
-        FuzzyFinderMsg::Input(input_msg) => model.apply_input(input_msg),
+        FuzzyFinderMsg::Input(input_msg) => {
+            if model.apply_input(input_msg) {
+                return FuzzyFinderEvent::Select;
+            }
+        }
         FuzzyFinderMsg::List(action) => return handle_list_action(model, action),
         FuzzyFinderMsg::MatcherTick => {
             model.refresh_matches(false);
@@ -289,7 +318,9 @@ fn handle_key<Msg>(model: &mut FuzzyFinder, key: Key) -> FuzzyFinderEvent<Msg> {
                 return handle_list_action(model, action);
             }
             if let Some(input_msg) = default_input_keybindings(&model.input, key, |msg| msg) {
-                model.apply_input(input_msg);
+                if model.apply_input(input_msg) {
+                    return FuzzyFinderEvent::Select;
+                }
             }
             FuzzyFinderEvent::Continue
         }
@@ -309,34 +340,34 @@ fn handle_list_action<Msg>(
                 FuzzyFinderEvent::Continue
             }
         }
-        Some(VirtualListEvent::SelectionChanged(_)) | None => FuzzyFinderEvent::Continue,
+        Some(VirtualListEvent::SelectionChanged(_)) => FuzzyFinderEvent::Select,
+        None => FuzzyFinderEvent::Continue,
     }
 }
 
-pub fn view(model: &FuzzyFinder) -> Node<FuzzyFinderMsg> {
+pub fn view<Msg: 'static>(
+    model: &FuzzyFinder,
+    map_msg: impl Fn(FuzzyFinderMsg) -> Msg + Clone + 'static,
+) -> Node<Msg> {
     let header_style = Style {
         fg: Some(Color::BrightBlack),
         ..Style::default()
     };
-    let header = dom_text::<FuzzyFinderMsg>(
-        "fuztea  Esc quits  Enter selects  Ctrl-n/p move  Ctrl-d/u page",
-    )
-    .with_style(header_style)
-    .with_flex_shrink(0.);
+    let header = dom_text::<Msg>("fuztea  Esc quits  Enter selects  Ctrl-n/p move  Ctrl-d/u page")
+        .with_style(header_style)
+        .with_flex_shrink(0.);
 
-    let input_label = dom_text::<FuzzyFinderMsg>("> ")
+    let input_label = dom_text::<Msg>("> ")
         .with_style(Style {
             bold: true,
             ..Style::default()
         })
         .with_flex_grow(0.0);
 
-    let input_field = input(
-        "query",
-        &model.input,
-        &model.input_style,
-        FuzzyFinderMsg::Input,
-    )
+    let map_input = map_msg.clone();
+    let input_field = input("query", &model.input, &model.input_style, move |msg| {
+        map_input(FuzzyFinderMsg::Input(msg))
+    })
     .with_flex_grow(1.0);
 
     let input_row = row(vec![input_label, input_field]).with_flex_shrink(0.);
@@ -344,7 +375,7 @@ pub fn view(model: &FuzzyFinder) -> Node<FuzzyFinderMsg> {
 
     let matched_count = model.matched_count;
     let items_count = model.injector.injected_items() as usize;
-    let footer = dom_text::<FuzzyFinderMsg>(format!("{matched_count}/{items_count} matches"))
+    let footer = dom_text::<Msg>(format!("{matched_count}/{items_count} matches"))
         .with_style(Style {
             fg: Some(Color::BrightBlack),
             dim: true,
@@ -353,7 +384,7 @@ pub fn view(model: &FuzzyFinder) -> Node<FuzzyFinderMsg> {
         .with_flex_shrink(0.);
 
     let list = if matched_count == 0 {
-        dom_text::<FuzzyFinderMsg>("No matches")
+        dom_text::<Msg>("No matches")
             .with_style(Style {
                 fg: Some(Color::BrightBlack),
                 dim: true,
@@ -363,7 +394,7 @@ pub fn view(model: &FuzzyFinder) -> Node<FuzzyFinderMsg> {
             .with_min_height(Dimension::ZERO)
             .with_flex_basis(Dimension::ZERO)
     } else {
-        let list_content = render_list(model);
+        let list_content = render_list_mapped(model, map_msg);
         list_content
             .with_min_height(Dimension::ZERO)
             .with_flex_grow(1.0)
@@ -373,7 +404,10 @@ pub fn view(model: &FuzzyFinder) -> Node<FuzzyFinderMsg> {
     column(vec![header, input_row, list, footer]).with_fill()
 }
 
-fn render_list(model: &FuzzyFinder) -> Node<FuzzyFinderMsg> {
+fn render_list_mapped<Msg: 'static>(
+    model: &FuzzyFinder,
+    map_msg: impl Fn(FuzzyFinderMsg) -> Msg + 'static,
+) -> Node<Msg> {
     let injector = model.injector.clone();
     let matcher_nucleo = Rc::clone(&model.matcher);
     let query_empty = model.last_query.is_empty();
@@ -381,7 +415,7 @@ fn render_list(model: &FuzzyFinder) -> Node<FuzzyFinderMsg> {
     virtual_list(
         "fuzzy-list",
         &model.list,
-        FuzzyFinderMsg::List,
+        move |action| map_msg(FuzzyFinderMsg::List(action)),
         move |index, selected, ctx| {
             if query_empty {
                 if let Some(item) = injector.get(index as u32) {
@@ -564,21 +598,46 @@ mod tests {
             map_msg,
         );
 
-        let mut node = view(&model);
+        let mut node = view(&model, |msg| msg);
         let rendered = render_node_to_string(&mut node, 40, 8).expect("render default view");
         assert!(rendered.contains("alpha"), "rendered output:\n{rendered}");
         assert!(rendered.contains("beta"), "rendered output:\n{rendered}");
 
         model.set_query("be");
-        let mut node = view(&model);
+        let mut node = view(&model, |msg| msg);
         let rendered = render_node_to_string(&mut node, 40, 8).expect("render filtered view");
         assert!(!rendered.contains("alpha"), "rendered output:\n{rendered}");
         assert!(rendered.contains("beta"), "rendered output:\n{rendered}");
 
         model.set_query("zzz");
-        let mut node = view(&model);
+        let mut node = view(&model, |msg| msg);
         let rendered = render_node_to_string(&mut node, 40, 8).expect("render empty view");
         assert!(rendered.contains("No matches"));
+    }
+
+    #[test]
+    fn typing_filters_emits_selection_change_event() {
+        let items = vec!["alpha".to_string(), "beta".to_string()];
+        let (mut model, _handle) = make_finder_with_items(items);
+        let map_msg = |msg| msg;
+
+        update(
+            &mut model,
+            FuzzyFinderMsg::Resize(Size {
+                width: 40,
+                height: 8,
+            }),
+            map_msg,
+        );
+
+        let event = update(
+            &mut model,
+            FuzzyFinderMsg::Input(InputMsg::InsertChar('b')),
+            map_msg,
+        );
+
+        assert!(matches!(event, FuzzyFinderEvent::Select));
+        assert_eq!(model.current_selection().as_deref(), Some("beta"));
     }
 
     #[test]
@@ -596,7 +655,7 @@ mod tests {
             map_msg,
         );
 
-        let mut node = view(&model);
+        let mut node = view(&model, |msg| msg);
         let rendered = render_node_to_string(&mut node, 40, 8).expect("render");
         assert!(
             rendered.contains("item-00"),
@@ -619,7 +678,7 @@ mod tests {
             );
         }
 
-        let mut node = view(&model);
+        let mut node = view(&model, |msg| msg);
         let rendered = render_node_to_string(&mut node, 40, 8).expect("render after scroll");
         assert!(
             rendered.contains("item-10"),
@@ -654,7 +713,7 @@ mod tests {
             );
         }
 
-        let mut node = view(&model);
+        let mut node = view(&model, |msg| msg);
         let rendered = render_node_to_string(&mut node, 40, 8).expect("render");
         assert!(
             rendered.contains("item-15"),
@@ -669,7 +728,7 @@ mod tests {
             );
         }
 
-        let mut node = view(&model);
+        let mut node = view(&model, |msg| msg);
         let rendered = render_node_to_string(&mut node, 40, 8).expect("render after scroll up");
         assert!(
             rendered.contains("item-05"),
@@ -698,7 +757,7 @@ mod tests {
         let selected = model.list.selection();
         assert!(selected >= 2, "selection should jump: {}", selected);
 
-        let mut node = view(&model);
+        let mut node = view(&model, |msg| msg);
         let rendered = render_node_to_string(&mut node, 40, 10).expect("render");
         let selected_item = format!("item-{:02}", selected);
         assert!(
@@ -743,7 +802,7 @@ mod tests {
             map_msg,
         );
 
-        let mut node = view(&model);
+        let mut node = view(&model, |msg| msg);
         let rendered = render_node_to_string(&mut node, 40, 20).expect("render");
         assert!(
             rendered.contains("line-30"),
@@ -799,7 +858,7 @@ mod tests {
             map_msg,
         );
 
-        let mut node = view(&model);
+        let mut node = view(&model, |msg| msg);
         let rendered = render_node_to_string(&mut node, 40, 10).expect("render");
 
         let lines: Vec<&str> = rendered.lines().collect();
