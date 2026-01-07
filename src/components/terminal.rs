@@ -262,7 +262,7 @@ impl TerminalState {
         title_shared: &Arc<Mutex<Option<String>>>,
         bell_shared: &Arc<AtomicBool>,
         notifications: &Arc<Mutex<VecDeque<TerminalNotification>>>,
-        term: &Arc<FairMutex<Term<TerminalEventListener>>>,
+        term: Option<&Arc<FairMutex<Term<TerminalEventListener>>>>,
         version: &Arc<AtomicU64>,
         wakeup_sender: &Sender<()>,
     ) {
@@ -304,9 +304,12 @@ impl TerminalState {
             }
             TermEvent::ClipboardStore(_, _) | TermEvent::ClipboardLoad(_, _) => {}
             TermEvent::ColorRequest(index, formatter) => {
-                if let Some(payload) = Self::format_color_response(term, index, formatter.as_ref())
-                {
-                    let _ = sender.send(Msg::Input(Cow::Owned(payload.into_bytes())));
+                if let Some(term) = term {
+                    if let Some(payload) =
+                        Self::format_color_response(term, index, formatter.as_ref())
+                    {
+                        let _ = sender.send(Msg::Input(Cow::Owned(payload.into_bytes())));
+                    }
                 }
             }
             TermEvent::MouseCursorDirty | TermEvent::CursorBlinkingChange => {
@@ -455,12 +458,15 @@ impl TerminalState {
             let title_shared = state.title.clone();
             let bell_shared = state.bell.clone();
             let notifications = state.notifications.clone();
-            let term = state.term.clone();
+            // Use a weak reference to the terminal state to avoid a reference cycle
+            // that would prevent the terminal from being dropped.
+            let term_weak = Arc::downgrade(&state.term);
             let version = state.version.clone();
             let wakeup_sender = state.wakeup_sender.clone();
             let sender = state.sender.clone();
             smol::spawn(async move {
                 while let Ok(event) = event_receiver.recv().await {
+                    let term = term_weak.upgrade();
                     Self::handle_event_now(
                         event,
                         &sender,
@@ -470,7 +476,7 @@ impl TerminalState {
                         &title_shared,
                         &bell_shared,
                         &notifications,
-                        &term,
+                        term.as_ref(),
                         &version,
                         &wakeup_sender,
                     );
@@ -586,7 +592,7 @@ impl TerminalState {
             &self.title,
             &self.bell,
             &self.notifications,
-            &self.term,
+            Some(&self.term),
             &self.version,
             &self.wakeup_sender,
         );
