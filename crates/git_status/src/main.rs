@@ -1302,9 +1302,14 @@ impl DeleteModal {
 }
 
 struct FuzzyFinderState {
-    finder: FuzzyFinder,
+    finder: FuzzyFinder<String>,
     original_focus: Focus,
     original_selection: Option<FileNodeId>,
+}
+
+#[allow(clippy::ptr_arg)]
+fn fuzzy_extractor(s: &String) -> Vec<String> {
+    vec![s.clone()]
 }
 
 #[derive(Default)]
@@ -1591,7 +1596,7 @@ impl Model {
             return;
         }
 
-        let (mut finder, handle) = FuzzyFinder::new();
+        let (mut finder, handle) = FuzzyFinder::new(fuzzy_extractor);
         for entry in entries {
             handle.push_item(entry.path.clone());
         }
@@ -1629,7 +1634,7 @@ impl Model {
         match event {
             FuzzyFinderEvent::Continue => Transition::Continue,
             FuzzyFinderEvent::Cancel => update(self, Msg::Fuzzy(FuzzyMsg::Cancel)),
-            FuzzyFinderEvent::Select => {
+            FuzzyFinderEvent::Select(_) => {
                 self.update_diff_for_fuzzy_selection();
                 Transition::Continue
             }
