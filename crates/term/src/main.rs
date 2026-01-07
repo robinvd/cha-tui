@@ -3377,16 +3377,16 @@ fn main() -> Result<(), miette::Report> {
         return Ok(());
     }
 
-    // Set up tracing to file instead of stdout (which would mess up the TUI)
-    use std::fs::File;
-    use tracing_subscriber::fmt;
-    use tracing_subscriber::prelude::*;
-    let log_file_path =
-        std::env::var("TERM_LOG_FILE").unwrap_or_else(|_| "./term_debug.log".to_owned());
-    let log_file = File::create(log_file_path).expect("failed to create log file");
-    tracing_subscriber::registry()
-        .with(fmt::layer().with_writer(log_file).with_ansi(false))
-        .init();
+    // Set up tracing to file only if TERM_LOG is set
+    if let Ok(log_file_path) = std::env::var("TERM_LOG") {
+        use std::fs::File;
+        use tracing_subscriber::fmt;
+        use tracing_subscriber::prelude::*;
+        let log_file = File::create(&log_file_path).expect("failed to create log file");
+        tracing_subscriber::registry()
+            .with(fmt::layer().with_writer(log_file).with_ansi(false))
+            .init();
+    }
 
     let (remote_sender, remote_receiver) = smol::channel::unbounded();
     let remote_server = match RemoteServer::start(remote_sender) {

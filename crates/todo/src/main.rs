@@ -248,7 +248,10 @@ fn init_tracing() -> color_eyre::Result<()> {
     use std::path::PathBuf;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-    let log_path = PathBuf::from("todo.log");
+    let log_path = match std::env::var("TODO_LOG") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => return Ok(()),
+    };
 
     File::options().create(true).append(true).open(&log_path)?;
 

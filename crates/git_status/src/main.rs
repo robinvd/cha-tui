@@ -3713,7 +3713,10 @@ fn init_tracing() -> miette::Result<()> {
     use std::path::PathBuf;
     use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-    let log_path = PathBuf::from("gs.log");
+    let log_path = match std::env::var("GIT_STATUS_LOG") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => return Ok(()),
+    };
 
     let writer = tracing_subscriber::fmt::writer::BoxMakeWriter::new({
         let log_path = log_path.clone();

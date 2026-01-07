@@ -260,14 +260,16 @@ impl Client for UiClient {
 fn main() -> Result<()> {
     miette::set_panic_hook();
 
-    // Set up tracing to file instead of stdout (which would mess up the TUI)
-    use std::fs::File;
-    use tracing_subscriber::fmt;
-    use tracing_subscriber::prelude::*;
-    let log_file = File::create("./term_debug.log").expect("failed to create log file");
-    tracing_subscriber::registry()
-        .with(fmt::layer().with_writer(log_file).with_ansi(false))
-        .init();
+    // Set up tracing to file only if KAERU_LOG is set
+    if let Ok(log_file_path) = std::env::var("KAERU_LOG") {
+        use std::fs::File;
+        use tracing_subscriber::fmt;
+        use tracing_subscriber::prelude::*;
+        let log_file = File::create(&log_file_path).expect("failed to create log file");
+        tracing_subscriber::registry()
+            .with(fmt::layer().with_writer(log_file).with_ansi(false))
+            .init();
+    }
 
     let args = parse_args()?;
     let server_label = args.server.clone();
