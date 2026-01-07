@@ -18,19 +18,15 @@ impl TryFrom<PathProxy> for PathBuf {
     }
 }
 
-impl TryFrom<&Path> for PathProxy {
-    type Error = std::convert::Infallible;
-
-    fn try_from(path: &Path) -> Result<Self, Self::Error> {
-        Ok(PathProxy(path.to_string_lossy().into_owned()))
+impl From<&Path> for PathProxy {
+    fn from(path: &Path) -> Self {
+        PathProxy(path.to_string_lossy().into_owned())
     }
 }
 
-impl TryFrom<&PathBuf> for PathProxy {
-    type Error = std::convert::Infallible;
-
-    fn try_from(path: &PathBuf) -> Result<Self, Self::Error> {
-        Self::try_from(path.as_path())
+impl From<&PathBuf> for PathProxy {
+    fn from(path: &PathBuf) -> Self {
+        Self::from(path.as_path())
     }
 }
 
@@ -44,11 +40,6 @@ pub struct PersistedProject {
 #[derive(Default, Facet)]
 pub struct PersistedState {
     pub projects: Vec<PersistedProject>,
-}
-
-/// Returns the path to the configuration file.
-pub fn config_path() -> io::Result<PathBuf> {
-    config_path_with_root(None)
 }
 
 pub fn config_path_with_root(root: Option<&Path>) -> io::Result<PathBuf> {

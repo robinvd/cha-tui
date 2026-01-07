@@ -20,8 +20,25 @@ session-get-screen:
 
 test:
     # run all workspaces tests but skip doctests, as they compile very slow and we dont have any
-    cargo test --workspace --lib --bins --tests
+    cargo test --workspace --lib --bins --tests --quiet
 
-quality-check: test
-    cargo fmt --workspace
-    cargo clippy --workspace
+lint: test
+    #!/usr/bin/env bash
+    set -euo pipefail
+    
+    # Check for disallowed #[allow(dead_code)] attributes without justification
+    # Allow if preceded by a comment explaining why (within 2 lines)
+    matches=$(rg --type rust -U '#\[allow\(dead_code\)\]' src/ crates/ 2>/dev/null || true)
+    if [ -n "$matches" ]; then
+        echo "Warning: Found #[allow(dead_code)] attribute(s)."
+        echo "Dead code should generally be removed. If keeping it is necessary,"
+        echo "ensure there's a comment explaining why within 2 lines above the attribute."
+        echo ""
+        echo "$matches"
+        echo ""
+        echo "Consider removing unused code or adding proper justification."
+        # Note: This is a warning, not an error, so we continue
+    fi
+    
+    cargo fmt --all
+    cargo clippy --workspace -- -Dwarnings

@@ -932,11 +932,13 @@ impl Model {
         };
 
         if exited {
-            let mut sync = SessionSync::default();
-            sync.changed = project.remove_session(*worktree, *sid);
-            sync.active_removed = self.active.is_some_and(|active| {
-                active.project == *pid && active.worktree == *worktree && active.session == *sid
-            });
+            let sync = SessionSync {
+                changed: project.remove_session(*worktree, *sid),
+                active_removed: self.active.is_some_and(|active| {
+                    active.project == *pid && active.worktree == *worktree && active.session == *sid
+                }),
+                ..Default::default()
+            };
             return sync;
         }
 
@@ -1020,7 +1022,7 @@ enum Msg {
     FocusTerminal(SessionKey),
     Key(Key),
     Paste(String),
-    RemoteRequest(RemoteEnvelope),
+    RemoteRequest(Box<RemoteEnvelope>),
     RemoteClosed,
     Tree(TreeMsg<TreeId>),
     TreeScroll(ScrollMsg),
@@ -1061,7 +1063,7 @@ fn arm_wakeup(tree_id: TreeId, receiver: Receiver<()>) -> Transition<Msg> {
 fn arm_remote(receiver: Receiver<RemoteEnvelope>) -> Transition<Msg> {
     Transition::Task(Box::pin(async move {
         match receiver.recv().await {
-            Ok(request) => Msg::RemoteRequest(request),
+            Ok(request) => Msg::RemoteRequest(Box::new(request)),
             Err(_) => Msg::RemoteClosed,
         }
     }))
@@ -2688,18 +2690,14 @@ fn create_session(
     focus_terminal: bool,
     transitions: &mut Vec<Transition<Msg>>,
 ) -> Option<SessionId> {
-    let Some(project_index) = model.projects.iter().position(|p| p.id == project_id) else {
-        return None;
-    };
+    let project_index = model.projects.iter().position(|p| p.id == project_id)?;
 
     let (path, number) = {
         let project = &model.projects[project_index];
         match worktree {
             None => (project.path.clone(), project.next_session_number),
             Some(wid) => {
-                let Some(worktree) = project.worktree(wid) else {
-                    return None;
-                };
+                let worktree = project.worktree(wid)?;
                 (worktree.path.clone(), worktree.next_session_number)
             }
         }
@@ -3417,7 +3415,7 @@ fn main() -> Result<(), miette::Report> {
         return Ok(());
     }
 
-    return Ok(());
+    Ok(())
 }
 
 #[cfg(test)]

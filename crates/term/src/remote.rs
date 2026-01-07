@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::io::{self, Read, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
@@ -697,8 +697,8 @@ fn handle_connection(mut stream: UnixStream, sender: Sender<RemoteEnvelope>) {
 }
 
 fn write_response(stream: &mut UnixStream, response: RemoteResponse) -> io::Result<()> {
-    let payload = facet_json::to_string(&response)
-        .map_err(|err| io::Error::new(io::ErrorKind::Other, err.to_string()))?;
+    let payload =
+        facet_json::to_string(&response).map_err(|err| io::Error::other(err.to_string()))?;
     stream.write_all(payload.as_bytes())
 }
 
@@ -779,7 +779,7 @@ pub fn session_selection(
 }
 
 pub fn remote_env_map(
-    socket_path: &PathBuf,
+    socket_path: &Path,
     project: ProjectId,
     worktree: Option<WorktreeId>,
     session: SessionId,
@@ -798,7 +798,7 @@ pub fn remote_env_map(
 }
 
 pub fn remote_container_env_map(
-    socket_path: &PathBuf,
+    socket_path: &Path,
     project: ProjectId,
     worktree: Option<WorktreeId>,
 ) -> HashMap<String, String> {

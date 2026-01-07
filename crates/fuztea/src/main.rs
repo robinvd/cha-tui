@@ -10,10 +10,8 @@ fn main() -> color_eyre::Result<()> {
     let input_handle = handle.clone();
     std::thread::spawn(move || {
         let stdin = io::stdin();
-        for line in stdin.lock().lines() {
-            if let Ok(line) = line {
-                input_handle.push_item(line);
-            }
+        for line in stdin.lock().lines().map_while(Result::ok) {
+            input_handle.push_item(line);
         }
     });
 

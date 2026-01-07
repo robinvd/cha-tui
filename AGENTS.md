@@ -55,7 +55,7 @@ Run the app with `RUST_LOG=debug cargo run ...` (again! using the `just session-
 
 ### Final checks
 
-when doing an editing operation: before presenting the results to the user, always run `just quality-check` and fix any errors. this run fmt/clippy etc.
+when doing an editing operation: before presenting the results to the user, always run `just lint` and fix any errors. this run fmt/clippy etc.
 
 ## crates
 

@@ -137,7 +137,7 @@ impl FuzzyFinder {
     }
 
     pub fn submission(&self) -> Option<&str> {
-        self.submitted.as_ref().map(|s| s.as_str())
+        self.submitted.as_deref()
     }
 
     fn apply_input(&mut self, msg: InputMsg) -> bool {
@@ -317,10 +317,10 @@ fn handle_key<Msg>(model: &mut FuzzyFinder, key: Key) -> FuzzyFinderEvent<Msg> {
             if let Some(action) = default_list_keybindings(key, |msg| msg) {
                 return handle_list_action(model, action);
             }
-            if let Some(input_msg) = default_input_keybindings(&model.input, key, |msg| msg) {
-                if model.apply_input(input_msg) {
-                    return FuzzyFinderEvent::Select;
-                }
+            if let Some(input_msg) = default_input_keybindings(&model.input, key, |msg| msg)
+                && model.apply_input(input_msg)
+            {
+                return FuzzyFinderEvent::Select;
             }
             FuzzyFinderEvent::Continue
         }

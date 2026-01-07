@@ -1,3 +1,5 @@
+#![warn(dead_code)]
+
 mod diff_render;
 mod git;
 mod highlight;
@@ -111,6 +113,7 @@ impl ViewMode {
     }
 }
 
+#[derive(Default)]
 struct WorkingTreeState {
     unstaged: Vec<FileEntry>,
     staged: Vec<FileEntry>,
@@ -126,25 +129,7 @@ struct WorkingTreeState {
     fuzzy_finder: Option<FuzzyFinderState>,
 }
 
-impl Default for WorkingTreeState {
-    fn default() -> Self {
-        Self {
-            unstaged: Vec::new(),
-            staged: Vec::new(),
-            unstaged_tree: TreeState::default(),
-            staged_tree: TreeState::default(),
-            unstaged_initialized: false,
-            staged_initialized: false,
-            unstaged_scroll: ScrollState::default(),
-            staged_scroll: ScrollState::default(),
-            commit_modal: None,
-            delete_modal: None,
-            current_branch: None,
-            fuzzy_finder: None,
-        }
-    }
-}
-
+#[derive(Default)]
 struct DiffModeState {
     spec: String,
     changed: Vec<FileEntry>,
@@ -152,19 +137,6 @@ struct DiffModeState {
     changed_initialized: bool,
     changed_scroll: ScrollState,
     fuzzy_finder: Option<FuzzyFinderState>,
-}
-
-impl Default for DiffModeState {
-    fn default() -> Self {
-        Self {
-            spec: String::new(),
-            changed: Vec::new(),
-            changed_tree: TreeState::default(),
-            changed_initialized: false,
-            changed_scroll: ScrollState::default(),
-            fuzzy_finder: None,
-        }
-    }
 }
 
 fn main() -> Result<()> {
