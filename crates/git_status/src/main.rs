@@ -111,6 +111,7 @@ impl ViewMode {
     }
 }
 
+#[derive(Default)]
 struct WorkingTreeState {
     unstaged: Vec<FileEntry>,
     staged: Vec<FileEntry>,
@@ -126,25 +127,7 @@ struct WorkingTreeState {
     fuzzy_finder: Option<FuzzyFinderState>,
 }
 
-impl Default for WorkingTreeState {
-    fn default() -> Self {
-        Self {
-            unstaged: Vec::new(),
-            staged: Vec::new(),
-            unstaged_tree: TreeState::default(),
-            staged_tree: TreeState::default(),
-            unstaged_initialized: false,
-            staged_initialized: false,
-            unstaged_scroll: ScrollState::default(),
-            staged_scroll: ScrollState::default(),
-            commit_modal: None,
-            delete_modal: None,
-            current_branch: None,
-            fuzzy_finder: None,
-        }
-    }
-}
-
+#[derive(Default)]
 struct DiffModeState {
     spec: String,
     changed: Vec<FileEntry>,
@@ -152,19 +135,6 @@ struct DiffModeState {
     changed_initialized: bool,
     changed_scroll: ScrollState,
     fuzzy_finder: Option<FuzzyFinderState>,
-}
-
-impl Default for DiffModeState {
-    fn default() -> Self {
-        Self {
-            spec: String::new(),
-            changed: Vec::new(),
-            changed_tree: TreeState::default(),
-            changed_initialized: false,
-            changed_scroll: ScrollState::default(),
-            fuzzy_finder: None,
-        }
-    }
 }
 
 fn main() -> Result<()> {
@@ -1330,9 +1300,14 @@ impl DeleteModal {
 }
 
 struct FuzzyFinderState {
-    finder: FuzzyFinder,
+    finder: FuzzyFinder<String>,
     original_focus: Focus,
     original_selection: Option<FileNodeId>,
+}
+
+#[allow(clippy::ptr_arg)]
+fn fuzzy_extractor(s: &String) -> Vec<String> {
+    vec![s.clone()]
 }
 
 #[derive(Default)]
@@ -1619,7 +1594,7 @@ impl Model {
             return;
         }
 
-        let (mut finder, handle) = FuzzyFinder::new();
+        let (mut finder, handle) = FuzzyFinder::new(fuzzy_extractor);
         for entry in entries {
             handle.push_item(entry.path.clone());
         }
@@ -1657,7 +1632,7 @@ impl Model {
         match event {
             FuzzyFinderEvent::Continue => Transition::Continue,
             FuzzyFinderEvent::Cancel => update(self, Msg::Fuzzy(FuzzyMsg::Cancel)),
-            FuzzyFinderEvent::Select => {
+            FuzzyFinderEvent::Select(_) => {
                 self.update_diff_for_fuzzy_selection();
                 Transition::Continue
             }
