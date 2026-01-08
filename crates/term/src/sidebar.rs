@@ -34,6 +34,7 @@ pub fn rebuild_tree(
     projects: &[Project],
     tree: &mut TreeState<TreeId>,
     active: &mut Option<SessionKey>,
+    filter: Option<&crate::filter::FilterExpression>,
 ) {
     *active = None;
     let prev_selected = tree
@@ -45,49 +46,119 @@ pub fn rebuild_tree(
         .with_bg(Color::PaletteFg)
         .with_fg(Color::PaletteBg);
 
+    // Get active session project/worktree for current-project query
+    let active_project_worktree = prev_selected.and_then(|sel| match sel {
+        TreeId::Session(pid, worktree, _) => Some((pid, worktree)),
+        _ => None,
+    });
+
     let mut items = Vec::new();
     for project in projects {
         let mut children = Vec::new();
+        let mut project_has_hidden_unread = false;
 
         for session in &project.sessions {
-            let row_style = Style::default();
+            let is_active = prev_selected
+                .map(|sel| {
+                    matches!(sel, TreeId::Session(pid, None, sid) if pid == project.id && sid == session.id)
+                })
+                .unwrap_or(false);
+            let should_show = is_active
+                || filter
+                    .map(|f| {
+                        crate::filter::matches_filter(
+                            f,
+                            project,
+                            None,
+                            session,
+                            active_project_worktree,
+                        )
+                    })
+                    .unwrap_or(true);
 
-            let mut label_spans = vec![TextSpan::new(session.display_name(), Style::default())];
-            if session.has_unread_output && !session.bell {
-                let dot_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
-                label_spans.push(TextSpan::new(" •", dot_style));
+            if should_show {
+                let row_style = Style::default();
+
+                let mut label_spans = vec![TextSpan::new(session.display_name(), Style::default())];
+                if session.has_unread_output && !session.bell {
+                    let dot_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
+                    label_spans.push(TextSpan::new(" •", dot_style));
+                }
+
+                children.push(
+                    TreeNode::leaf(TreeId::Session(project.id, None, session.id), label_spans)
+                        .with_row_style(row_style)
+                        .with_selected_row_style(selection_style),
+                );
+            } else {
+                // Session is hidden by filter, bubble up indicators
+                if session.has_unread_output && !session.bell {
+                    project_has_hidden_unread = true;
+                }
             }
-
-            children.push(
-                TreeNode::leaf(TreeId::Session(project.id, None, session.id), label_spans)
-                    .with_row_style(row_style)
-                    .with_selected_row_style(selection_style),
-            );
         }
 
         for worktree in &project.worktrees {
+            let mut wt_has_hidden_unread = false;
+
             let wt_children = worktree
                 .sessions
                 .iter()
-                .map(|session| {
-                    let row_style = Style::default();
-                    let mut label_spans =
-                        vec![TextSpan::new(session.display_name(), Style::default())];
-                    if session.has_unread_output && !session.bell {
-                        let dot_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
-                        label_spans.push(TextSpan::new(" •", dot_style));
-                    }
+                .filter_map(|session| {
+                    let is_active = prev_selected
+                        .map(|sel| {
+                            matches!(sel, TreeId::Session(pid, Some(wid), sid)
+                                if pid == project.id && wid == worktree.id && sid == session.id)
+                        })
+                        .unwrap_or(false);
+                    let should_show = is_active
+                        || filter
+                            .map(|f| {
+                                crate::filter::matches_filter(
+                                    f,
+                                    project,
+                                    Some(worktree),
+                                    session,
+                                    active_project_worktree,
+                                )
+                            })
+                            .unwrap_or(true);
 
-                    TreeNode::leaf(
-                        TreeId::Session(project.id, Some(worktree.id), session.id),
-                        label_spans,
-                    )
-                    .with_row_style(row_style)
-                    .with_selected_row_style(selection_style)
+                    if should_show {
+                        let row_style = Style::default();
+                        let mut label_spans =
+                            vec![TextSpan::new(session.display_name(), Style::default())];
+                        if session.has_unread_output && !session.bell {
+                            let dot_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
+                            label_spans.push(TextSpan::new(" •", dot_style));
+                        }
+
+                        Some(
+                            TreeNode::leaf(
+                                TreeId::Session(project.id, Some(worktree.id), session.id),
+                                label_spans,
+                            )
+                            .with_row_style(row_style)
+                            .with_selected_row_style(selection_style),
+                        )
+                    } else {
+                        // Session is hidden by filter, bubble up indicators
+                        if session.has_unread_output && !session.bell {
+                            wt_has_hidden_unread = true;
+                        }
+                        None
+                    }
                 })
                 .collect::<Vec<_>>();
 
             let mut label = vec![TextSpan::new(worktree.name.clone(), Style::default())];
+
+            // Add bubbled-up indicators
+            if wt_has_hidden_unread {
+                let dot_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
+                label.push(TextSpan::new(" •", dot_style));
+            }
+
             match worktree.startup_state {
                 StartupState::Inactive => {
                     let state_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
@@ -107,9 +178,21 @@ pub fn rebuild_tree(
                 )
                 .with_selected_row_style(selection_style),
             );
+
+            // Bubble up worktree's hidden indicators to project
+            if wt_has_hidden_unread {
+                project_has_hidden_unread = true;
+            }
         }
 
         let mut label = vec![TextSpan::new(project.name.clone(), Style::default())];
+
+        // Add bubbled-up indicators
+        if project_has_hidden_unread {
+            let dot_style = Style::dim().with_fg(Color::rgb(140, 140, 140));
+            label.push(TextSpan::new(" •", dot_style));
+        }
+
         if !project.worktrees_loaded {
             let loading_style = Style::dim();
             label.push(TextSpan::new(" ⟳", loading_style));
@@ -284,6 +367,7 @@ pub fn sidebar_view(
     tree_scroll: &ScrollState,
     auto_hide: bool,
     focused: bool,
+    filter_active: bool,
     wrap_tree: impl Fn(TreeMsg<TreeId>) -> Msg + 'static,
     on_click: impl Fn() -> Msg + 'static,
 ) -> Node<Msg> {
@@ -303,7 +387,13 @@ pub fn sidebar_view(
 
     let scroll_node = scrollable_content("tree-scroll", tree_scroll, 3, Msg::TreeScroll, tree_node);
 
-    block_with_title("Sessions", vec![scroll_node])
+    let title = if filter_active {
+        "Sessions (filtered)"
+    } else {
+        "Sessions"
+    };
+
+    block_with_title(title, vec![scroll_node])
         .with_flex_grow(0.35)
         .with_flex_shrink(0.0)
         .with_flex_basis(Dimension::length(0.))

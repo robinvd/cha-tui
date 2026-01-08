@@ -1,6 +1,7 @@
 //! Session manager demo with a sidebar tree and a single terminal pane.
 
 mod divider;
+mod filter;
 mod focus;
 mod git;
 mod jj;
@@ -404,6 +405,8 @@ struct Model {
     auto_hide: bool,
     active: Option<SessionKey>,
     modal: Option<ModalState>,
+    filter: Option<filter::FilterExpression>,
+    filter_text: String,
     initial_update: bool,
     next_project_id: u64,
     next_session_id: u64,
@@ -440,6 +443,8 @@ impl Model {
             auto_hide: false,
             active: None,
             modal: None,
+            filter: None,
+            filter_text: String::new(),
             initial_update: true,
             next_project_id: 1,
             next_session_id: 1,
@@ -489,6 +494,15 @@ impl Model {
         self.remote_receiver = Some(receiver);
     }
 
+    fn rebuild_tree(&mut self) {
+        rebuild_tree(
+            &self.projects,
+            &mut self.tree,
+            &mut self.active,
+            self.filter.as_ref(),
+        );
+    }
+
     fn add_project(&mut self, path: PathBuf, name: String) -> std::io::Result<()> {
         let path = match self.io.canonicalize_dir(&path) {
             Ok(p) => p,
@@ -508,7 +522,7 @@ impl Model {
         project.worktrees_loaded = !self.io.load_worktrees();
 
         self.projects.push(project);
-        rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
+        self.rebuild_tree();
         self.focus = Focus::Sidebar;
 
         if let Err(err) = self.io.save_projects(&self.projects) {
@@ -667,7 +681,7 @@ impl Model {
                 );
             }
         }
-        rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
+        self.rebuild_tree();
     }
 
     fn finish_startup_script(
@@ -692,7 +706,7 @@ impl Model {
                 transitions,
             );
         }
-        rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
+        self.rebuild_tree();
     }
 
     fn start_worktree_load(&mut self, project_id: ProjectId) -> Option<Transition<Msg>> {
@@ -738,7 +752,7 @@ impl Model {
             self.projects[project_index].add_worktree(worktree.name, worktree.path);
         }
 
-        rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
+        self.rebuild_tree();
     }
 
     fn add_worktree(
@@ -769,7 +783,7 @@ impl Model {
         copy_optional_files(self.io.as_ref(), &repo_path, &path, &mut self.status);
 
         let wid = self.projects[project_index].add_worktree(name, path);
-        rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
+        self.rebuild_tree();
         self.set_focus(Focus::Sidebar);
         Some(TreeId::Worktree(project_id, wid))
     }
@@ -860,7 +874,7 @@ impl Model {
         }
 
         if cleared_bell || cleared_unread {
-            rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
+            self.rebuild_tree();
         }
     }
     fn set_focus(&mut self, focus: Focus) {
@@ -893,7 +907,7 @@ impl Model {
             }
 
             if cleared_bell || cleared_unread {
-                rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
+                self.rebuild_tree();
             }
         }
     }
@@ -1005,7 +1019,7 @@ impl Model {
         {
             *state = StartupState::Active;
         }
-        rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
+        self.rebuild_tree();
         Ok(Some(tree_id))
     }
 
@@ -1338,7 +1352,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         Msg::SessionWake(id) => {
             let sync = model.sync_session_state(&id);
             if sync.changed {
-                rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+                model.rebuild_tree();
             }
             if sync.active_removed
                 && model.focus.is_terminal()
@@ -1462,10 +1476,33 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                         {
                             session.custom_title = Some(name);
                             session.sync_display_name();
-                            rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+                            model.rebuild_tree();
                         } else {
                             model.status = Some(StatusMessage::error("Session no longer exists"));
                         }
+                        model.modal = None;
+                    }
+                    ModalResult::FilterSubmitted(filter_text) => {
+                        let trimmed = filter_text.trim();
+                        if trimmed.is_empty() {
+                            // Empty filter shows all
+                            model.filter = None;
+                            model.filter_text = String::new();
+                        } else {
+                            match filter::parse_filter(trimmed) {
+                                Ok(expr) => {
+                                    model.filter = Some(expr);
+                                    model.filter_text = trimmed.to_string();
+                                }
+                                Err(err) => {
+                                    model.status = Some(StatusMessage::error(format!(
+                                        "Invalid filter: {}",
+                                        err
+                                    )));
+                                }
+                            }
+                        }
+                        model.rebuild_tree();
                         model.modal = None;
                     }
                 }
@@ -1876,7 +1913,7 @@ fn handle_remote_rename_session(
     {
         session.custom_title = Some(name);
         session.sync_display_name();
-        rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+        model.rebuild_tree();
         return (
             Transition::Continue,
             RemoteResponse::ok(Some(RemoteResult::Ok { message: None })),
@@ -2404,7 +2441,7 @@ fn handle_action(
                     }
                 };
                 if moved {
-                    rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+                    model.rebuild_tree();
                     model.tree.select(selected);
                 }
             }
@@ -2424,7 +2461,7 @@ fn handle_action(
                     }
                 };
                 if moved {
-                    rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+                    model.rebuild_tree();
                     model.tree.select(selected);
                 }
             }
@@ -2673,6 +2710,13 @@ fn handle_action(
             }
             Transition::Continue
         }
+        Action::ToggleFilter => {
+            model.modal = Some(ModalState::SessionFilter {
+                input: InputState::with_value(model.filter_text.clone()),
+                scroll: ScrollState::horizontal(),
+            });
+            Transition::Continue
+        }
     }
 }
 
@@ -2729,7 +2773,7 @@ fn create_session(
         *state = StartupState::Active;
     }
 
-    rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+    model.rebuild_tree();
     model.select_session(SessionKey {
         project: project_id,
         worktree,
@@ -2778,7 +2822,7 @@ fn delete_selected(model: &mut Model) {
             if let Some(pos) = model.projects.iter().position(|p| p.id == pid) {
                 model.projects.remove(pos);
             }
-            rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+            model.rebuild_tree();
             model.set_focus(Focus::Sidebar);
             model.save();
         }
@@ -2802,7 +2846,7 @@ fn delete_selected(model: &mut Model) {
                 return;
             }
             model.projects[project_idx].remove_worktree(wid);
-            rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+            model.rebuild_tree();
             model.set_focus(Focus::Sidebar);
         }
         TreeId::Session(pid, worktree, sid) => {
@@ -2844,7 +2888,7 @@ fn delete_selected(model: &mut Model) {
                         });
                     }
                 }
-                rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+                model.rebuild_tree();
                 model.set_focus(Focus::Sidebar);
             }
         }
@@ -3089,6 +3133,7 @@ fn view(model: &Model) -> Node<Msg> {
         &model.tree_scroll,
         model.auto_hide,
         model.focus == Focus::Sidebar,
+        model.filter.is_some(),
         Msg::Tree,
         || Msg::FocusSidebar,
     );
@@ -3972,7 +4017,7 @@ mod tests {
             }
         }
 
-        rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+        model.rebuild_tree();
 
         let visible_session = model
             .tree
@@ -4012,7 +4057,7 @@ mod tests {
         }
 
         let _ = model.sync_session_state(&TreeId::Session(pid, worktree, sid));
-        rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+        model.rebuild_tree();
 
         let visible_session = model
             .tree
@@ -4434,6 +4479,7 @@ mod tests {
             &model.tree_scroll,
             model.auto_hide,
             true,
+            false,
             Msg::Tree,
             || Msg::FocusSidebar,
         )
@@ -4583,5 +4629,116 @@ mod tests {
                 collect_terminal_layouts_recursive_strip(child, new_origin, layouts);
             }
         }
+    }
+
+    #[test]
+    fn renders_filter_modal() {
+        let modal_state = ModalState::SessionFilter {
+            input: InputState::with_value("title~=test".to_string()),
+            scroll: ScrollState::horizontal(),
+        };
+
+        let mut node = modal_view(&modal_state, |_| panic!("no modal msg expected"));
+
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: taffy::AvailableSpace::Definite(80.0),
+                height: taffy::AvailableSpace::Definite(24.0),
+            },
+        );
+        round_layout(&mut node);
+
+        let mut buffer = DoubleBuffer::new(80, 24);
+        let palette = Palette::default();
+        let mut renderer = Renderer::new(&mut buffer, &palette);
+        renderer
+            .render(&node, Size::new(80, 24))
+            .expect("render should succeed");
+
+        let screen = renderer.buffer().to_string();
+
+        // Should show the filter modal title
+        assert!(
+            screen.contains("Filter sessions"),
+            "screen should contain filter modal title"
+        );
+
+        // Should show the filter input value
+        assert!(
+            screen.contains("title~=test"),
+            "screen should contain the filter text"
+        );
+    }
+
+    #[test]
+    fn filter_bubbles_unread_indicators() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        let project_id = activate_first_project(&mut model);
+        update(&mut model, Msg::NewSession); // Creates session 2
+
+        let first_session = model.projects[0].sessions[0].id;
+        let second_session = model.projects[0].sessions[1].id;
+
+        // Rename sessions to avoid spaces in filter (parser limitation)
+        if let Some(project) = model.projects.get_mut(0) {
+            if let Some(s1) = project.sessions.iter_mut().find(|s| s.id == first_session) {
+                s1.custom_title = Some("unique1".to_string());
+                s1.sync_display_name();
+            }
+            if let Some(s2) = project.sessions.iter_mut().find(|s| s.id == second_session) {
+                s2.custom_title = Some("unique2".to_string());
+                s2.sync_display_name();
+                // Set unread on the second session
+                s2.has_unread_output = true;
+                s2.bell = false;
+            }
+        }
+
+        // Apply a filter that matches ONLY the first session (hides the second one)
+        model.filter = Some(filter::parse_filter("title=unique1").expect("valid filter"));
+
+        // Select the first session so the second one isn't forced to be visible
+        model.select_session(SessionKey {
+            project: project_id,
+            worktree: None,
+            session: first_session,
+        });
+
+        model.rebuild_tree();
+
+        // Check the visible nodes
+        let visible: Vec<_> = model.tree.visible().iter().collect();
+
+        // Verify session 2 is NOT visible
+        let session2_visible = visible.iter().any(|node| match node.id {
+            TreeId::Session(_, _, sid) => sid == second_session,
+            _ => false,
+        });
+        assert!(!session2_visible, "Session 2 should be hidden by filter");
+
+        // Verify session 1 IS visible
+        let session1_visible = visible.iter().any(|node| match node.id {
+            TreeId::Session(_, _, sid) => sid == first_session,
+            _ => false,
+        });
+        assert!(session1_visible, "Session 1 should be visible");
+
+        // Verify Project node has the bubble indicator " •"
+        let project_node = visible
+            .iter()
+            .find(|node| matches!(node.id, TreeId::Project(pid) if pid == project_id))
+            .expect("project node visible");
+
+        assert!(
+            project_node
+                .label
+                .iter()
+                .any(|span| span.content.contains("•")),
+            "Project node should show unread indicator for hidden child"
+        );
     }
 }

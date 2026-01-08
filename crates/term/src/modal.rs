@@ -34,6 +34,10 @@ pub enum ModalState {
         worktree: Option<WorktreeId>,
         session: SessionId,
     },
+    SessionFilter {
+        input: InputState,
+        scroll: scroll::ScrollState,
+    },
 }
 
 /// Messages for modal interactions.
@@ -67,6 +71,8 @@ pub enum ModalResult {
         session: SessionId,
         name: String,
     },
+    /// Session filter was submitted.
+    FilterSubmitted(String),
 }
 
 /// Handle a key event for the modal, returning a message if applicable.
@@ -139,11 +145,16 @@ pub fn modal_update(state: &mut ModalState, msg: ModalMsg) -> ModalResult {
                     }
                 }
             }
+            ModalState::SessionFilter { input, .. } => {
+                let value = input.value();
+                ModalResult::FilterSubmitted(value)
+            }
         },
         ModalMsg::Input(input_msg) => match state {
             ModalState::NewProject { input, .. }
             | ModalState::NewWorktree { input, .. }
-            | ModalState::RenameSession { input, .. } => {
+            | ModalState::RenameSession { input, .. }
+            | ModalState::SessionFilter { input, .. } => {
                 input.update(input_msg);
                 ModalResult::Continue
             }
@@ -151,7 +162,8 @@ pub fn modal_update(state: &mut ModalState, msg: ModalMsg) -> ModalResult {
         ModalMsg::Scroll(input_msg) => match state {
             ModalState::NewProject { scroll, .. }
             | ModalState::NewWorktree { scroll, .. }
-            | ModalState::RenameSession { scroll, .. } => {
+            | ModalState::RenameSession { scroll, .. }
+            | ModalState::SessionFilter { scroll, .. } => {
                 scroll.update(input_msg);
                 ModalResult::Continue
             }
@@ -177,6 +189,7 @@ pub fn modal_view<Msg: Clone + 'static>(
             input, scroll, vcs, ..
         } => ("Add worktree", input, scroll, Some(*vcs)),
         ModalState::RenameSession { input, scroll, .. } => ("Rename session", input, scroll, None),
+        ModalState::SessionFilter { input, scroll } => ("Filter sessions", input, scroll, None),
     };
     let wrap_input = Rc::new(wrap_input);
 

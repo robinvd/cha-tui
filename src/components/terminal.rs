@@ -307,8 +307,8 @@ impl TerminalState {
             TermEvent::ClipboardStore(_, _) | TermEvent::ClipboardLoad(_, _) => {}
             TermEvent::ColorRequest(index, formatter) => {
                 if let Some(term) = term
-                    && let Some(payload) = Self::format_color_response(term, index, formatter.as_ref())
-
+                    && let Some(payload) =
+                        Self::format_color_response(term, index, formatter.as_ref())
                 {
                     let _ = sender.send(Msg::Input(Cow::Owned(payload.into_bytes())));
                 }
