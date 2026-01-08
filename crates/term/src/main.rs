@@ -838,13 +838,11 @@ impl Model {
     }
 
     fn select_session(&mut self, key: SessionKey) {
-        let mut cleared_bell = false;
         let mut cleared_unread = false;
 
         if let Some(project) = self.project_mut(key.project)
             && let Some(session) = project.session_mut(key.worktree, key.session)
         {
-            cleared_bell = session.clear_bell();
             cleared_unread = session.mark_seen();
         }
 
@@ -859,7 +857,7 @@ impl Model {
             );
         }
 
-        if cleared_bell || cleared_unread {
+        if cleared_unread {
             rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
         }
     }
@@ -869,13 +867,11 @@ impl Model {
 
     fn sync_active_from_tree_selection(&mut self) {
         if let Some(TreeId::Session(pid, worktree, sid)) = self.tree.selected().cloned() {
-            let mut cleared_bell = false;
             let mut cleared_unread = false;
 
             if let Some(project) = self.project_mut(pid)
                 && let Some(session) = project.session_mut(worktree, sid)
             {
-                cleared_bell = session.clear_bell();
                 cleared_unread = session.mark_seen();
             }
 
@@ -892,7 +888,7 @@ impl Model {
                 );
             }
 
-            if cleared_bell || cleared_unread {
+            if cleared_unread {
                 rebuild_tree(&self.projects, &mut self.tree, &mut self.active);
             }
         }
@@ -1326,6 +1322,12 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             if let Some(proj) = model.project_mut(project)
                 && let Some(sess) = proj.session_mut(worktree, session)
             {
+                let cleared_bell = if matches!(msg, TerminalMsg::Input(_) | TerminalMsg::Paste(_)) {
+                    sess.clear_bell()
+                } else {
+                    false
+                };
+
                 sess.update(msg);
                 let wakeup = sess.wakeup.clone();
                 transitions.push(Transition::Continue);
@@ -1333,6 +1335,10 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                     TreeId::Session(project, worktree, session),
                     wakeup,
                 ));
+
+                if cleared_bell {
+                    rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+                }
             }
         }
         Msg::SessionWake(id) => {
@@ -3994,7 +4000,7 @@ mod tests {
     }
 
     #[test]
-    fn active_session_clears_bell_indicator() {
+    fn active_session_keeps_bell_indicator_until_input() {
         let Some(mut model) = test_model() else {
             return;
         };
@@ -4028,8 +4034,39 @@ mod tests {
             .map(|span| span.content.clone());
 
         assert!(
-            label.is_none(),
-            "active session label should not contain bell indicator"
+            label.is_some(),
+            "active session label should contain bell indicator before input"
+        );
+
+        // Send input to clear bell
+        update(
+            &mut model,
+            Msg::Terminal {
+                project: pid,
+                worktree,
+                session: sid,
+                msg: TerminalMsg::Input(vec![b'a']),
+            },
+        );
+
+        rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+
+        let visible_session_after = model
+            .tree
+            .visible()
+            .iter()
+            .find(|node| matches!(node.id, TreeId::Session(_, _, _)))
+            .expect("session visible");
+
+        let label_after = visible_session_after
+            .label
+            .iter()
+            .find(|span| span.content.contains('🔔'))
+            .map(|span| span.content.clone());
+
+        assert!(
+            label_after.is_none(),
+            "active session label should not contain bell indicator after input"
         );
     }
 

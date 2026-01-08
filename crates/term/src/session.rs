@@ -102,17 +102,9 @@ impl Session {
     }
 
     /// Check and consume bell state, returns true if bell state changed.
-    pub fn sync_bell(&mut self, is_active: bool) -> BellSync {
+    pub fn sync_bell(&mut self, _is_active: bool) -> BellSync {
         let triggered = self.terminal.take_bell();
         let mut changed = false;
-
-        if is_active {
-            if self.bell {
-                self.bell = false;
-                changed = true;
-            }
-            return BellSync { triggered, changed };
-        }
 
         if triggered && !self.bell {
             self.bell = true;
