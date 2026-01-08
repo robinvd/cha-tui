@@ -20,15 +20,6 @@ pub enum StartupState {
 }
 
 impl Layout {
-    pub fn toggle(self) -> Self {
-        match self {
-            Layout::Zoom => Layout::Tall,
-            Layout::Tall => Layout::Wide,
-            Layout::Wide => Layout::Strip,
-            Layout::Strip => Layout::Zoom,
-        }
-    }
-
     pub fn status_label(self) -> &'static str {
         match self {
             Layout::Zoom => "zoom",
