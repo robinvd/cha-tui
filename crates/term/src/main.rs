@@ -39,6 +39,7 @@ use tracing::warn;
 use chatui::dom::Style;
 use divider::{horizontal_divider, vertical_divider};
 use focus::Focus;
+use fuztea::{FuzzyFinder, FuzzyFinderEvent, FuzzyFinderMsg};
 use keymap::{Action, Keymap, Scope};
 use modal::{ModalMsg, ModalResult, ModalState, modal_handle_key, modal_update, modal_view};
 use project::{Layout, Project, ProjectId, SessionKey, StartupState, Worktree, WorktreeId};
@@ -396,6 +397,10 @@ struct StartupScriptRequest {
     workspace_path: PathBuf,
 }
 
+struct FuzzyFinderState {
+    finder: FuzzyFinder<Layout>,
+}
+
 struct Model {
     io: Arc<dyn TermIo>,
     projects: Vec<Project>,
@@ -415,6 +420,7 @@ struct Model {
     remote_socket: Option<PathBuf>,
     remote_receiver: Option<Receiver<RemoteEnvelope>>,
     strip_scroll: ScrollState,
+    fuzzy_finder: Option<FuzzyFinderState>,
 }
 
 #[derive(Default)]
@@ -453,6 +459,7 @@ impl Model {
             remote_socket,
             remote_receiver: None,
             strip_scroll: ScrollState::horizontal(),
+            fuzzy_finder: None,
         };
 
         let persisted = match model.io.load_projects() {
@@ -824,25 +831,6 @@ impl Model {
         }
     }
 
-    fn toggle_active_layout(&mut self) {
-        let Some(key) = self.active else {
-            return;
-        };
-        let Some(project) = self.project_mut(key.project) else {
-            return;
-        };
-        match key.worktree {
-            Some(wid) => {
-                if let Some(worktree) = project.worktree_mut(wid) {
-                    worktree.layout = worktree.layout.toggle();
-                }
-            }
-            None => {
-                project.layout = project.layout.toggle();
-            }
-        }
-    }
-
     fn project(&self, pid: ProjectId) -> Option<&Project> {
         self.projects.iter().find(|p| p.id == pid)
     }
@@ -1028,6 +1016,85 @@ impl Model {
             warn!(?err, "failed to save projects");
         }
     }
+
+    fn fuzzy_finder_mut(&mut self) -> Option<&mut FuzzyFinderState> {
+        self.fuzzy_finder.as_mut()
+    }
+
+    fn open_layout_picker(&mut self) {
+        let (mut finder, handle) =
+            FuzzyFinder::new(|l: &Layout| vec![l.status_label().to_string()]);
+        handle.push_item(Layout::Tall);
+        handle.push_item(Layout::Wide);
+        handle.push_item(Layout::Strip);
+        handle.push_item(Layout::Zoom);
+        finder.tick();
+
+        self.fuzzy_finder = Some(FuzzyFinderState { finder });
+    }
+
+    fn close_fuzzy_finder(&mut self) {
+        self.fuzzy_finder = None;
+    }
+
+    fn handle_fuzzy_inner(&mut self, msg: FuzzyFinderMsg) -> Transition<Msg> {
+        let Some(fuzzy_state) = self.fuzzy_finder_mut() else {
+            return Transition::Continue;
+        };
+
+        let event = fuztea::update(&mut fuzzy_state.finder, msg, |inner| {
+            Msg::Fuzzy(FuzzyMsg::Inner(inner))
+        });
+
+        match event {
+            FuzzyFinderEvent::Continue => Transition::Continue,
+            FuzzyFinderEvent::Cancel => update(self, Msg::Fuzzy(FuzzyMsg::Cancel)),
+            FuzzyFinderEvent::Select(_) => Transition::Continue, // Wait for Activate (Enter)
+            FuzzyFinderEvent::Activate => update(self, Msg::Fuzzy(FuzzyMsg::Accept)),
+            FuzzyFinderEvent::Task(task) => Transition::Task(task),
+        }
+    }
+
+    fn accept_fuzzy_finder(&mut self) -> Transition<Msg> {
+        let selected_layout = {
+            let Some(fuzzy_state) = self.fuzzy_finder.as_ref() else {
+                return Transition::Continue;
+            };
+            fuzzy_state.finder.current_selection()
+        };
+
+        let Some(layout) = selected_layout else {
+            return self.cancel_fuzzy_finder();
+        };
+
+        self.close_fuzzy_finder();
+        self.set_active_layout(layout);
+        Transition::Continue
+    }
+
+    fn cancel_fuzzy_finder(&mut self) -> Transition<Msg> {
+        self.close_fuzzy_finder();
+        Transition::Continue
+    }
+
+    fn set_active_layout(&mut self, layout: Layout) {
+        let Some(key) = self.active else {
+            return;
+        };
+        let Some(project) = self.project_mut(key.project) else {
+            return;
+        };
+        match key.worktree {
+            Some(wid) => {
+                if let Some(worktree) = project.worktree_mut(wid) {
+                    worktree.layout = layout;
+                }
+            }
+            None => {
+                project.layout = layout;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1065,6 +1132,14 @@ enum Msg {
         ok: bool,
     },
     StripScroll(ScrollMsg),
+    Fuzzy(FuzzyMsg),
+}
+
+#[derive(Clone, Debug)]
+enum FuzzyMsg {
+    Inner(FuzzyFinderMsg),
+    Accept,
+    Cancel,
 }
 
 fn arm_wakeup(tree_id: TreeId, receiver: Receiver<()>) -> Transition<Msg> {
@@ -1243,6 +1318,12 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             return Transition::Multiple(transitions);
         }
         Msg::Key(key) => {
+            // Fuzzy finder key handling takes precedence
+            if model.fuzzy_finder.is_some() {
+                let inner_msg = FuzzyFinderMsg::KeyPressed(key);
+                return update(model, Msg::Fuzzy(FuzzyMsg::Inner(inner_msg)));
+            }
+
             // Modal key handling takes precedence
             if model.modal.is_some() {
                 if let Some(modal_msg) = modal_handle_key(key) {
@@ -1517,6 +1598,13 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                     }
                 }
             }
+        }
+        Msg::Fuzzy(fuzzy_msg) => {
+            return match fuzzy_msg {
+                FuzzyMsg::Inner(inner_msg) => model.handle_fuzzy_inner(inner_msg),
+                FuzzyMsg::Accept => model.accept_fuzzy_finder(),
+                FuzzyMsg::Cancel => model.cancel_fuzzy_finder(),
+            };
         }
         Msg::NewSession => {
             let Some(selected) = model.tree.selected().cloned() else {
@@ -2403,7 +2491,7 @@ fn handle_action(
             Transition::Continue
         }
         Action::ToggleLayout => {
-            model.toggle_active_layout();
+            model.open_layout_picker();
             Transition::Continue
         }
         Action::FocusTerminal => {
@@ -3137,6 +3225,25 @@ fn terminal_pane_strip(model: &Model) -> Node<Msg> {
     .with_flex_grow(1.0)
 }
 
+fn render_fuzzy_finder_modal(state: &FuzzyFinderState) -> Node<Msg> {
+    let content = fuztea::view(&state.finder, |msg| Msg::Fuzzy(FuzzyMsg::Inner(msg)))
+        .with_flex_grow(1.0)
+        .with_flex_basis(Dimension::length(0.0))
+        .with_min_height(Dimension::length(0.0));
+
+    let modal_block = block_with_title("Select Layout", vec![content])
+        .with_width(Dimension::percent(0.7))
+        .with_height(Dimension::percent(0.6))
+        .with_min_width(Dimension::length(40.0))
+        .with_min_height(Dimension::length(12.0))
+        .with_max_width(Dimension::length(90.0))
+        .with_max_height(Dimension::length(26.0))
+        .with_flex_grow(0.0)
+        .with_flex_shrink(0.0);
+
+    chatui::modal(vec![modal_block]).with_id("fuzzy-modal")
+}
+
 fn view(model: &Model) -> Node<Msg> {
     let sidebar = sidebar_view(
         &model.tree,
@@ -3163,6 +3270,10 @@ fn view(model: &Model) -> Node<Msg> {
 
     if let Some(modal_state) = &model.modal {
         nodes.push(modal_view(modal_state, Msg::Modal));
+    }
+
+    if let Some(fuzzy_state) = &model.fuzzy_finder {
+        nodes.push(render_fuzzy_finder_modal(fuzzy_state));
     }
 
     column(nodes).with_fill()
@@ -4298,7 +4409,7 @@ mod tests {
             worktree: None,
             session: first_session,
         });
-        model.toggle_active_layout();
+        model.set_active_layout(Layout::Wide);
 
         let mut node = terminal_pane(&model).with_fill();
         compute_root_layout(
@@ -4341,7 +4452,7 @@ mod tests {
             worktree: None,
             session: second_session,
         });
-        model.toggle_active_layout();
+        model.set_active_layout(Layout::Wide);
 
         let mut node = terminal_pane(&model).with_fill();
         compute_root_layout(
@@ -4576,8 +4687,7 @@ mod tests {
         let _project_id = activate_first_project(&mut model);
 
         // Switch to strip layout
-        model.toggle_active_layout(); // Tall -> Wide
-        model.toggle_active_layout(); // Wide -> Strip
+        model.set_active_layout(Layout::Strip);
         assert_eq!(model.active_layout(), Layout::Strip);
 
         // Add multiple sessions to test strip layout
@@ -4711,6 +4821,78 @@ mod tests {
             screen.contains("title~=test"),
             "screen should contain the filter text"
         );
+    }
+
+    #[test]
+    fn fuzzy_finder_layout_switching() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        activate_first_project(&mut model);
+
+        // Initial layout
+        assert_eq!(model.active_layout(), Layout::Tall);
+
+        // Open layout picker using the keybinding
+        let mut key = Key::new(KeyCode::Char('\\'));
+        key.ctrl = true;
+        update(&mut model, Msg::Key(key));
+        assert!(model.fuzzy_finder.is_some(), "Fuzzy finder should be open");
+
+        // Move selection down to Wide (Tall -> Wide)
+        update(&mut model, Msg::Key(Key::new(KeyCode::Down)));
+
+        // Press Enter to accept
+        update(&mut model, Msg::Key(Key::new(KeyCode::Enter)));
+
+        assert!(
+            model.fuzzy_finder.is_none(),
+            "Fuzzy finder should be closed"
+        );
+        assert_eq!(
+            model.active_layout(),
+            Layout::Wide,
+            "Layout should be switched to Wide"
+        );
+
+        // Open again
+        model.open_layout_picker();
+
+        // Move to Strip (Tall -> Wide -> Strip)
+        update(&mut model, Msg::Key(Key::new(KeyCode::Down)));
+        update(&mut model, Msg::Key(Key::new(KeyCode::Down)));
+        update(&mut model, Msg::Key(Key::new(KeyCode::Enter)));
+
+        assert_eq!(model.active_layout(), Layout::Strip);
+    }
+
+    #[test]
+    fn fuzzy_finder_renders_correctly() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        activate_first_project(&mut model);
+
+        // Open layout picker
+        model.open_layout_picker();
+
+        let mut node = view(&model);
+        compute_root_layout(
+            &mut node,
+            u64::MAX.into(),
+            taffy::Size {
+                width: taffy::AvailableSpace::Definite(60.0),
+                height: taffy::AvailableSpace::Definite(20.0),
+            },
+        );
+        round_layout(&mut node);
+
+        let lines = render_node_to_lines(&mut node, 60, 20).expect("render should succeed");
+        let output = lines.join("\n");
+
+        assert!(output.contains("Select Layout"), "Should show modal title");
+        assert!(output.contains("tall"), "Should show 'tall' option");
+        assert!(output.contains("wide"), "Should show 'wide' option");
     }
 
     #[test]

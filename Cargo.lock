@@ -1682,6 +1682,7 @@ dependencies = [
  "facet",
  "facet-args",
  "facet-json",
+ "fuztea",
  "miette",
  "once_cell",
  "smol",
