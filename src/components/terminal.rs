@@ -222,6 +222,8 @@ pub struct TerminalState {
 struct ContentTracker {
     hash: u64,
     version: u64,
+    text_hash: u64,
+    text_version: u64,
 }
 
 impl std::fmt::Debug for TerminalState {
@@ -305,8 +307,8 @@ impl TerminalState {
             TermEvent::ClipboardStore(_, _) | TermEvent::ClipboardLoad(_, _) => {}
             TermEvent::ColorRequest(index, formatter) => {
                 if let Some(term) = term
-                    && let Some(payload) =
-                        Self::format_color_response(term, index, formatter.as_ref())
+                    && let Some(payload) = Self::format_color_response(term, index, formatter.as_ref())
+
                 {
                     let _ = sender.send(Msg::Input(Cow::Owned(payload.into_bytes())));
                 }
@@ -611,6 +613,16 @@ impl TerminalState {
 
     /// Get the version for visible content changes (excluding cursor updates).
     pub fn content_version(&self) -> u64 {
+        self.content_versions().0
+    }
+
+    /// Get the version for visible text content changes (excluding colors and cursor updates).
+    pub fn text_content_version(&self) -> u64 {
+        self.content_versions().1
+    }
+
+    /// Get the versions for visible content changes (full, text-only).
+    pub fn content_versions(&self) -> (u64, u64) {
         let mut tracker = self
             .content_tracker
             .lock()
@@ -621,8 +633,14 @@ impl TerminalState {
                 tracker.hash = hash;
                 tracker.version = tracker.version.wrapping_add(1);
             }
+
+            let text_hash = self.compute_text_hash();
+            if tracker.text_hash != text_hash {
+                tracker.text_hash = text_hash;
+                tracker.text_version = tracker.text_version.wrapping_add(1);
+            }
         }
-        tracker.version
+        (tracker.version, tracker.text_version)
     }
 
     fn compute_content_hash(&self) -> u64 {
@@ -634,6 +652,16 @@ impl TerminalState {
             hash_ansi_color(cell.fg, &mut hasher);
             hash_ansi_color(cell.bg, &mut hasher);
             cell.flags.bits().hash(&mut hasher);
+        }
+        hasher.finish()
+    }
+
+    fn compute_text_hash(&self) -> u64 {
+        let term = self.term.lock();
+        let content = term.renderable_content();
+        let mut hasher = DefaultHasher::new();
+        for cell in content.display_iter {
+            cell.c.hash(&mut hasher);
         }
         hasher.finish()
     }
@@ -652,6 +680,7 @@ impl TerminalState {
         self.content_dirty.store(true, Ordering::Relaxed);
         if let Ok(mut tracker) = self.content_tracker.lock() {
             tracker.hash = tracker.hash.wrapping_add(1);
+            tracker.text_hash = tracker.text_hash.wrapping_add(1);
         }
     }
 
