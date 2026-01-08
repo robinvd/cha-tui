@@ -81,6 +81,31 @@ pub fn save_projects(projects: &[Project]) -> io::Result<()> {
     save_projects_to_root(projects, None)
 }
 
+/// Atomically write data to a file by writing to a temp file first, then renaming.
+fn atomic_write(path: &Path, data: &str) -> io::Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "path has no parent directory")
+    })?;
+
+    // Create temp file in same directory to ensure atomic rename works
+    let temp_path = parent.join(format!(
+        ".{}.tmp.{}",
+        path.file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("config"),
+        std::process::id()
+    ));
+
+    // Write to temp file
+    fs::write(&temp_path, data)?;
+
+    // Atomically rename to target path
+    fs::rename(&temp_path, path).inspect_err(|_| {
+        // Clean up temp file on failure
+        let _ = fs::remove_file(&temp_path);
+    })
+}
+
 pub fn save_projects_to_root(projects: &[Project], root: Option<&Path>) -> io::Result<()> {
     let path = config_path_with_root(root)?;
     if let Some(parent) = path.parent() {
@@ -98,6 +123,5 @@ pub fn save_projects_to_root(projects: &[Project], root: Option<&Path>) -> io::R
         projects: persisted_projects,
     };
     let data = facet_json::to_string(&state).map_err(io::Error::other)?;
-    fs::write(path, data)?;
-    Ok(())
+    atomic_write(&path, &data)
 }

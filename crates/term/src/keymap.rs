@@ -39,6 +39,8 @@ pub enum Action {
     StripScrollLeft,
     StripScrollRight,
     ToggleFilter,
+    DeactivateProject,
+    OpenProjectSwitcher,
 }
 
 /// Normalized representation of a key chord.
@@ -461,6 +463,20 @@ pub static DEFAULT_BINDINGS: &[Binding] = &[
         description: "filter",
         show_in_status: true,
     },
+    Binding {
+        scope: Scope::Sidebar,
+        chord: KeyChord::new(KeyCode::Char('x')),
+        action: Action::DeactivateProject,
+        description: "deactivate",
+        show_in_status: true,
+    },
+    Binding {
+        scope: Scope::Sidebar,
+        chord: KeyChord::new(KeyCode::Char('/')),
+        action: Action::OpenProjectSwitcher,
+        description: "switch project",
+        show_in_status: true,
+    },
     // Terminal scope
     Binding {
         scope: Scope::Terminal,
@@ -565,6 +581,16 @@ impl Keymap {
             Focus::Sidebar => &self.sidebar_shortcuts,
         }
     }
+
+    /// Find the key chord for a given action in the specified scope.
+    pub fn find_chord(&self, scope: Scope, action: Action) -> Option<KeyChord> {
+        self.lookup.get(&scope).and_then(|bindings| {
+            bindings
+                .iter()
+                .find(|&(_, &a)| a == action)
+                .map(|(&chord, _)| chord)
+        })
+    }
 }
 
 impl Default for Keymap {
@@ -573,7 +599,7 @@ impl Default for Keymap {
     }
 }
 
-const SIDEBAR_ACTIONS: [Action; 12] = [
+const SIDEBAR_ACTIONS: [Action; 14] = [
     Action::ToggleFocus,
     Action::ToggleLayout,
     Action::Quit,
@@ -586,6 +612,8 @@ const SIDEBAR_ACTIONS: [Action; 12] = [
     Action::MoveSelectionUp,
     Action::ActivateSelected,
     Action::ToggleFilter,
+    Action::DeactivateProject,
+    Action::OpenProjectSwitcher,
 ];
 
 const TERMINAL_ACTIONS: [Action; 6] = [

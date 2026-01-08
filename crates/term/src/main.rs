@@ -52,8 +52,8 @@ use remote::{
 };
 use session::{Session, SessionId};
 use sidebar::{
-    TreeId, move_project_down, move_project_up, next_session, prev_session, rebuild_tree,
-    section_style, sidebar_view,
+    TreeId, has_active_projects, move_project_down, move_project_up, next_session, prev_session,
+    rebuild_tree, section_style, sidebar_view,
 };
 use status::{StatusMessage, status_bar_view};
 use term_io::{RealIo, StartupScript, TermIo};
@@ -397,8 +397,29 @@ struct StartupScriptRequest {
     workspace_path: PathBuf,
 }
 
+/// An item in the project switcher fuzzy finder.
+#[derive(Clone, Debug, PartialEq)]
+struct ProjectSwitcherItem {
+    project_id: ProjectId,
+    worktree_id: Option<WorktreeId>,
+    label: String,
+    is_active: bool,
+}
+
+enum FuzzyFinderKind {
+    Layout(FuzzyFinder<(Layout, String)>),
+    ProjectSwitcher(FuzzyFinder<ProjectSwitcherItem>),
+}
+
 struct FuzzyFinderState {
-    finder: FuzzyFinder<(Layout, String)>,
+    kind: FuzzyFinderKind,
+}
+
+/// A project or worktree container reference for recent tracking.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ContainerRef {
+    project_id: ProjectId,
+    worktree_id: Option<WorktreeId>,
 }
 
 struct Model {
@@ -421,6 +442,7 @@ struct Model {
     remote_receiver: Option<Receiver<RemoteEnvelope>>,
     strip_scroll: ScrollState,
     fuzzy_finder: Option<FuzzyFinderState>,
+    recent_containers: Vec<ContainerRef>,
 }
 
 #[derive(Default)]
@@ -460,6 +482,7 @@ impl Model {
             remote_receiver: None,
             strip_scroll: ScrollState::horizontal(),
             fuzzy_finder: None,
+            recent_containers: Vec::new(),
         };
 
         let persisted = match model.io.load_projects() {
@@ -689,6 +712,29 @@ impl Model {
             }
         }
         self.rebuild_tree();
+        self.track_recent_container(project_id, worktree);
+    }
+
+    fn track_recent_container(&mut self, project_id: ProjectId, worktree: Option<WorktreeId>) {
+        let container = ContainerRef {
+            project_id,
+            worktree_id: worktree,
+        };
+        // Remove if already present to move to front
+        self.recent_containers.retain(|c| c != &container);
+        // Add to front
+        self.recent_containers.insert(0, container);
+        // Keep only the last 20 recent containers
+        self.recent_containers.truncate(20);
+
+        // Also reorder the projects list to put this project first (for persistence)
+        if let Some(idx) = self.projects.iter().position(|p| p.id == project_id)
+            && idx > 0
+        {
+            let project = self.projects.remove(idx);
+            self.projects.insert(0, project);
+            self.save();
+        }
     }
 
     fn finish_startup_script(
@@ -1017,10 +1063,6 @@ impl Model {
         }
     }
 
-    fn fuzzy_finder_mut(&mut self) -> Option<&mut FuzzyFinderState> {
-        self.fuzzy_finder.as_mut()
-    }
-
     fn open_layout_picker(&mut self) {
         let active_layout = self.active_layout();
         let (mut finder, handle) =
@@ -1044,7 +1086,75 @@ impl Model {
         }
         finder.tick();
 
-        self.fuzzy_finder = Some(FuzzyFinderState { finder });
+        self.fuzzy_finder = Some(FuzzyFinderState {
+            kind: FuzzyFinderKind::Layout(finder),
+        });
+    }
+
+    fn open_project_switcher(&mut self) {
+        let (mut finder, handle) =
+            FuzzyFinder::new(|item: &ProjectSwitcherItem| vec![item.label.clone()]);
+
+        // Build a set of container refs that were recently used (to avoid duplicates)
+        let recent_set: std::collections::HashSet<_> = self
+            .recent_containers
+            .iter()
+            .map(|c| (c.project_id, c.worktree_id))
+            .collect();
+
+        // Add recently used containers first (in order of recency)
+        for recent in &self.recent_containers {
+            if let Some(project) = self.project(recent.project_id) {
+                match recent.worktree_id {
+                    None => {
+                        handle.push_item(ProjectSwitcherItem {
+                            project_id: project.id,
+                            worktree_id: None,
+                            label: project.name.clone(),
+                            is_active: project.startup_state != StartupState::Inactive,
+                        });
+                    }
+                    Some(wid) => {
+                        if let Some(worktree) = project.worktree(wid) {
+                            handle.push_item(ProjectSwitcherItem {
+                                project_id: project.id,
+                                worktree_id: Some(worktree.id),
+                                label: format!("{}/{}", project.name, worktree.name),
+                                is_active: worktree.startup_state != StartupState::Inactive,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Add all projects and worktrees (skipping those already added as recent)
+        for project in &self.projects {
+            if !recent_set.contains(&(project.id, None)) {
+                handle.push_item(ProjectSwitcherItem {
+                    project_id: project.id,
+                    worktree_id: None,
+                    label: project.name.clone(),
+                    is_active: project.startup_state != StartupState::Inactive,
+                });
+            }
+            for worktree in &project.worktrees {
+                if !recent_set.contains(&(project.id, Some(worktree.id))) {
+                    handle.push_item(ProjectSwitcherItem {
+                        project_id: project.id,
+                        worktree_id: Some(worktree.id),
+                        label: format!("{}/{}", project.name, worktree.name),
+                        is_active: worktree.startup_state != StartupState::Inactive,
+                    });
+                }
+            }
+        }
+
+        finder.tick();
+
+        self.fuzzy_finder = Some(FuzzyFinderState {
+            kind: FuzzyFinderKind::ProjectSwitcher(finder),
+        });
     }
 
     fn close_fuzzy_finder(&mut self) {
@@ -1052,37 +1162,56 @@ impl Model {
     }
 
     fn handle_fuzzy_inner(&mut self, msg: FuzzyFinderMsg) -> Transition<Msg> {
-        let Some(fuzzy_state) = self.fuzzy_finder_mut() else {
+        let Some(fuzzy_state) = self.fuzzy_finder.as_mut() else {
             return Transition::Continue;
         };
 
-        let event = fuztea::update(&mut fuzzy_state.finder, msg, |inner| {
-            Msg::Fuzzy(FuzzyMsg::Inner(inner))
-        });
-
-        match event {
-            FuzzyFinderEvent::Continue => Transition::Continue,
-            FuzzyFinderEvent::Cancel => update(self, Msg::Fuzzy(FuzzyMsg::Cancel)),
-            FuzzyFinderEvent::Select(_) => Transition::Continue, // Wait for Activate (Enter)
-            FuzzyFinderEvent::Activate => update(self, Msg::Fuzzy(FuzzyMsg::Accept)),
-            FuzzyFinderEvent::Task(task) => Transition::Task(task),
+        match &mut fuzzy_state.kind {
+            FuzzyFinderKind::Layout(finder) => {
+                let event = fuztea::update(finder, msg, |inner| Msg::Fuzzy(FuzzyMsg::Inner(inner)));
+                match event {
+                    FuzzyFinderEvent::Continue => Transition::Continue,
+                    FuzzyFinderEvent::Cancel => update(self, Msg::Fuzzy(FuzzyMsg::Cancel)),
+                    FuzzyFinderEvent::Select(_) => Transition::Continue,
+                    FuzzyFinderEvent::Activate => update(self, Msg::Fuzzy(FuzzyMsg::Accept)),
+                    FuzzyFinderEvent::Task(task) => Transition::Task(task),
+                }
+            }
+            FuzzyFinderKind::ProjectSwitcher(finder) => {
+                let event = fuztea::update(finder, msg, |inner| Msg::Fuzzy(FuzzyMsg::Inner(inner)));
+                match event {
+                    FuzzyFinderEvent::Continue => Transition::Continue,
+                    FuzzyFinderEvent::Cancel => update(self, Msg::Fuzzy(FuzzyMsg::Cancel)),
+                    FuzzyFinderEvent::Select(_) => Transition::Continue,
+                    FuzzyFinderEvent::Activate => update(self, Msg::Fuzzy(FuzzyMsg::Accept)),
+                    FuzzyFinderEvent::Task(task) => Transition::Task(task),
+                }
+            }
         }
     }
 
     fn accept_fuzzy_finder(&mut self) -> Transition<Msg> {
-        let selected_layout = {
-            let Some(fuzzy_state) = self.fuzzy_finder.as_ref() else {
-                return Transition::Continue;
-            };
-            fuzzy_state.finder.current_selection()
+        let Some(fuzzy_state) = self.fuzzy_finder.take() else {
+            return Transition::Continue;
         };
 
-        let Some((layout, _)) = selected_layout else {
-            return self.cancel_fuzzy_finder();
-        };
-
-        self.close_fuzzy_finder();
-        self.set_active_layout(layout);
+match fuzzy_state.kind {
+            FuzzyFinderKind::Layout(finder) => {
+                if let Some((layout, _)) = finder.current_selection() {
+                    self.set_active_layout(layout);
+                }
+            }
+            FuzzyFinderKind::ProjectSwitcher(finder) => {
+                if let Some(item) = finder.current_selection() {
+                    let mut transitions = Vec::new();
+                    self.activate_container(item.project_id, item.worktree_id, &mut transitions);
+                    self.set_focus(Focus::Sidebar);
+                    if !transitions.is_empty() {
+                        return Transition::Multiple(transitions);
+                    }
+                }
+            }
+        }
         Transition::Continue
     }
 
@@ -1138,6 +1267,8 @@ enum Msg {
     OpenNewWorktree {
         project: ProjectId,
     },
+    OpenProjectSwitcher,
+    ActivateRecentProject(usize),
     Modal(ModalMsg),
     NewSession,
     StartupScriptFinished {
@@ -1348,6 +1479,37 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 return Transition::Multiple(transitions);
             }
 
+            // Welcome screen: handle number keys for recent projects
+            if !has_active_projects(&model.projects)
+                && let KeyCode::Char(c) = key.code
+                && !key.ctrl
+                && !key.alt
+                && !key.super_key
+            {
+                let index = match c {
+                    '1' => Some(0),
+                    '2' => Some(1),
+                    '3' => Some(2),
+                    '4' => Some(3),
+                    '5' => Some(4),
+                    '6' => Some(5),
+                    '7' => Some(6),
+                    '8' => Some(7),
+                    '9' => Some(8),
+                    '0' => Some(9),
+                    _ => None,
+                };
+                if let Some(idx) = index {
+                    return update(model, Msg::ActivateRecentProject(idx));
+                }
+
+                // On welcome screen, also check sidebar scope for p and / keys
+                let scopes = vec![Scope::Sidebar, Scope::Global];
+                if let Some(action) = model.keymap.resolve(&scopes, key) {
+                    return handle_action(model, action, key, transitions);
+                }
+            }
+
             // Determine scopes in priority order
             let scopes = match model.focus {
                 Focus::TerminalLocked => vec![Scope::TerminalLocked],
@@ -1544,6 +1706,16 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 vcs,
             });
             model.set_focus(Focus::Sidebar);
+        }
+        Msg::OpenProjectSwitcher => {
+            model.open_project_switcher();
+        }
+        Msg::ActivateRecentProject(index) => {
+            if let Some(project) = model.projects.get(index) {
+                let project_id = project.id;
+                model.activate_container(project_id, None, &mut transitions);
+                model.set_focus(Focus::Sidebar);
+            }
         }
         Msg::Modal(modal_msg) => {
             if let Some(mut modal_state) = model.modal.take() {
@@ -1845,8 +2017,69 @@ fn handle_remote_activate_target(
         TreeId::Project(project_id)
     };
 
-    model.tree.select(target);
-    action_response(model, Action::ActivateSelected)
+    // Activate the container first (this makes it visible in the tree if it was inactive)
+    let mut transitions = Vec::new();
+    let worktree_id = match target {
+        TreeId::Project(_) => None,
+        TreeId::Worktree(_, wid) => Some(wid),
+        TreeId::Session(_, wt, _) => wt,
+    };
+    model.activate_container(project_id, worktree_id, &mut transitions);
+
+    // Now select the appropriate target - if it's a project/worktree, select the first session
+    match target {
+        TreeId::Project(pid) => {
+            model.tree.select(target);
+            model.tree.set_expanded(target, true);
+            if let Some(project) = model.project(pid)
+                && let Some(session) = project.sessions.first()
+            {
+                model.select_session(SessionKey {
+                    project: pid,
+                    worktree: None,
+                    session: session.id,
+                });
+            } else if let Some(project) = model.project(pid)
+                && let Some(wt) = project.worktrees.first()
+                && let Some(session) = wt.sessions.first()
+            {
+                model.select_session(SessionKey {
+                    project: pid,
+                    worktree: Some(wt.id),
+                    session: session.id,
+                });
+            }
+        }
+        TreeId::Worktree(pid, wid) => {
+            model.tree.select(target);
+            model.tree.set_expanded(target, true);
+            if let Some(project) = model.project(pid)
+                && let Some(wt) = project.worktree(wid)
+                && let Some(session) = wt.sessions.first()
+            {
+                model.select_session(SessionKey {
+                    project: pid,
+                    worktree: Some(wid),
+                    session: session.id,
+                });
+            }
+        }
+        TreeId::Session(pid, wt, sid) => {
+            model.select_session(SessionKey {
+                project: pid,
+                worktree: wt,
+                session: sid,
+            });
+        }
+    }
+
+    let response = RemoteResponse::ok(Some(RemoteResult::Ok { message: None }));
+
+    if transitions.is_empty() {
+        (Transition::Continue, response)
+    } else {
+        (Transition::Multiple(transitions), response)
+    }
 }
 
 fn handle_remote_new_session(
@@ -2838,6 +3071,31 @@ fn handle_action(
             });
             Transition::Continue
         }
+        Action::DeactivateProject => {
+            let Some(selected) = model.tree.selected().cloned() else {
+                return Transition::Continue;
+            };
+            let project_id = match selected {
+                TreeId::Project(pid) => pid,
+                TreeId::Worktree(pid, _) => pid,
+                TreeId::Session(pid, _, _) => pid,
+            };
+            if let Some(project) = model.project_mut(project_id) {
+                project.startup_state = StartupState::Inactive;
+                // Also deactivate all worktrees and clear sessions
+                for worktree in &mut project.worktrees {
+                    worktree.startup_state = StartupState::Inactive;
+                    worktree.sessions.clear();
+                }
+                project.sessions.clear();
+            }
+            model.rebuild_tree();
+            Transition::Continue
+        }
+        Action::OpenProjectSwitcher => {
+            model.open_project_switcher();
+            Transition::Continue
+        }
     }
 }
 
@@ -3025,6 +3283,83 @@ fn terminal_pane(model: &Model) -> Node<Msg> {
         Layout::Wide => terminal_pane_wide(model),
         Layout::Strip => terminal_pane_strip(model),
     }
+}
+
+/// Label for a numbered shortcut key (1-9 then 0 for 10).
+fn index_key_label(index: usize) -> String {
+    if index < 9 {
+        format!("{}", index + 1)
+    } else if index == 9 {
+        "0".to_string()
+    } else {
+        "".to_string()
+    }
+}
+
+/// Fullscreen welcome view shown when no projects are active.
+fn welcome_view(model: &Model) -> Node<Msg> {
+    let new_project_key = model
+        .keymap
+        .find_chord(keymap::Scope::Sidebar, Action::NewProject)
+        .map(|c| c.label())
+        .unwrap_or_else(|| "p".to_string());
+    let switcher_key = model
+        .keymap
+        .find_chord(keymap::Scope::Sidebar, Action::OpenProjectSwitcher)
+        .map(|c| c.label())
+        .unwrap_or_else(|| "/".to_string());
+
+    let title_style = Style::bold();
+    let dim_style = Style::dim();
+
+    let mut content = vec![
+        text::<Msg>(""),
+        text::<Msg>("Welcome to Term!").with_style(title_style),
+        text::<Msg>(""),
+        text::<Msg>(format!("[{}] Add a new project", new_project_key))
+            .on_click(|| Msg::OpenNewProject),
+        text::<Msg>(format!("[{}] Switch to an existing project", switcher_key))
+            .on_click(|| Msg::OpenProjectSwitcher),
+        text::<Msg>(""),
+    ];
+
+    // Add recent projects (up to 10)
+    let recent_projects: Vec<_> = model.projects.iter().take(10).collect();
+    if !recent_projects.is_empty() {
+        content.push(text::<Msg>("Recent projects:").with_style(dim_style));
+        content.push(text::<Msg>(""));
+
+        let mut project_items = Vec::new();
+        for (idx, project) in recent_projects.iter().enumerate() {
+            let key_label = index_key_label(idx);
+            let label = format!("[{}] {}", key_label, project.name);
+            let item = text::<Msg>(label)
+                .on_click(move || Msg::ActivateRecentProject(idx))
+                .with_min_width(Dimension::length(30.0))
+                .with_max_width(Dimension::length(40.0));
+            project_items.push(item);
+        }
+
+        // Wrap in a flex column container with row direction and wrap
+        let projects_container = row(vec![
+            column(project_items)
+                .with_flex_wrap(FlexWrap::Wrap)
+                .with_max_height(Dimension::length(200.0))
+                .with_flex_grow(0.0),
+        ]);
+        content.push(projects_container);
+    }
+
+    // Center the content
+    let content_column = column(content)
+        .with_flex_grow(0.0)
+        .with_align_items(taffy::AlignItems::Center);
+
+    // Wrap in a centered container
+    column(vec![content_column])
+        .with_fill()
+        .with_justify_content(taffy::AlignContent::Center)
+        .with_align_items(taffy::AlignItems::Center)
 }
 
 fn terminal_pane_placeholder(model: &Model) -> Node<Msg> {
@@ -3389,12 +3724,24 @@ fn terminal_pane_strip(model: &Model) -> Node<Msg> {
 }
 
 fn render_fuzzy_finder_modal(state: &FuzzyFinderState) -> Node<Msg> {
-    let content = fuztea::view(&state.finder, |msg| Msg::Fuzzy(FuzzyMsg::Inner(msg)))
-        .with_flex_grow(1.0)
-        .with_flex_basis(Dimension::length(0.0))
-        .with_min_height(Dimension::length(0.0));
+    let (content, title) = match &state.kind {
+        FuzzyFinderKind::Layout(finder) => (
+            fuztea::view(finder, |msg| Msg::Fuzzy(FuzzyMsg::Inner(msg)))
+                .with_flex_grow(1.0)
+                .with_flex_basis(Dimension::length(0.0))
+                .with_min_height(Dimension::length(0.0)),
+            "Select Layout",
+        ),
+        FuzzyFinderKind::ProjectSwitcher(finder) => (
+            fuztea::view(finder, |msg| Msg::Fuzzy(FuzzyMsg::Inner(msg)))
+                .with_flex_grow(1.0)
+                .with_flex_basis(Dimension::length(0.0))
+                .with_min_height(Dimension::length(0.0)),
+            "Switch Project",
+        ),
+    };
 
-    let modal_block = block_with_title("Select Layout", vec![content])
+    let modal_block = block_with_title(title, vec![content])
         .with_width(Dimension::percent(0.7))
         .with_height(Dimension::percent(0.6))
         .with_min_width(Dimension::length(40.0))
@@ -3408,6 +3755,22 @@ fn render_fuzzy_finder_modal(state: &FuzzyFinderState) -> Node<Msg> {
 }
 
 fn view(model: &Model) -> Node<Msg> {
+    // Show fullscreen welcome when no projects are active
+    if !has_active_projects(&model.projects) {
+        let mut nodes = vec![welcome_view(model)];
+
+        // Still show modals and fuzzy finder on top of welcome screen
+        if let Some(modal_state) = &model.modal {
+            nodes.push(modal_view(modal_state, Msg::Modal));
+        }
+
+        if let Some(fuzzy_state) = &model.fuzzy_finder {
+            nodes.push(render_fuzzy_finder_modal(fuzzy_state));
+        }
+
+        return column(nodes).with_fill();
+    }
+
     let sidebar = sidebar_view(
         &model.tree,
         &model.tree_scroll,
@@ -4075,7 +4438,9 @@ mod tests {
         let (_, response) = handle_remote_activate_target(&mut model, &params);
 
         assert!(response.ok, "expected ok response, got {response:?}");
-        let secondary_session = model.projects[1]
+        let secondary_session = model
+            .project(secondary_project)
+            .expect("secondary project exists")
             .sessions
             .first()
             .expect("secondary session created")
@@ -5131,6 +5496,192 @@ mod tests {
                 .iter()
                 .any(|span| span.content.contains("•")),
             "Project node should show unread indicator for hidden child"
+        );
+    }
+
+    #[test]
+    fn welcome_view_shows_when_no_active_projects() {
+        let Some(model) = test_model() else {
+            return;
+        };
+        // By default, all projects are inactive
+        assert!(!has_active_projects(&model.projects));
+
+        let mut node = view(&model);
+        let lines = render_node_to_lines(&mut node, 80, 24).expect("render succeeds");
+        let content = lines.join("\n");
+
+        assert!(
+            content.contains("Welcome to Term!"),
+            "Should show welcome title"
+        );
+        assert!(
+            content.contains("Add a new project"),
+            "Should show add project hint"
+        );
+        assert!(
+            content.contains("Switch to an existing project"),
+            "Should show switch hint"
+        );
+    }
+
+    #[test]
+    fn welcome_view_shows_recent_projects() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        // Add some projects (they start inactive)
+        let cwd = std::env::current_dir().expect("cwd available");
+        model
+            .add_project(cwd.clone(), "project-alpha".to_string())
+            .expect("project added");
+        model
+            .add_project(cwd.clone(), "project-beta".to_string())
+            .expect("project added");
+
+        let mut node = view(&model);
+        let lines = render_node_to_lines(&mut node, 80, 24).expect("render succeeds");
+        let content = lines.join("\n");
+
+        assert!(
+            content.contains("Recent projects:"),
+            "Should show recent section"
+        );
+        assert!(
+            content.contains("project-alpha"),
+            "Should show first project"
+        );
+        assert!(
+            content.contains("project-beta"),
+            "Should show second project"
+        );
+        assert!(
+            content.contains("[1]"),
+            "Should show number key for first project"
+        );
+        assert!(
+            content.contains("[2]"),
+            "Should show number key for second project"
+        );
+    }
+
+    #[test]
+    fn welcome_view_wraps_projects_to_columns() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        let cwd = std::env::current_dir().expect("cwd available");
+        // Add several projects
+        for i in 1..=6 {
+            model
+                .add_project(cwd.clone(), format!("proj{}", i))
+                .expect("project added");
+        }
+
+        // Render with enough space for columns to wrap
+        let mut node = view(&model);
+        let lines = render_node_to_lines(&mut node, 120, 24).expect("render succeeds");
+        let content = lines.join("\n");
+
+        // All projects should still be visible
+        for i in 1..=6 {
+            assert!(
+                content.contains(&format!("proj{}", i)),
+                "Project {} should be visible",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn welcome_view_number_keys_activate_projects() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        let cwd = std::env::current_dir().expect("cwd available");
+        model
+            .add_project(cwd.clone(), "first".to_string())
+            .expect("project added");
+        model
+            .add_project(cwd.clone(), "second".to_string())
+            .expect("project added");
+
+        // The projects list now has: [initial_cwd, first, second]
+        // Press '3' to activate the third project (index 2 = "second")
+        let key = Key::new(KeyCode::Char('3'));
+        update(&mut model, Msg::Key(key));
+
+        // The "second" project should now be active
+        let second_project_id = model
+            .projects
+            .iter()
+            .find(|p| p.name == "second")
+            .expect("second project exists")
+            .id;
+        assert_eq!(
+            model.project(second_project_id).map(|p| p.startup_state),
+            Some(StartupState::Active),
+            "Second project should be active"
+        );
+    }
+
+    #[test]
+    fn welcome_view_not_shown_when_projects_active() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        activate_first_project(&mut model);
+
+        assert!(has_active_projects(&model.projects));
+
+        let mut node = view(&model);
+        let lines = render_node_to_lines(&mut node, 80, 24).expect("render succeeds");
+        let content = lines.join("\n");
+
+        // Should NOT show welcome message
+        assert!(
+            !content.contains("Welcome to Term!"),
+            "Should not show welcome when projects are active"
+        );
+    }
+
+    #[test]
+    fn welcome_view_slash_opens_project_switcher() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        // Ensure we're on welcome screen
+        assert!(!has_active_projects(&model.projects));
+        assert!(model.fuzzy_finder.is_none());
+
+        // Press '/' to open project switcher
+        let key = Key::new(KeyCode::Char('/'));
+        update(&mut model, Msg::Key(key));
+
+        // Fuzzy finder should now be open
+        assert!(
+            model.fuzzy_finder.is_some(),
+            "Project switcher should be open after pressing /"
+        );
+    }
+
+    #[test]
+    fn welcome_view_p_opens_new_project() {
+        let Some(mut model) = test_model() else {
+            return;
+        };
+        // Ensure we're on welcome screen
+        assert!(!has_active_projects(&model.projects));
+        assert!(model.modal.is_none());
+
+        // Press 'p' to open new project modal
+        let key = Key::new(KeyCode::Char('p'));
+        update(&mut model, Msg::Key(key));
+
+        // Modal should now be open
+        assert!(
+            matches!(model.modal, Some(ModalState::NewProject { .. })),
+            "New project modal should be open after pressing p"
         );
     }
 }

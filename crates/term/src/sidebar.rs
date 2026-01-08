@@ -54,6 +54,10 @@ pub fn rebuild_tree(
 
     let mut items = Vec::new();
     for project in projects {
+        // Skip inactive projects entirely
+        if project.startup_state == StartupState::Inactive {
+            continue;
+        }
         let mut children = Vec::new();
         let mut project_has_hidden_unread = false;
 
@@ -197,16 +201,9 @@ pub fn rebuild_tree(
             let loading_style = Style::dim();
             label.push(TextSpan::new(" ⟳", loading_style));
         }
-        match project.startup_state {
-            StartupState::Inactive => {
-                let state_style = Style::dim();
-                label.push(TextSpan::new(" inactive", state_style));
-            }
-            StartupState::Loading => {
-                let state_style = Style::dim();
-                label.push(TextSpan::new(" loading", state_style));
-            }
-            StartupState::Active => {}
+        if project.startup_state == StartupState::Loading {
+            let state_style = Style::dim();
+            label.push(TextSpan::new(" loading", state_style));
         }
 
         items.push(
@@ -245,9 +242,13 @@ pub fn rebuild_tree(
     }
 }
 
-/// Get the first session ID from projects.
+/// Get the first session ID from projects (only from active projects).
 pub fn first_session_id(projects: &[Project]) -> Option<SessionKey> {
     for project in projects {
+        // Skip inactive projects
+        if project.startup_state == StartupState::Inactive {
+            continue;
+        }
         if let Some(session) = project.sessions.first() {
             return Some(SessionKey {
                 project: project.id,
@@ -266,6 +267,13 @@ pub fn first_session_id(projects: &[Project]) -> Option<SessionKey> {
         }
     }
     None
+}
+
+/// Check if there are any active projects.
+pub fn has_active_projects(projects: &[Project]) -> bool {
+    projects
+        .iter()
+        .any(|p| p.startup_state != StartupState::Inactive)
 }
 
 /// Get the next session in the tree order.
