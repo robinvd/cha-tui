@@ -8,6 +8,8 @@ use super::session::{Session, SessionId};
 pub enum Layout {
     Zoom,
     Tall,
+    Tall3,
+    Focus,
     Wide,
     Strip,
 }
@@ -24,6 +26,8 @@ impl Layout {
         match self {
             Layout::Zoom => "zoom",
             Layout::Tall => "tall",
+            Layout::Tall3 => "tall3",
+            Layout::Focus => "focus",
             Layout::Wide => "wide",
             Layout::Strip => "strip",
         }

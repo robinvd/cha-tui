@@ -60,7 +60,8 @@ pub fn status_bar_view(
             format!("Layout: {} │", layout.status_label()),
             base_style,
         )])
-        .with_id("status-layout"),
+        .with_id("status-layout")
+        .on_click(|| Msg::OpenLayoutPicker),
     );
 
     left_items.extend(shortcut_buttons(

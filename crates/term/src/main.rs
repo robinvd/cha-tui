@@ -398,7 +398,7 @@ struct StartupScriptRequest {
 }
 
 struct FuzzyFinderState {
-    finder: FuzzyFinder<Layout>,
+    finder: FuzzyFinder<(Layout, String)>,
 }
 
 struct Model {
@@ -1022,12 +1022,26 @@ impl Model {
     }
 
     fn open_layout_picker(&mut self) {
+        let active_layout = self.active_layout();
         let (mut finder, handle) =
-            FuzzyFinder::new(|l: &Layout| vec![l.status_label().to_string()]);
-        handle.push_item(Layout::Tall);
-        handle.push_item(Layout::Wide);
-        handle.push_item(Layout::Strip);
-        handle.push_item(Layout::Zoom);
+            FuzzyFinder::new(|(_, label): &(Layout, String)| vec![label.clone()]);
+
+        let layouts = [
+            Layout::Tall,
+            Layout::Tall3,
+            Layout::Focus,
+            Layout::Wide,
+            Layout::Strip,
+            Layout::Zoom,
+        ];
+
+        for layout in layouts {
+            let mut label = layout.status_label().to_string();
+            if layout == active_layout {
+                label.push_str(" (current)");
+            }
+            handle.push_item((layout, label));
+        }
         finder.tick();
 
         self.fuzzy_finder = Some(FuzzyFinderState { finder });
@@ -1063,7 +1077,7 @@ impl Model {
             fuzzy_state.finder.current_selection()
         };
 
-        let Some(layout) = selected_layout else {
+        let Some((layout, _)) = selected_layout else {
             return self.cancel_fuzzy_finder();
         };
 
@@ -1133,6 +1147,7 @@ enum Msg {
     },
     StripScroll(ScrollMsg),
     Fuzzy(FuzzyMsg),
+    OpenLayoutPicker,
 }
 
 #[derive(Clone, Debug)]
@@ -1640,6 +1655,9 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 model.status = Some(StatusMessage::error("Startup script failed"));
             }
             model.finish_startup_script(project, worktree, &mut transitions);
+        }
+        Msg::OpenLayoutPicker => {
+            model.open_layout_picker();
         }
     }
 
@@ -3002,6 +3020,8 @@ fn terminal_pane(model: &Model) -> Node<Msg> {
     match model.active_layout() {
         Layout::Zoom => terminal_pane_zoom(model),
         Layout::Tall => terminal_pane_tall(model),
+        Layout::Tall3 => terminal_pane_tall3(model),
+        Layout::Focus => terminal_pane_focus(model),
         Layout::Wide => terminal_pane_wide(model),
         Layout::Strip => terminal_pane_strip(model),
     }
@@ -3095,6 +3115,144 @@ fn terminal_pane_tall(model: &Model) -> Node<Msg> {
         }
         right_children.push(terminal_node(session));
     }
+    if right_children.is_empty() {
+        return left.with_flex_grow(1.0);
+    }
+
+    let right = column(right_children).with_flex_grow(1.0);
+    row(vec![
+        left.with_flex_grow(1.0),
+        vertical_divider(divider_style),
+        right,
+    ])
+    .with_flex_grow(1.0)
+}
+
+fn terminal_pane_tall3(model: &Model) -> Node<Msg> {
+    let Some((project_id, worktree, active_session, sessions)) = model.active_container_sessions()
+    else {
+        return terminal_pane_placeholder(model);
+    };
+
+    let mut iter = sessions.iter();
+    let Some(first) = iter.next() else {
+        return terminal_pane_placeholder(model);
+    };
+
+    let terminal_node = |session: &Session| {
+        let sid = session.id;
+        let is_active = sid == active_session;
+        let is_focused = model.focus.is_terminal() && is_active;
+        terminal("terminal", &session.terminal, is_focused, move |msg| {
+            Msg::Terminal {
+                project: project_id,
+                worktree,
+                session: sid,
+                msg,
+            }
+        })
+        .with_id_mixin("terminal", sid.0)
+        .with_flex_grow(1.0)
+        .with_style(section_style(is_focused))
+        .on_click(move || {
+            Msg::FocusTerminal(SessionKey {
+                project: project_id,
+                worktree,
+                session: sid,
+            })
+        })
+    };
+
+    let col1 = terminal_node(first);
+    let divider_style = divider_style(model);
+
+    let Some(second) = iter.next() else {
+        return col1.with_flex_grow(1.0);
+    };
+    let col2 = terminal_node(second);
+
+    let mut col3_children = Vec::new();
+    for session in iter {
+        if !col3_children.is_empty() {
+            col3_children.push(horizontal_divider(divider_style));
+        }
+        col3_children.push(terminal_node(session));
+    }
+
+    if col3_children.is_empty() {
+        return row(vec![
+            col1.with_flex_grow(1.0),
+            vertical_divider(divider_style),
+            col2.with_flex_grow(1.0),
+        ])
+        .with_flex_grow(1.0);
+    }
+
+    let col3 = column(col3_children).with_flex_grow(1.0);
+
+    row(vec![
+        col1.with_flex_grow(1.0),
+        vertical_divider(divider_style),
+        col2.with_flex_grow(1.0),
+        vertical_divider(divider_style),
+        col3,
+    ])
+    .with_flex_grow(1.0)
+}
+
+fn terminal_pane_focus(model: &Model) -> Node<Msg> {
+    let Some((project_id, worktree, active_session, sessions)) = model.active_container_sessions()
+    else {
+        return terminal_pane_placeholder(model);
+    };
+
+    if sessions.is_empty() {
+        return terminal_pane_placeholder(model);
+    }
+
+    let terminal_node = |session: &Session| {
+        let sid = session.id;
+        let is_active = sid == active_session;
+        let is_focused = model.focus.is_terminal() && is_active;
+        terminal("terminal", &session.terminal, is_focused, move |msg| {
+            Msg::Terminal {
+                project: project_id,
+                worktree,
+                session: sid,
+                msg,
+            }
+        })
+        .with_id_mixin("terminal", sid.0)
+        .with_flex_grow(1.0)
+        .with_style(section_style(is_focused))
+        .on_click(move || {
+            Msg::FocusTerminal(SessionKey {
+                project: project_id,
+                worktree,
+                session: sid,
+            })
+        })
+    };
+
+    let Some(active_session_ref) = sessions.iter().find(|s| s.id == active_session) else {
+        // Fallback if active session not found in list (shouldn't happen)
+        return terminal_pane_tall(model);
+    };
+
+    let left = terminal_node(active_session_ref);
+    let divider_style = divider_style(model);
+
+    let mut right_children = Vec::new();
+    for session in sessions {
+        if session.id == active_session {
+            continue;
+        }
+        if !right_children.is_empty() {
+            right_children.push(horizontal_divider(divider_style));
+        }
+        right_children.push(terminal_node(session));
+    }
+
     if right_children.is_empty() {
         return left.with_flex_grow(1.0);
     }
@@ -4849,7 +5007,7 @@ mod tests {
         update(&mut model, Msg::Key(key));
         assert!(model.fuzzy_finder.is_some(), "Fuzzy finder should be open");
 
-        // Move selection down to Wide (Tall -> Wide)
+        // Move selection down to Tall3 (Tall -> Tall3)
         update(&mut model, Msg::Key(Key::new(KeyCode::Down)));
 
         // Press Enter to accept
@@ -4861,19 +5019,20 @@ mod tests {
         );
         assert_eq!(
             model.active_layout(),
-            Layout::Wide,
-            "Layout should be switched to Wide"
+            Layout::Tall3,
+            "Layout should be switched to Tall3"
         );
 
         // Open again
         model.open_layout_picker();
 
-        // Move to Strip (Tall -> Wide -> Strip)
+        // Move to Wide (Tall -> Tall3 -> Focus -> Wide)
+        update(&mut model, Msg::Key(Key::new(KeyCode::Down)));
         update(&mut model, Msg::Key(Key::new(KeyCode::Down)));
         update(&mut model, Msg::Key(Key::new(KeyCode::Down)));
         update(&mut model, Msg::Key(Key::new(KeyCode::Enter)));
 
-        assert_eq!(model.active_layout(), Layout::Strip);
+        assert_eq!(model.active_layout(), Layout::Wide);
     }
 
     #[test]
