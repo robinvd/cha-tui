@@ -38,6 +38,7 @@ pub enum Action {
     ToggleTerminalLock,
     StripScrollLeft,
     StripScrollRight,
+    ToggleFilter,
 }
 
 /// Normalized representation of a key chord.
@@ -453,6 +454,13 @@ pub static DEFAULT_BINDINGS: &[Binding] = &[
         description: "delete",
         show_in_status: true,
     },
+    Binding {
+        scope: Scope::Sidebar,
+        chord: KeyChord::new(KeyCode::Char('f')),
+        action: Action::ToggleFilter,
+        description: "filter",
+        show_in_status: true,
+    },
     // Terminal scope
     Binding {
         scope: Scope::Terminal,
@@ -565,7 +573,7 @@ impl Default for Keymap {
     }
 }
 
-const SIDEBAR_ACTIONS: [Action; 11] = [
+const SIDEBAR_ACTIONS: [Action; 12] = [
     Action::ToggleFocus,
     Action::ToggleLayout,
     Action::Quit,
@@ -577,6 +585,7 @@ const SIDEBAR_ACTIONS: [Action; 11] = [
     Action::MoveSelectionDown,
     Action::MoveSelectionUp,
     Action::ActivateSelected,
+    Action::ToggleFilter,
 ];
 
 const TERMINAL_ACTIONS: [Action; 6] = [
