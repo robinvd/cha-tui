@@ -134,7 +134,7 @@ impl Session {
     /// Update activity tracking for background sessions.
     /// Returns true if unread indicator changed.
     pub fn sync_activity(&mut self, is_active: bool) -> bool {
-        let version = self.terminal.content_version();
+        let version = self.terminal.text_content_version();
         let mut changed = false;
 
         if is_active {
@@ -159,7 +159,7 @@ impl Session {
     /// Mark session as seen (clears unread indicator).
     /// Returns true if state changed.
     pub fn mark_seen(&mut self) -> bool {
-        let version = self.terminal.content_version();
+        let version = self.terminal.text_content_version();
         let mut changed = false;
 
         if self.has_unread_output {
