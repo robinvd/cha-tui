@@ -1436,7 +1436,12 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 ));
 
                 if cleared_bell {
-                    rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+                    rebuild_tree(
+                        &model.projects,
+                        &mut model.tree,
+                        &mut model.active,
+                        model.filter.as_ref(),
+                    );
                 }
             }
         }
@@ -4209,7 +4214,12 @@ mod tests {
             },
         );
 
-        rebuild_tree(&model.projects, &mut model.tree, &mut model.active);
+        rebuild_tree(
+            &model.projects,
+            &mut model.tree,
+            &mut model.active,
+            model.filter.as_ref(),
+        );
 
         let visible_session_after = model
             .tree
