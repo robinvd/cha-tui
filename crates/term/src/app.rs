@@ -18,8 +18,6 @@ use chatui::{
 use smol::channel::Receiver;
 use tracing::warn;
 
-use crate::cli::{Args, Command};
-
 use crate::divider::{horizontal_divider, vertical_divider};
 use crate::filter;
 use crate::focus::Focus;
@@ -3461,27 +3459,7 @@ fn view(model: &Model) -> Node<Msg> {
     column(nodes).with_fill()
 }
 
-pub fn run(args: Args) -> Result<(), miette::Report> {
-    if let Some(Command::Remote {
-        json,
-        text,
-        socket,
-        action,
-    }) = args.command
-    {
-        let client_args = crate::cli::build_remote_client_args(crate::cli::RemoteArgs {
-            json,
-            text,
-            socket,
-            action,
-        });
-        if let Err(err) = crate::remote::run_remote(client_args) {
-            eprintln!("error from term server: {err}");
-            std::process::exit(1);
-        }
-        return Ok(());
-    }
-
+pub fn run() -> Result<(), miette::Report> {
     // Set up tracing to file only if TERM_LOG is set
     if let Ok(log_file_path) = std::env::var("TERM_LOG") {
         use std::fs::File;
