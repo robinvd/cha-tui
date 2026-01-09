@@ -41,8 +41,6 @@ impl Default for ViewId {
     }
 }
 
-const PRIMARY_VIEW_ID: ViewId = ViewId::new(0);
-
 /// State container for the text input component.
 ///
 /// # Feature Slots
@@ -50,8 +48,6 @@ const PRIMARY_VIEW_ID: ViewId = ViewId::new(0);
 ///   syntax/search highlights. *Status: data only; renderer still uses a single base layer.*
 /// - **Inline hints (ghost text)** – [`InlineHintStore`] captures uneditable
 ///   annotations from tooling such as LSP servers. *Status: stored but not rendered yet.*
-/// - **Autocomplete** – [`AutocompleteState`] tracks suggestion panels.
-///   *Status: not wired into UI yet.*
 /// - **Gutter** – [`ViewState::gutter`] reserves metadata for line numbers or markers.
 ///   *Status: layout/rendering unchanged for now.*
 /// - **Undo/redo** – [`EditHistory`] now records past/future stacks and replays
@@ -60,7 +56,7 @@ const PRIMARY_VIEW_ID: ViewId = ViewId::new(0);
 /// - **Multicursor** – [`CursorSet`] holds multiple carets.
 ///   *Status: Fully implemented.*
 /// - **Multiple views** – [`views`] carries per-pane data (viewport, cursors).
-///   *Status: only the first view (`PRIMARY_VIEW_ID`) is used; callers still interact with a single pane.*
+///   *Status: only the first view is used; callers still interact with a single pane.*
 #[derive(Clone, Debug)]
 pub struct InputState {
     mode: InputMode,
@@ -68,8 +64,6 @@ pub struct InputState {
     history: EditHistory,
     highlights: HighlightStore,
     inline_hints: InlineHintStore,
-    #[allow(dead_code)]
-    autocomplete: AutocompleteState,
     views: Vec<ViewState>,
 
     last_change: Option<TextChangeSet>,
@@ -85,8 +79,7 @@ impl Default for InputState {
 
             last_change: None,
             inline_hints: InlineHintStore::default(),
-            autocomplete: AutocompleteState::default(),
-            views: vec![ViewState::new(PRIMARY_VIEW_ID)],
+            views: vec![ViewState::new()],
         }
     }
 }
@@ -112,21 +105,14 @@ impl Default for DocumentState {
 /// Per-view state so each pane can track its cursors, viewport, and gutter.
 #[derive(Clone, Debug)]
 struct ViewState {
-    #[allow(dead_code)]
-    id: ViewId,
     cursor_set: CursorSet,
-    #[allow(dead_code)]
-    selection_mode: SelectionMode,
-    #[allow(dead_code)]
     gutter: GutterState,
 }
 
 impl ViewState {
-    fn new(id: ViewId) -> Self {
+    fn new() -> Self {
         Self {
-            id,
             cursor_set: CursorSet::default(),
-            selection_mode: SelectionMode::Character,
             gutter: GutterState::default(),
         }
     }
@@ -421,20 +407,11 @@ impl CursorSetSnapshot {
         &self.carets
     }
 }
-/// Selection granularity placeholder (line/block modes can be added later).
-#[derive(Clone, Copy, Debug, Default)]
-enum SelectionMode {
-    #[default]
-    Character,
-}
-
 /// Gutter configuration per view (line numbers, breakpoints, etc.).
 #[derive(Clone, Debug, Default)]
 struct GutterState {
     width: usize,
     kind: GutterKind,
-    #[allow(dead_code)]
-    markers: Vec<GutterMarker>,
 }
 
 /// Currently a placeholder for future gutter variants.
@@ -443,13 +420,6 @@ enum GutterKind {
     #[default]
     None,
     LineNumbers,
-}
-
-/// Gutter marker metadata (line-level markers such as diagnostics).
-#[derive(Clone, Debug, Default)]
-struct GutterMarker {
-    #[allow(dead_code)]
-    line: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1197,36 +1167,6 @@ impl InlineHintStore {
         let clamped = anchor.min(max_index);
         rope.char_to_line(clamped)
     }
-}
-
-/// Autocomplete popup state (suggestions + selection).
-#[allow(dead_code)]
-#[derive(Clone, Debug)]
-struct AutocompleteState {
-    suggestions: Vec<CompletionItem>,
-    trigger_range: Range<usize>,
-    active: Option<usize>,
-    panel_visible: bool,
-    view: ViewId,
-}
-
-impl Default for AutocompleteState {
-    fn default() -> Self {
-        Self {
-            suggestions: Vec::new(),
-            trigger_range: 0..0,
-            active: None,
-            panel_visible: false,
-            view: PRIMARY_VIEW_ID,
-        }
-    }
-}
-
-/// Renderable completion entry label.
-#[derive(Clone, Debug, Default)]
-struct CompletionItem {
-    #[allow(dead_code)]
-    label: String,
 }
 
 /// Undo/redo stacks plus helpers to walk history.

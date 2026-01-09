@@ -189,9 +189,6 @@ pub struct TerminalState {
     wakeup_sender: Sender<()>,
     /// Receiver for wakeup notifications from the terminal.
     wakeup_receiver: Receiver<()>,
-    #[allow(dead_code)]
-    /// Sender for detailed terminal events (primarily for tests).
-    event_sender: Sender<TermEvent>,
     /// Shared terminal width in columns.
     cols_shared: Arc<AtomicU16>,
     /// Shared terminal height in rows.
@@ -434,7 +431,6 @@ impl TerminalState {
             version: version.clone(),
             wakeup_sender: wakeup_sender.clone(),
             wakeup_receiver,
-            event_sender,
             cols_shared: cols_shared.clone(),
             rows_shared: rows_shared.clone(),
             exited_shared: exited_shared.clone(),
