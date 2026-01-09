@@ -12,7 +12,7 @@ const STRIP_TILE_FRACTION: f32 = 0.8;
 use chatui::event::{Event, Key, KeyCode};
 use chatui::{
     InputMsg, InputState, Node, Program, ScrollAxis, ScrollMsg, ScrollState, ScrollTarget,
-    TerminalMsg, TerminalNotification, Transition, TreeMsg, TreeState, block_with_title, column,
+    TerminalMsg, TerminalNotification, Transition, block_with_title, column,
     default_terminal_keybindings, row, scrollable_content, terminal, text,
 };
 use smol::channel::Receiver;
@@ -34,8 +34,8 @@ use crate::remote::{
 };
 use crate::session::{Session, SessionId};
 use crate::sidebar::{
-    TreeId, has_active_projects, move_project_down, move_project_up, next_session, prev_session,
-    rebuild_tree, section_style, sidebar_view,
+    Event as SidebarEvent, Model as SidebarModel, Msg as SidebarMsg, TreeId, has_active_projects,
+    move_project_down, move_project_up, next_session, prev_session, section_style, sidebar_view,
 };
 use crate::status::{StatusMessage, status_bar_view};
 use crate::term_io::{RealIo, StartupScript, TermIo};
@@ -79,14 +79,9 @@ struct ContainerRef {
 struct Model {
     io: Arc<dyn TermIo>,
     projects: Vec<Project>,
-    tree: TreeState<TreeId>,
-    tree_scroll: ScrollState,
+    sidebar: SidebarModel,
     focus: Focus,
-    auto_hide: bool,
-    active: Option<SessionKey>,
     modal: Option<ModalState>,
-    filter: Option<filter::FilterExpression>,
-    filter_text: String,
     initial_update: bool,
     next_project_id: u64,
     next_session_id: u64,
@@ -119,14 +114,9 @@ impl Model {
         let mut model = Self {
             io,
             projects: Vec::new(),
-            tree: TreeState::new(),
-            tree_scroll: ScrollState::vertical(),
+            sidebar: SidebarModel::new(),
             focus: Focus::Sidebar,
-            auto_hide: false,
-            active: None,
             modal: None,
-            filter: None,
-            filter_text: String::new(),
             initial_update: true,
             next_project_id: 1,
             next_session_id: 1,
@@ -179,12 +169,7 @@ impl Model {
     }
 
     fn rebuild_tree(&mut self) {
-        rebuild_tree(
-            &self.projects,
-            &mut self.tree,
-            &mut self.active,
-            self.filter.as_ref(),
-        );
+        self.sidebar.rebuild_tree(&self.projects);
     }
 
     fn add_project(&mut self, path: PathBuf, name: String) -> std::io::Result<()> {
@@ -496,7 +481,7 @@ impl Model {
     }
 
     fn active_session(&self) -> Option<(&Project, &Session)> {
-        let key = self.active?;
+        let key = self.sidebar.active()?;
         let project = self.projects.iter().find(|p| p.id == key.project)?;
         let session = project.session(key.worktree, key.session)?;
         Some((project, session))
@@ -505,7 +490,7 @@ impl Model {
     fn active_container_sessions(
         &self,
     ) -> Option<(ProjectId, Option<WorktreeId>, SessionId, &[Session])> {
-        let key = self.active?;
+        let key = self.sidebar.active()?;
         let project = self.projects.iter().find(|p| p.id == key.project)?;
         project.session(key.worktree, key.session)?;
         let sessions = match key.worktree {
@@ -516,7 +501,7 @@ impl Model {
     }
 
     fn active_layout(&self) -> Layout {
-        let Some(key) = self.active else {
+        let Some(key) = self.sidebar.active() else {
             return Layout::Tall;
         };
         let Some(project) = self.projects.iter().find(|p| p.id == key.project) else {
@@ -550,9 +535,7 @@ impl Model {
             cleared_unread = session.mark_seen();
         }
 
-        self.active = Some(key);
-        self.tree
-            .select(TreeId::Session(key.project, key.worktree, key.session));
+        self.sidebar.select_session(key);
 
         if self.active_layout() == Layout::Strip {
             self.strip_scroll.ensure_visible(
@@ -570,33 +553,36 @@ impl Model {
     }
 
     fn sync_active_from_tree_selection(&mut self) {
-        if let Some(TreeId::Session(pid, worktree, sid)) = self.tree.selected().cloned() {
-            let mut cleared_bell = false;
-            let mut cleared_unread = false;
+        let previous = self.sidebar.active();
+        self.sidebar.sync_active_from_tree_selection();
+        let current = self.sidebar.active();
+        if previous != current
+            && let Some(key) = current
+        {
+            self.on_session_selected(key);
+        }
+    }
 
-            if let Some(project) = self.project_mut(pid)
-                && let Some(session) = project.session_mut(worktree, sid)
-            {
-                cleared_bell = session.clear_bell();
-                cleared_unread = session.mark_seen();
-            }
+    fn on_session_selected(&mut self, key: SessionKey) {
+        let mut cleared_bell = false;
+        let mut cleared_unread = false;
 
-            self.active = Some(SessionKey {
-                project: pid,
-                worktree,
-                session: sid,
-            });
+        if let Some(project) = self.project_mut(key.project)
+            && let Some(session) = project.session_mut(key.worktree, key.session)
+        {
+            cleared_bell = session.clear_bell();
+            cleared_unread = session.mark_seen();
+        }
 
-            if self.active_layout() == Layout::Strip {
-                self.strip_scroll.ensure_visible(
-                    "terminal-strip",
-                    ScrollTarget::with_mixin("terminal", sid.0),
-                );
-            }
+        if self.active_layout() == Layout::Strip {
+            self.strip_scroll.ensure_visible(
+                "terminal-strip",
+                ScrollTarget::with_mixin("terminal", key.session.0),
+            );
+        }
 
-            if cleared_bell || cleared_unread {
-                self.rebuild_tree();
-            }
+        if cleared_bell || cleared_unread {
+            self.rebuild_tree();
         }
     }
 
@@ -617,7 +603,8 @@ impl Model {
         };
 
         let is_active = self
-            .active
+            .sidebar
+            .active()
             .map(|active| {
                 active.project == *pid && active.session == *sid && active.worktree == *worktree
             })
@@ -636,7 +623,7 @@ impl Model {
         if exited {
             let sync = SessionSync {
                 changed: project.remove_session(*worktree, *sid),
-                active_removed: self.active.is_some_and(|active| {
+                active_removed: self.sidebar.active().is_some_and(|active| {
                     active.project == *pid && active.worktree == *worktree && active.session == *sid
                 }),
                 ..Default::default()
@@ -875,7 +862,7 @@ impl Model {
     }
 
     fn set_active_layout(&mut self, layout: Layout) {
-        let Some(key) = self.active else {
+        let Some(key) = self.sidebar.active() else {
             return;
         };
         let Some(project) = self.project_mut(key.project) else {
@@ -902,8 +889,7 @@ pub enum Msg {
     Paste(String),
     RemoteRequest(Box<RemoteEnvelope>),
     RemoteClosed,
-    Tree(TreeMsg<TreeId>),
-    TreeScroll(ScrollMsg),
+    Sidebar(SidebarMsg),
     Terminal {
         project: ProjectId,
         worktree: Option<WorktreeId>,
@@ -980,7 +966,7 @@ fn clear_status_on_input(model: &mut Model, msg: &Msg) {
         Msg::Key(_)
             | Msg::Paste(_)
             | Msg::RemoteRequest(_)
-            | Msg::Tree(_)
+            | Msg::Sidebar(_)
             | Msg::Modal(_)
             | Msg::FocusSidebar
             | Msg::FocusTerminal(_)
@@ -1033,7 +1019,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
     match msg {
         Msg::FocusSidebar => {
             if model.focus.is_terminal()
-                && let Some(active) = model.active
+                && let Some(active) = model.sidebar.active()
             {
                 transitions.push(update(
                     model,
@@ -1049,7 +1035,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         }
         Msg::FocusTerminal(target) => {
             let was_terminal = model.focus.is_terminal();
-            let previous = model.active;
+            let previous = model.sidebar.active();
 
             if previous != Some(target) {
                 if was_terminal && let Some(active) = previous {
@@ -1088,7 +1074,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             }
 
             if model.focus == Focus::Terminal
-                && let Some(active) = model.active
+                && let Some(active) = model.sidebar.active()
                 && model.active_session().is_some()
             {
                 return update(
@@ -1177,7 +1163,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
 
             // Fallback: when terminal focused, send to terminal
             if model.focus == Focus::Terminal
-                && let Some(active) = model.active
+                && let Some(active) = model.sidebar.active()
                 && let Some((_, session)) = model.active_session()
                 && let Some(msg) =
                     default_terminal_keybindings(key, session.terminal.mode(), move |term_msg| {
@@ -1195,53 +1181,54 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             transitions.push(Transition::Continue);
             return Transition::Multiple(transitions);
         }
-        Msg::Tree(tree_msg) => match tree_msg {
-            TreeMsg::ToggleExpand(id) => {
-                model.tree.toggle_expanded(&id);
-                model.set_focus(Focus::Sidebar);
-            }
-            TreeMsg::Activate(TreeId::Session(pid, worktree, sid))
-            | TreeMsg::DoubleClick(TreeId::Session(pid, worktree, sid)) => {
-                if let Some(active) = model.active {
-                    transitions.push(update(
-                        model,
-                        Msg::Terminal {
-                            project: active.project,
-                            worktree: active.worktree,
-                            session: active.session,
-                            msg: TerminalMsg::FocusLost,
-                        },
-                    ));
-                }
-                model.select_session(SessionKey {
-                    project: pid,
-                    worktree,
-                    session: sid,
-                });
-                model.set_focus(Focus::Terminal);
-                transitions.push(update(
-                    model,
-                    Msg::Terminal {
-                        project: pid,
+        Msg::Sidebar(sidebar_msg) => {
+            if let Some(event) = crate::sidebar::update(&mut model.sidebar, sidebar_msg) {
+                match event {
+                    SidebarEvent::FocusSidebar => {
+                        model.set_focus(Focus::Sidebar);
+                    }
+                    SidebarEvent::ActivateSession(SessionKey {
+                        project,
                         worktree,
-                        session: sid,
-                        msg: TerminalMsg::FocusGained,
-                    },
-                ));
-                return Transition::Multiple(transitions);
+                        session,
+                    }) => {
+                        if let Some(active) = model.sidebar.active() {
+                            transitions.push(update(
+                                model,
+                                Msg::Terminal {
+                                    project: active.project,
+                                    worktree: active.worktree,
+                                    session: active.session,
+                                    msg: TerminalMsg::FocusLost,
+                                },
+                            ));
+                        }
+                        model.select_session(SessionKey {
+                            project,
+                            worktree,
+                            session,
+                        });
+                        model.set_focus(Focus::Terminal);
+                        transitions.push(update(
+                            model,
+                            Msg::Terminal {
+                                project,
+                                worktree,
+                                session,
+                                msg: TerminalMsg::FocusGained,
+                            },
+                        ));
+                        return Transition::Multiple(transitions);
+                    }
+                    SidebarEvent::ActivateProject(project_id) => {
+                        model.activate_container(project_id, None, &mut transitions);
+                    }
+                    SidebarEvent::ActivateWorktree(project_id, worktree_id) => {
+                        model.activate_container(project_id, Some(worktree_id), &mut transitions);
+                    }
+                }
             }
-            TreeMsg::Activate(TreeId::Project(pid))
-            | TreeMsg::DoubleClick(TreeId::Project(pid)) => {
-                model.tree.toggle_expanded(&TreeId::Project(pid));
-                model.activate_container(pid, None, &mut transitions);
-            }
-            TreeMsg::Activate(TreeId::Worktree(pid, wid))
-            | TreeMsg::DoubleClick(TreeId::Worktree(pid, wid)) => {
-                model.tree.toggle_expanded(&TreeId::Worktree(pid, wid));
-                model.activate_container(pid, Some(wid), &mut transitions);
-            }
-        },
-        Msg::TreeScroll(scroll_msg) => model.tree_scroll.update(scroll_msg),
+        }
         Msg::StripScroll(scroll_msg) => model.strip_scroll.update(scroll_msg),
         Msg::Terminal {
             project,
@@ -1267,12 +1254,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 ));
 
                 if cleared_bell {
-                    rebuild_tree(
-                        &model.projects,
-                        &mut model.tree,
-                        &mut model.active,
-                        model.filter.as_ref(),
-                    );
+                    model.rebuild_tree();
                 }
             }
         }
@@ -1283,7 +1265,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             }
             if sync.active_removed
                 && model.focus.is_terminal()
-                && let Some(active) = model.active
+                && let Some(active) = model.sidebar.active()
             {
                 transitions.push(update(
                     model,
@@ -1310,7 +1292,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         }
         Msg::FocusGained => {
             if model.focus.is_terminal()
-                && let Some(active) = model.active
+                && let Some(active) = model.sidebar.active()
             {
                 return update(
                     model,
@@ -1325,7 +1307,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         }
         Msg::FocusLost => {
             if model.focus.is_terminal()
-                && let Some(active) = model.active
+                && let Some(active) = model.sidebar.active()
             {
                 return update(
                     model,
@@ -1394,7 +1376,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                             if let Some(transition) = model.start_worktree_load(project_id) {
                                 transitions.push(transition);
                             }
-                            model.tree.select(TreeId::Project(project_id));
+                            model.sidebar.tree_mut().select(TreeId::Project(project_id));
                         }
                         model.modal = None;
                     }
@@ -1423,13 +1405,11 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                         let trimmed = filter_text.trim();
                         if trimmed.is_empty() {
                             // Empty filter shows all
-                            model.filter = None;
-                            model.filter_text = String::new();
+                            model.sidebar.set_filter(None, String::new());
                         } else {
                             match filter::parse_filter(trimmed) {
                                 Ok(expr) => {
-                                    model.filter = Some(expr);
-                                    model.filter_text = trimmed.to_string();
+                                    model.sidebar.set_filter(Some(expr), trimmed.to_string());
                                 }
                                 Err(err) => {
                                     model.status = Some(StatusMessage::error(format!(
@@ -1453,7 +1433,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             };
         }
         Msg::NewSession => {
-            let Some(selected) = model.tree.selected().cloned() else {
+            let Some(selected) = model.sidebar.tree().selected().cloned() else {
                 return Transition::Continue;
             };
             let (project_id, worktree, insert_position) = match selected {
@@ -1548,14 +1528,14 @@ fn handle_remote_request(
         "input-send" => handle_remote_send_input(model, &params),
         "settings-sidebar-auto-hide-toggle" => action_response(model, Action::ToggleAutoHide),
         "settings-sidebar-auto-hide-on" => {
-            model.auto_hide = true;
+            model.sidebar.set_auto_hide(true);
             (
                 Transition::Continue,
                 RemoteResponse::ok(Some(RemoteResult::Ok { message: None })),
             )
         }
         "settings-sidebar-auto-hide-off" => {
-            model.auto_hide = false;
+            model.sidebar.set_auto_hide(false);
             (
                 Transition::Continue,
                 RemoteResponse::ok(Some(RemoteResult::Ok { message: None })),
@@ -1588,7 +1568,7 @@ fn handle_remote_set_focus(model: &mut Model, focus: Focus) -> (Transition<Msg>,
 
     model.set_focus(focus);
     if previous.is_terminal() != focus.is_terminal()
-        && let Some(active) = model.active
+        && let Some(active) = model.sidebar.active()
     {
         let msg = if focus.is_terminal() {
             TerminalMsg::FocusGained
@@ -1683,8 +1663,8 @@ fn handle_remote_activate_target(
     // Now select the appropriate target - if it's a project/worktree, select the first session
     match target {
         TreeId::Project(pid) => {
-            model.tree.select(target);
-            model.tree.set_expanded(target, true);
+            model.sidebar.tree_mut().select(target);
+            model.sidebar.tree_mut().set_expanded(target, true);
             if let Some(project) = model.project(pid)
                 && let Some(session) = project.sessions.first()
             {
@@ -1705,8 +1685,8 @@ fn handle_remote_activate_target(
             }
         }
         TreeId::Worktree(pid, wid) => {
-            model.tree.select(target);
-            model.tree.set_expanded(target, true);
+            model.sidebar.tree_mut().select(target);
+            model.sidebar.tree_mut().set_expanded(target, true);
             if let Some(project) = model.project(pid)
                 && let Some(wt) = project.worktree(wid)
                 && let Some(session) = wt.sessions.first()
@@ -1815,14 +1795,15 @@ fn handle_remote_new_project(
         if let Some(transition) = model.start_worktree_load(project_id) {
             transitions.push(transition);
         }
-        model.tree.select(TreeId::Project(project_id));
+        model.sidebar.tree_mut().select(TreeId::Project(project_id));
     }
 
     let response = model
         .active_session()
         .map(|(project, session)| {
             let worktree = model
-                .active
+                .sidebar
+                .active()
                 .and_then(|active| active.worktree)
                 .and_then(|wid| project.worktree(wid));
             RemoteResponse::ok(Some(RemoteResult::CurrentSession {
@@ -1881,7 +1862,8 @@ fn handle_remote_new_worktree(
         .active_session()
         .map(|(project, session)| {
             let worktree = model
-                .active
+                .sidebar
+                .active()
                 .and_then(|active| active.worktree)
                 .and_then(|wid| project.worktree(wid));
             RemoteResponse::ok(Some(RemoteResult::CurrentSession {
@@ -1981,7 +1963,7 @@ fn handle_remote_send_input(
             RemoteResponse::err("input send requires --text or --bytes"),
         );
     };
-    let Some(active) = model.active else {
+    let Some(active) = model.sidebar.active() else {
         return (
             Transition::Continue,
             RemoteResponse::err("No active session for input send"),
@@ -2277,7 +2259,8 @@ fn handle_remote_list_sessions(
 fn handle_remote_current_session(model: &Model) -> (Transition<Msg>, RemoteResponse) {
     let session = model.active_session().map(|(project, session)| {
         let worktree = model
-            .active
+            .sidebar
+            .active()
             .and_then(|active| active.worktree)
             .and_then(|wid| project.worktree(wid));
         build_remote_session(project, worktree, session)
@@ -2303,7 +2286,7 @@ fn handle_remote_status(model: &Model) -> (Transition<Msg>, RemoteResponse) {
             Focus::Terminal => "terminal".to_string(),
             Focus::TerminalLocked => "terminal-lock".to_string(),
         },
-        auto_hide: model.auto_hide,
+        auto_hide: model.sidebar.auto_hide(),
     };
     (
         Transition::Continue,
@@ -2312,9 +2295,10 @@ fn handle_remote_status(model: &Model) -> (Transition<Msg>, RemoteResponse) {
 }
 
 fn selection_from_model(model: &Model) -> Option<remote::RemoteSelection> {
-    let selection = model.tree.selected().cloned().or_else(|| {
+    let selection = model.sidebar.tree().selected().cloned().or_else(|| {
         model
-            .active
+            .sidebar
+            .active()
             .map(|active| TreeId::Session(active.project, active.worktree, active.session))
     })?;
     match selection {
@@ -2375,7 +2359,7 @@ fn handle_action(
             model.set_focus(new_focus);
 
             if old_focus != new_focus
-                && let Some(active) = model.active
+                && let Some(active) = model.sidebar.active()
             {
                 let msg = if new_focus.is_terminal() {
                     TerminalMsg::FocusGained
@@ -2397,7 +2381,7 @@ fn handle_action(
         }
         Action::Quit => Transition::Quit,
         Action::ToggleAutoHide => {
-            model.auto_hide = !model.auto_hide;
+            model.sidebar.toggle_auto_hide();
             Transition::Continue
         }
         Action::ToggleLayout => {
@@ -2406,7 +2390,7 @@ fn handle_action(
         }
         Action::FocusTerminal => {
             let was_terminal = model.focus.is_terminal();
-            if !was_terminal && let Some(active) = model.active {
+            if !was_terminal && let Some(active) = model.sidebar.active() {
                 model.set_focus(Focus::Terminal);
                 transitions.push(update(
                     model,
@@ -2424,19 +2408,19 @@ fn handle_action(
             }
         }
         Action::MoveSelectionUp => {
-            model.tree.ensure_selected();
-            model.tree.select_prev();
+            model.sidebar.tree_mut().ensure_selected();
+            model.sidebar.tree_mut().select_prev();
             model.sync_active_from_tree_selection();
             Transition::Continue
         }
         Action::MoveSelectionDown => {
-            model.tree.ensure_selected();
-            model.tree.select_next();
+            model.sidebar.tree_mut().ensure_selected();
+            model.sidebar.tree_mut().select_next();
             model.sync_active_from_tree_selection();
             Transition::Continue
         }
         Action::MoveItemUp => {
-            if let Some(selected) = model.tree.selected().cloned() {
+            if let Some(selected) = model.sidebar.tree().selected().cloned() {
                 let moved = match selected {
                     TreeId::Project(pid) => move_project_up(&mut model.projects, pid),
                     TreeId::Worktree(_, _) => false,
@@ -2450,13 +2434,13 @@ fn handle_action(
                 };
                 if moved {
                     model.rebuild_tree();
-                    model.tree.select(selected);
+                    model.sidebar.tree_mut().select(selected);
                 }
             }
             Transition::Continue
         }
         Action::MoveItemDown => {
-            if let Some(selected) = model.tree.selected().cloned() {
+            if let Some(selected) = model.sidebar.tree().selected().cloned() {
                 let moved = match selected {
                     TreeId::Project(pid) => move_project_down(&mut model.projects, pid),
                     TreeId::Worktree(_, _) => false,
@@ -2470,16 +2454,16 @@ fn handle_action(
                 };
                 if moved {
                     model.rebuild_tree();
-                    model.tree.select(selected);
+                    model.sidebar.tree_mut().select(selected);
                 }
             }
             Transition::Continue
         }
         Action::ActivateSelected => {
-            if let Some(selected) = model.tree.selected().cloned() {
+            if let Some(selected) = model.sidebar.tree().selected().cloned() {
                 match selected {
                     TreeId::Project(pid) => {
-                        model.tree.toggle_expanded(&selected);
+                        model.sidebar.tree_mut().toggle_expanded(&selected);
                         model.activate_container(pid, None, &mut transitions);
                         if let Some(project) = model.project(pid)
                             && let Some(session) = project.sessions.first()
@@ -2506,7 +2490,7 @@ fn handle_action(
                         }
                     }
                     TreeId::Worktree(pid, wid) => {
-                        model.tree.toggle_expanded(&selected);
+                        model.sidebar.tree_mut().toggle_expanded(&selected);
                         model.activate_container(pid, Some(wid), &mut transitions);
                         if let Some(project) = model.project(pid)
                             && let Some(worktree) = project.worktree(wid)
@@ -2525,7 +2509,7 @@ fn handle_action(
                         }
                     }
                     TreeId::Session(pid, worktree, sid) => {
-                        if let Some(active) = model.active {
+                        if let Some(active) = model.sidebar.active() {
                             transitions.push(update(
                                 model,
                                 Msg::Terminal {
@@ -2560,7 +2544,7 @@ fn handle_action(
         }
         Action::NewProject => update(model, Msg::OpenNewProject),
         Action::NewWorktree => {
-            let Some(selected) = model.tree.selected().cloned() else {
+            let Some(selected) = model.sidebar.tree().selected().cloned() else {
                 model.status = Some(StatusMessage::error("Select a project or session first"));
                 return Transition::Continue;
             };
@@ -2582,7 +2566,9 @@ fn handle_action(
             Transition::Continue
         }
         Action::RenameSession => {
-            if let Some(TreeId::Session(pid, worktree, sid)) = model.tree.selected().cloned() {
+            if let Some(TreeId::Session(pid, worktree, sid)) =
+                model.sidebar.tree().selected().cloned()
+            {
                 let session_name = model.project(pid).and_then(|project| {
                     project.session(worktree, sid).map(|session| {
                         session
@@ -2609,7 +2595,7 @@ fn handle_action(
             Transition::Continue
         }
         Action::SessionByIndex(target_index) => {
-            if let Some(active) = model.active {
+            if let Some(active) = model.sidebar.active() {
                 let target_session = model
                     .project(active.project)
                     .and_then(|project| match active.worktree {
@@ -2621,7 +2607,7 @@ fn handle_action(
                 let target_session_id = target_session.map(|session| session.id);
 
                 if let Some(target_session_id) = target_session_id {
-                    if let Some(active) = model.active {
+                    if let Some(active) = model.sidebar.active() {
                         transitions.push(update(
                             model,
                             Msg::Terminal {
@@ -2658,13 +2644,13 @@ fn handle_action(
         }
         Action::NextSession | Action::PrevSession => {
             let target = match action {
-                Action::NextSession => next_session(&model.tree, model.active),
-                Action::PrevSession => prev_session(&model.tree, model.active),
+                Action::NextSession => next_session(model.sidebar.tree(), model.sidebar.active()),
+                Action::PrevSession => prev_session(model.sidebar.tree(), model.sidebar.active()),
                 _ => None,
             };
 
             if let Some(target) = target {
-                if let Some(active) = model.active {
+                if let Some(active) = model.sidebar.active() {
                     transitions.push(update(
                         model,
                         Msg::Terminal {
@@ -2720,13 +2706,13 @@ fn handle_action(
         }
         Action::ToggleFilter => {
             model.modal = Some(ModalState::SessionFilter {
-                input: InputState::with_value(model.filter_text.clone()),
+                input: InputState::with_value(model.sidebar.filter_text().to_string()),
                 scroll: ScrollState::horizontal(),
             });
             Transition::Continue
         }
         Action::DeactivateProject => {
-            let Some(selected) = model.tree.selected().cloned() else {
+            let Some(selected) = model.sidebar.tree().selected().cloned() else {
                 return Transition::Continue;
             };
             let project_id = match selected {
@@ -2846,7 +2832,7 @@ fn copy_optional_files(
 }
 
 fn delete_selected(model: &mut Model) {
-    let Some(selected) = model.tree.selected().cloned() else {
+    let Some(selected) = model.sidebar.tree().selected().cloned() else {
         return;
     };
 
@@ -3027,7 +3013,11 @@ fn terminal_pane_placeholder(model: &Model) -> Node<Msg> {
 
 fn terminal_pane_zoom(model: &Model) -> Node<Msg> {
     if let Some((project, session)) = model.active_session() {
-        let worktree = model.active.map(|active| active.worktree).unwrap_or(None);
+        let worktree = model
+            .sidebar
+            .active()
+            .map(|active| active.worktree)
+            .unwrap_or(None);
         let pid = project.id;
         let sid = session.id;
         let is_focused = model.focus.is_terminal();
@@ -3426,12 +3416,9 @@ fn view(model: &Model) -> Node<Msg> {
     }
 
     let sidebar = sidebar_view(
-        &model.tree,
-        &model.tree_scroll,
-        model.auto_hide,
+        &model.sidebar,
         model.focus == Focus::Sidebar,
-        model.filter.is_some(),
-        Msg::Tree,
+        |msg| Msg::Sidebar(SidebarMsg::Tree(msg)),
         || Msg::FocusSidebar,
     );
 
@@ -3440,7 +3427,7 @@ fn view(model: &Model) -> Node<Msg> {
     let status = status_bar_view(
         model.focus,
         model.status.as_ref(),
-        model.auto_hide,
+        model.sidebar.auto_hide(),
         model.active_session(),
         model.active_layout(),
         &model.keymap,
@@ -3507,6 +3494,7 @@ mod tests {
     use super::*;
     use crate::divider::{Divider, DividerOrientation};
     use crate::persistence::{load_projects_from_root, save_projects_to_root};
+    use chatui::TreeMsg;
     use chatui::buffer::DoubleBuffer;
     use chatui::dom::rounding::round_layout;
     use chatui::event::{KeyCode, Size};
@@ -3533,7 +3521,9 @@ mod tests {
         let project_id = model.projects[0].id;
         update(
             model,
-            Msg::Tree(TreeMsg::Activate(TreeId::Project(project_id))),
+            Msg::Sidebar(SidebarMsg::Tree(TreeMsg::Activate(TreeId::Project(
+                project_id,
+            )))),
         );
         project_id
     }
@@ -3675,7 +3665,8 @@ mod tests {
             return;
         };
         let _project_id = activate_first_project(&mut model);
-        let TreeId::Session(pid, worktree, sid) = model.tree.selected().cloned().expect("selected")
+        let TreeId::Session(pid, worktree, sid) =
+            model.sidebar.tree().selected().cloned().expect("selected")
         else {
             panic!("expected a session selected");
         };
@@ -3688,7 +3679,7 @@ mod tests {
         assert_ne!(new_session.id, sid);
         assert_eq!(new_session.number, 2);
         assert_eq!(
-            model.active,
+            model.sidebar.active(),
             Some(SessionKey {
                 project: pid,
                 worktree,
@@ -3710,16 +3701,16 @@ mod tests {
 
         update(
             &mut model,
-            Msg::Tree(TreeMsg::Activate(TreeId::Session(
+            Msg::Sidebar(SidebarMsg::Tree(TreeMsg::Activate(TreeId::Session(
                 project_id,
                 None,
                 second_session,
-            ))),
+            )))),
         );
 
         assert_eq!(model.focus, Focus::Terminal);
         assert_eq!(
-            model.active,
+            model.sidebar.active(),
             Some(SessionKey {
                 project: project_id,
                 worktree: None,
@@ -3727,7 +3718,7 @@ mod tests {
             })
         );
         assert_eq!(
-            model.tree.selected(),
+            model.sidebar.tree().selected(),
             Some(&TreeId::Session(project_id, None, second_session))
         );
     }
@@ -3755,7 +3746,7 @@ mod tests {
 
         assert_eq!(model.focus, Focus::Terminal);
         assert_eq!(
-            model.active,
+            model.sidebar.active(),
             Some(SessionKey {
                 project: project_id,
                 worktree: None,
@@ -3763,7 +3754,7 @@ mod tests {
             })
         );
         assert_eq!(
-            model.tree.selected(),
+            model.sidebar.tree().selected(),
             Some(&TreeId::Session(project_id, None, second_session))
         );
     }
@@ -3791,7 +3782,7 @@ mod tests {
 
         assert_eq!(model.focus, Focus::Terminal);
         assert_eq!(
-            model.active,
+            model.sidebar.active(),
             Some(SessionKey {
                 project: project_id,
                 worktree: None,
@@ -3799,7 +3790,7 @@ mod tests {
             })
         );
         assert_eq!(
-            model.tree.selected(),
+            model.sidebar.tree().selected(),
             Some(&TreeId::Session(project_id, None, first_session))
         );
     }
@@ -3820,7 +3811,8 @@ mod tests {
         let primary_session = model.projects[0].sessions[0].id;
 
         model
-            .tree
+            .sidebar
+            .tree_mut()
             .select(TreeId::Session(primary_project, None, primary_session));
 
         let params = RemoteParams {
@@ -3838,7 +3830,7 @@ mod tests {
             .expect("secondary session created")
             .id;
         assert_eq!(
-            model.tree.selected(),
+            model.sidebar.tree().selected(),
             Some(&TreeId::Session(secondary_project, None, secondary_session))
         );
     }
@@ -3866,7 +3858,7 @@ mod tests {
 
         assert_eq!(model.focus, Focus::Terminal);
         assert_eq!(
-            model.active,
+            model.sidebar.active(),
             Some(SessionKey {
                 project: project_id,
                 worktree: None,
@@ -3874,7 +3866,7 @@ mod tests {
             })
         );
         assert_eq!(
-            model.tree.selected(),
+            model.sidebar.tree().selected(),
             Some(&TreeId::Session(project_id, None, first_session))
         );
     }
@@ -3891,7 +3883,10 @@ mod tests {
             Some(TreeId::Worktree(_, worktree_id)) => worktree_id,
             _ => panic!("expected worktree to be created"),
         };
-        model.tree.select(TreeId::Worktree(project_id, worktree_id));
+        model
+            .sidebar
+            .tree_mut()
+            .select(TreeId::Worktree(project_id, worktree_id));
         update(&mut model, Msg::NewSession);
 
         let (session_id, worktree_path) = {
@@ -3971,7 +3966,7 @@ mod tests {
 
         assert_eq!(model.focus, Focus::Terminal);
         assert_eq!(
-            model.active,
+            model.sidebar.active(),
             Some(SessionKey {
                 project: project_id,
                 worktree: None,
@@ -3979,7 +3974,7 @@ mod tests {
             })
         );
         assert_eq!(
-            model.tree.selected(),
+            model.sidebar.tree().selected(),
             Some(&TreeId::Session(project_id, None, active_session))
         );
     }
@@ -3992,7 +3987,11 @@ mod tests {
         activate_first_project(&mut model);
         let (project_id, worktree_id, session_id, initial_name) = {
             let (project, session) = model.active_session().expect("active session");
-            let worktree = model.active.map(|active| active.worktree).unwrap_or(None);
+            let worktree = model
+                .sidebar
+                .active()
+                .map(|active| active.worktree)
+                .unwrap_or(None);
             (
                 project.id,
                 worktree,
@@ -4046,8 +4045,12 @@ mod tests {
             return;
         };
         activate_first_project(&mut model);
-        let TreeId::Session(pid, worktree, sid) =
-            model.tree.selected().cloned().expect("selected session")
+        let TreeId::Session(pid, worktree, sid) = model
+            .sidebar
+            .tree()
+            .selected()
+            .cloned()
+            .expect("selected session")
         else {
             panic!("expected session selected");
         };
@@ -4061,7 +4064,8 @@ mod tests {
         model.rebuild_tree();
 
         let visible_session = model
-            .tree
+            .sidebar
+            .tree()
             .visible()
             .iter()
             .find(|node| matches!(node.id, TreeId::Session(_, _, _)))
@@ -4085,8 +4089,12 @@ mod tests {
             return;
         };
         activate_first_project(&mut model);
-        let TreeId::Session(pid, worktree, sid) =
-            model.tree.selected().cloned().expect("selected session")
+        let TreeId::Session(pid, worktree, sid) = model
+            .sidebar
+            .tree()
+            .selected()
+            .cloned()
+            .expect("selected session")
         else {
             panic!("expected session selected");
         };
@@ -4101,7 +4109,8 @@ mod tests {
         model.rebuild_tree();
 
         let visible_session = model
-            .tree
+            .sidebar
+            .tree()
             .visible()
             .iter()
             .find(|node| matches!(node.id, TreeId::Session(_, _, _)))
@@ -4129,15 +4138,11 @@ mod tests {
             },
         );
 
-        rebuild_tree(
-            &model.projects,
-            &mut model.tree,
-            &mut model.active,
-            model.filter.as_ref(),
-        );
+        model.rebuild_tree();
 
         let visible_session_after = model
-            .tree
+            .sidebar
+            .tree()
             .visible()
             .iter()
             .find(|node| matches!(node.id, TreeId::Session(_, _, _)))
@@ -4186,7 +4191,8 @@ mod tests {
         );
 
         let target = model
-            .tree
+            .sidebar
+            .tree()
             .visible()
             .iter()
             .find(|node| {
@@ -4251,7 +4257,8 @@ mod tests {
         });
 
         let target = model
-            .tree
+            .sidebar
+            .tree()
             .visible()
             .iter()
             .find(|node| {
@@ -4552,12 +4559,9 @@ mod tests {
 
         let project_name = &model.projects[0].name;
         let mut node = sidebar_view(
-            &model.tree,
-            &model.tree_scroll,
-            model.auto_hide,
+            &model.sidebar,
             true,
-            false,
-            Msg::Tree,
+            |msg| Msg::Sidebar(SidebarMsg::Tree(msg)),
             || Msg::FocusSidebar,
         )
         .with_fill();
@@ -4848,7 +4852,10 @@ mod tests {
         }
 
         // Apply a filter that matches ONLY the first session (hides the second one)
-        model.filter = Some(filter::parse_filter("title=unique1").expect("valid filter"));
+        model.sidebar.set_filter(
+            Some(filter::parse_filter("title=unique1").expect("valid filter")),
+            "title=unique1".to_string(),
+        );
 
         // Select the first session so the second one isn't forced to be visible
         model.select_session(SessionKey {
@@ -4860,7 +4867,7 @@ mod tests {
         model.rebuild_tree();
 
         // Check the visible nodes
-        let visible: Vec<_> = model.tree.visible().iter().collect();
+        let visible: Vec<_> = model.sidebar.tree().visible().iter().collect();
 
         // Verify session 2 is NOT visible
         let session2_visible = visible.iter().any(|node| match node.id {

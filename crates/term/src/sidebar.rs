@@ -2,13 +2,14 @@
 
 use chatui::dom::Color;
 use chatui::{
-    Node, ScrollState, Style, TextSpan, TreeMsg, TreeNode, TreeState, TreeStyle, block_with_title,
-    scrollable_content, text, tree_view,
+    Node, ScrollMsg, ScrollState, Style, TextSpan, TreeMsg, TreeNode, TreeState, TreeStyle,
+    block_with_title, scrollable_content, text, tree_view,
 };
 use taffy::Dimension;
 use taffy::prelude::TaffyZero;
 
-use crate::app::Msg;
+use crate::app::Msg as AppMsg;
+use crate::filter;
 
 use super::project::{Project, ProjectId, SessionKey, StartupState, WorktreeId};
 use super::session::SessionId;
@@ -19,6 +20,138 @@ pub enum TreeId {
     Project(ProjectId),
     Worktree(ProjectId, WorktreeId),
     Session(ProjectId, Option<WorktreeId>, SessionId),
+}
+
+pub struct Model {
+    tree: TreeState<TreeId>,
+    tree_scroll: ScrollState,
+    auto_hide: bool,
+    filter: Option<filter::FilterExpression>,
+    filter_text: String,
+    active: Option<SessionKey>,
+}
+
+impl Model {
+    pub fn new() -> Self {
+        Self {
+            tree: TreeState::new(),
+            tree_scroll: ScrollState::vertical(),
+            auto_hide: false,
+            filter: None,
+            filter_text: String::new(),
+            active: None,
+        }
+    }
+
+    pub fn tree(&self) -> &TreeState<TreeId> {
+        &self.tree
+    }
+
+    pub fn tree_mut(&mut self) -> &mut TreeState<TreeId> {
+        &mut self.tree
+    }
+
+    pub fn auto_hide(&self) -> bool {
+        self.auto_hide
+    }
+
+    pub fn toggle_auto_hide(&mut self) {
+        self.auto_hide = !self.auto_hide;
+    }
+
+    pub fn set_auto_hide(&mut self, auto_hide: bool) {
+        self.auto_hide = auto_hide;
+    }
+
+    pub fn filter_text(&self) -> &str {
+        &self.filter_text
+    }
+
+    pub fn set_filter(&mut self, filter: Option<filter::FilterExpression>, text: String) {
+        self.filter = filter;
+        self.filter_text = text;
+    }
+
+    pub fn active(&self) -> Option<SessionKey> {
+        self.active
+    }
+
+    pub fn select_session(&mut self, key: SessionKey) {
+        self.active = Some(key);
+        self.tree
+            .select(TreeId::Session(key.project, key.worktree, key.session));
+    }
+
+    pub fn sync_active_from_tree_selection(&mut self) {
+        if let Some(TreeId::Session(pid, worktree, sid)) = self.tree.selected().cloned() {
+            self.active = Some(SessionKey {
+                project: pid,
+                worktree,
+                session: sid,
+            });
+        }
+    }
+
+    pub fn rebuild_tree(&mut self, projects: &[Project]) {
+        rebuild_tree(
+            projects,
+            &mut self.tree,
+            &mut self.active,
+            self.filter.as_ref(),
+        );
+    }
+}
+
+impl Default for Model {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+pub enum Event {
+    ActivateSession(SessionKey),
+    ActivateProject(ProjectId),
+    ActivateWorktree(ProjectId, WorktreeId),
+    FocusSidebar,
+}
+
+#[derive(Clone, Debug)]
+pub enum Msg {
+    Tree(TreeMsg<TreeId>),
+    Scroll(ScrollMsg),
+}
+
+pub fn update(model: &mut Model, msg: Msg) -> Option<Event> {
+    match msg {
+        Msg::Tree(tree_msg) => match tree_msg {
+            TreeMsg::ToggleExpand(id) => {
+                model.tree.toggle_expanded(&id);
+                Some(Event::FocusSidebar)
+            }
+            TreeMsg::Activate(TreeId::Session(pid, worktree, sid))
+            | TreeMsg::DoubleClick(TreeId::Session(pid, worktree, sid)) => {
+                Some(Event::ActivateSession(SessionKey {
+                    project: pid,
+                    worktree,
+                    session: sid,
+                }))
+            }
+            TreeMsg::Activate(TreeId::Project(pid))
+            | TreeMsg::DoubleClick(TreeId::Project(pid)) => {
+                model.tree.toggle_expanded(&TreeId::Project(pid));
+                Some(Event::ActivateProject(pid))
+            }
+            TreeMsg::Activate(TreeId::Worktree(pid, wid))
+            | TreeMsg::DoubleClick(TreeId::Worktree(pid, wid)) => {
+                model.tree.toggle_expanded(&TreeId::Worktree(pid, wid));
+                Some(Event::ActivateWorktree(pid, wid))
+            }
+        },
+        Msg::Scroll(scroll_msg) => {
+            model.tree_scroll.update(scroll_msg);
+            None
+        }
+    }
 }
 
 /// Style configuration for the tree.
@@ -371,31 +504,34 @@ pub fn move_project_down(projects: &mut [Project], pid: ProjectId) -> bool {
 
 /// Render the sidebar.
 pub fn sidebar_view(
-    tree: &TreeState<TreeId>,
-    tree_scroll: &ScrollState,
-    auto_hide: bool,
+    model: &Model,
     focused: bool,
-    filter_active: bool,
-    wrap_tree: impl Fn(TreeMsg<TreeId>) -> Msg + 'static,
-    on_click: impl Fn() -> Msg + 'static,
-) -> Node<Msg> {
-    if auto_hide && !focused {
+    wrap_tree: impl Fn(TreeMsg<TreeId>) -> AppMsg + 'static,
+    on_click: impl Fn() -> AppMsg + 'static,
+) -> Node<AppMsg> {
+    if model.auto_hide && !focused {
         return chatui::column(vec![]);
     }
 
     let style = tree_style();
-    let tree_node = if tree.visible().is_empty() {
-        text::<Msg>("No projects yet. Press p to add one.")
+    let tree_node = if model.tree.visible().is_empty() {
+        text::<AppMsg>("No projects yet. Press p to add one.")
     } else {
-        tree_view("session-tree", tree, &style, wrap_tree, focused)
+        tree_view("session-tree", &model.tree, &style, wrap_tree, focused)
             .with_min_height(Dimension::ZERO)
             .with_flex_grow(1.)
             .with_flex_basis(Dimension::ZERO)
     };
 
-    let scroll_node = scrollable_content("tree-scroll", tree_scroll, 3, Msg::TreeScroll, tree_node);
+    let scroll_node = scrollable_content(
+        "tree-scroll",
+        &model.tree_scroll,
+        3,
+        |msg| AppMsg::Sidebar(Msg::Scroll(msg)),
+        tree_node,
+    );
 
-    let title = if filter_active {
+    let title = if model.filter.is_some() {
         "Sessions (filtered)"
     } else {
         "Sessions"
