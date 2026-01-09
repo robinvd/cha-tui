@@ -2,36 +2,14 @@
 
 use std::path::PathBuf;
 
+use super::layout::LayoutKind;
 use super::session::{Session, SessionId};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Layout {
-    Zoom,
-    Tall,
-    Tall3,
-    Focus,
-    Wide,
-    Strip,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartupState {
     Inactive,
     Loading,
     Active,
-}
-
-impl Layout {
-    pub fn status_label(self) -> &'static str {
-        match self {
-            Layout::Zoom => "zoom",
-            Layout::Tall => "tall",
-            Layout::Tall3 => "tall3",
-            Layout::Focus => "focus",
-            Layout::Wide => "wide",
-            Layout::Strip => "strip",
-        }
-    }
 }
 
 /// Unique identifier for a project.
@@ -57,7 +35,7 @@ pub struct Worktree {
     pub path: PathBuf,
     pub sessions: Vec<Session>,
     pub next_session_number: usize,
-    pub layout: Layout,
+    pub layout: LayoutKind,
     pub startup_state: StartupState,
 }
 
@@ -70,7 +48,7 @@ impl Worktree {
             path,
             sessions: Vec::new(),
             next_session_number: 1,
-            layout: Layout::Tall,
+            layout: LayoutKind::Tall,
             startup_state: StartupState::Inactive,
         }
     }
@@ -152,7 +130,7 @@ pub struct Project {
     pub next_worktree_id: u64,
     pub worktrees_loaded: bool,
     pub worktrees_loading: bool,
-    pub layout: Layout,
+    pub layout: LayoutKind,
     pub startup_state: StartupState,
 }
 
@@ -169,7 +147,7 @@ impl Project {
             next_worktree_id: 1,
             worktrees_loaded: false,
             worktrees_loading: false,
-            layout: Layout::Tall,
+            layout: LayoutKind::Tall,
             startup_state: StartupState::Inactive,
         }
     }

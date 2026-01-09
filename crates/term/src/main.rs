@@ -4,6 +4,7 @@ mod focus;
 mod git;
 mod jj;
 mod keymap;
+mod layout;
 mod modal;
 mod persistence;
 mod project;

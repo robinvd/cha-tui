@@ -5,7 +5,7 @@ use chatui::{Node, Style, TextSpan, rich_text, row};
 
 use super::focus::Focus;
 use super::keymap::{Keymap, Shortcut};
-use super::project::Layout;
+use super::layout::LayoutKind;
 use super::project::Project;
 use super::session::Session;
 use crate::app::Msg;
@@ -39,7 +39,7 @@ pub fn status_bar_view(
     status: Option<&StatusMessage>,
     auto_hide: bool,
     active_session: Option<(&Project, &Session)>,
-    layout: Layout,
+    layout: LayoutKind,
     keymap: &Keymap,
 ) -> Node<Msg> {
     let base_style = Style::default();
@@ -162,7 +162,7 @@ fn shortcut_button(
 mod tests {
     use super::{Focus, StatusMessage, status_bar_view};
     use crate::keymap::{Action, Binding, KeyChord, Keymap, Scope};
-    use crate::project::Layout;
+    use crate::layout::LayoutKind;
     use chatui::event::KeyCode;
     use chatui::test_utils::render_node_to_string;
 
@@ -183,7 +183,7 @@ mod tests {
             Some(&status),
             false,
             None,
-            Layout::Zoom,
+            LayoutKind::Zoom,
             &keymap,
         )
         .with_fill();
