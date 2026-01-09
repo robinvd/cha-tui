@@ -8,7 +8,7 @@ use chatui::{
 use taffy::Dimension;
 use taffy::prelude::TaffyZero;
 
-use crate::Msg;
+use crate::app::Msg;
 
 use super::project::{Project, ProjectId, SessionKey, StartupState, WorktreeId};
 use super::session::SessionId;

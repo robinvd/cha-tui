@@ -3,12 +3,12 @@
 use chatui::dom::Color;
 use chatui::{Node, Style, TextSpan, rich_text, row};
 
-use super::Msg;
 use super::focus::Focus;
 use super::keymap::{Keymap, Shortcut};
 use super::project::Layout;
 use super::project::Project;
 use super::session::Session;
+use crate::app::Msg;
 
 /// Kind of status message.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
