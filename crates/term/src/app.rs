@@ -2031,40 +2031,34 @@ fn handle_remote_list_worktrees(
     )
 }
 
-enum SessionQuery {
-    Title(String, MatchKind),
-    ProjectName(String, MatchKind),
-    WorkspaceName(String, MatchKind),
-    Cwd(String, MatchKind),
-    Id(u64),
-    HasUpdates(bool),
-    HasBell(bool),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum MatchKind {
-    Exact,
-    Substring,
-}
-
 fn handle_remote_query_sessions(
     model: &Model,
     params: &RemoteParams,
 ) -> (Transition<Msg>, RemoteResponse) {
-    let queries = match parse_session_queries(params) {
-        Ok(queries) => queries,
+    let filter_expr = match parse_remote_query_filter(params) {
+        Ok(expr) => expr,
         Err(err) => return (Transition::Continue, RemoteResponse::err(err)),
     };
+    let active_container = model
+        .sidebar
+        .active()
+        .map(|key| (key.project, key.worktree));
     let mut sessions = Vec::new();
     for project in &model.projects {
         for session in &project.sessions {
-            if matches_session_queries(&queries, project, None, session) {
+            if filter::matches_filter(&filter_expr, project, None, session, active_container) {
                 sessions.push(build_remote_session(project, None, session));
             }
         }
         for worktree in &project.worktrees {
             for session in &worktree.sessions {
-                if matches_session_queries(&queries, project, Some(worktree), session) {
+                if filter::matches_filter(
+                    &filter_expr,
+                    project,
+                    Some(worktree),
+                    session,
+                    active_container,
+                ) {
                     sessions.push(build_remote_session(project, Some(worktree), session));
                 }
             }
@@ -2077,146 +2071,32 @@ fn handle_remote_query_sessions(
     )
 }
 
-fn parse_session_queries(params: &RemoteParams) -> Result<Vec<SessionQuery>, String> {
+fn parse_remote_query_filter(params: &RemoteParams) -> Result<filter::FilterExpression, String> {
     let Some(queries) = params.query.as_deref() else {
-        return Ok(Vec::new());
+        return Ok(filter::FilterExpression::And(Vec::new()));
     };
-    queries
-        .iter()
-        .map(parse_session_query)
-        .collect::<Result<Vec<_>, _>>()
-}
-
-fn parse_session_query(query: &remote::RemoteSessionQuery) -> Result<SessionQuery, String> {
-    let key = normalize_query_key(&query.key);
-    let value = query.value.trim();
-    let match_kind = parse_match_kind(query)?;
-    if value.is_empty() {
-        return Err(format!("query '{key}' requires a value"));
+    if queries.is_empty() {
+        return Ok(filter::FilterExpression::And(Vec::new()));
     }
-    match key.as_str() {
-        "title" => Ok(SessionQuery::Title(value.to_string(), match_kind)),
-        "project" | "project name" => Ok(SessionQuery::ProjectName(value.to_string(), match_kind)),
-        "workspace" | "workspace name" | "worktree name" => {
-            Ok(SessionQuery::WorkspaceName(value.to_string(), match_kind))
+    let mut buffer = String::new();
+    for query in queries {
+        let key = query.key.trim();
+        let operator = query.operator.trim();
+        let value = query.value.trim();
+        if key.is_empty() {
+            return Err("missing key in query".to_string());
         }
-        "cwd" => Ok(SessionQuery::Cwd(value.to_string(), match_kind)),
-        "id" => {
-            ensure_exact_operator(&key, match_kind)?;
-            value
-                .parse::<u64>()
-                .map(SessionQuery::Id)
-                .map_err(|_| format!("invalid id value '{value}'"))
+        if value.is_empty() {
+            return Err(format!("query '{key}' requires a value"));
         }
-        "has updates" | "updates" => {
-            ensure_exact_operator(&key, match_kind)?;
-            parse_query_bool(value)
-                .map(SessionQuery::HasUpdates)
-                .ok_or_else(|| format!("invalid has updates value '{value}'"))
+        if !buffer.is_empty() {
+            buffer.push(' ');
         }
-        "has bell" | "bell" => {
-            ensure_exact_operator(&key, match_kind)?;
-            parse_query_bool(value)
-                .map(SessionQuery::HasBell)
-                .ok_or_else(|| format!("invalid has bell value '{value}'"))
-        }
-        _ => Err(format!("unknown query key '{key}'")),
+        buffer.push_str(key);
+        buffer.push_str(operator);
+        buffer.push_str(value);
     }
-}
-
-fn parse_match_kind(query: &remote::RemoteSessionQuery) -> Result<MatchKind, String> {
-    match query.operator.as_str() {
-        "=" => Ok(MatchKind::Exact),
-        "~=" => Ok(MatchKind::Substring),
-        other => Err(format!("unknown query operator '{other}'")),
-    }
-}
-
-fn ensure_exact_operator(key: &str, match_kind: MatchKind) -> Result<(), String> {
-    if match_kind == MatchKind::Exact {
-        Ok(())
-    } else {
-        Err(format!("query '{key}' requires '=' operator"))
-    }
-}
-
-fn normalize_query_key(key: &str) -> String {
-    let mut normalized = String::new();
-    for part in key
-        .split(|ch: char| ch.is_ascii_whitespace() || ch == '_' || ch == '-')
-        .filter(|part| !part.is_empty())
-    {
-        if !normalized.is_empty() {
-            normalized.push(' ');
-        }
-        normalized.push_str(&part.to_ascii_lowercase());
-    }
-    normalized
-}
-
-fn parse_query_bool(value: &str) -> Option<bool> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "true" | "t" | "1" | "yes" | "y" | "on" => Some(true),
-        "false" | "f" | "0" | "no" | "n" | "off" => Some(false),
-        _ => None,
-    }
-}
-
-fn matches_session_queries(
-    queries: &[SessionQuery],
-    project: &Project,
-    worktree: Option<&Worktree>,
-    session: &Session,
-) -> bool {
-    queries
-        .iter()
-        .all(|query| matches_session_query(query, project, worktree, session))
-}
-
-fn matches_session_query(
-    query: &SessionQuery,
-    project: &Project,
-    worktree: Option<&Worktree>,
-    session: &Session,
-) -> bool {
-    match query {
-        SessionQuery::Title(needle, match_kind) => {
-            matches_query_text(&session_title_for_query(session), needle, *match_kind)
-        }
-        SessionQuery::ProjectName(needle, match_kind) => {
-            matches_query_text(&project.name, needle, *match_kind)
-        }
-        SessionQuery::WorkspaceName(needle, match_kind) => worktree
-            .map(|worktree| matches_query_text(&worktree.name, needle, *match_kind))
-            .unwrap_or(false),
-        SessionQuery::Cwd(needle, match_kind) => {
-            let path = match worktree {
-                Some(worktree) => worktree.path.display().to_string(),
-                None => project.path.display().to_string(),
-            };
-            matches_query_text(&path, needle, *match_kind)
-        }
-        SessionQuery::Id(id) => session.id.0 == *id,
-        SessionQuery::HasUpdates(expected) => session.has_unread_output == *expected,
-        SessionQuery::HasBell(expected) => session.bell == *expected,
-    }
-}
-
-fn session_title_for_query(session: &Session) -> String {
-    session
-        .custom_title
-        .clone()
-        .or_else(|| session.title.clone())
-        .unwrap_or_else(|| session.display_name())
-}
-
-fn matches_query_text(value: &str, query: &str, match_kind: MatchKind) -> bool {
-    let value = value.to_ascii_lowercase();
-    let query = query.trim().to_ascii_lowercase();
-    match match_kind {
-        MatchKind::Exact => value == query,
-        MatchKind::Substring => value.contains(&query),
-    }
+    filter::parse_filter(&buffer)
 }
 
 fn handle_remote_list_sessions(
