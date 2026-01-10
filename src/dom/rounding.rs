@@ -73,7 +73,6 @@ pub fn round_layout<M>(root: &mut RetainedNode<M>) {
                     round_layout_inner(child, cumulative_x, cumulative_y);
                 }
             }
-            crate::dom::RetainedNodeContent::Text(_) => {}
             crate::dom::RetainedNodeContent::Renderable(_) => {}
         }
     }

@@ -1,6 +1,6 @@
 use crate::dom::{
     ElementNode, Node, NodeContent, RenderablePatch, RetainedElementNode, RetainedNode,
-    RetainedNodeContent, TextNode, TextNodeRef,
+    RetainedNodeContent,
 };
 
 pub type NodeRef<'a, Msg> = Node<'a, Msg>;
@@ -57,13 +57,6 @@ pub fn patch<Msg>(
     }
 
     match (&mut existing.content, new_content) {
-        (RetainedNodeContent::Text(existing_text), RetainedNodeContent::Text(new_text)) => {
-            let spans_changed = existing_text.spans() != new_text.spans();
-            if spans_changed {
-                *existing_text = new_text;
-                layout_changed = true;
-            }
-        }
         (
             RetainedNodeContent::Element(existing_element),
             RetainedNodeContent::Element(new_element),
@@ -127,13 +120,6 @@ pub fn patch_borrowed<'a, Msg>(
     }
 
     match (&mut existing.content, new_node.content) {
-        (RetainedNodeContent::Text(existing_text), NodeContent::Text(new_text)) => {
-            let spans_changed = text_node_spans_differ(existing_text, &new_text);
-            if spans_changed {
-                *existing_text = new_text.into();
-                layout_changed = true;
-            }
-        }
         (RetainedNodeContent::Element(existing_element), NodeContent::Element(new_element)) => {
             let element_changed = patch_element_ref(existing_element, new_element);
             layout_changed |= element_changed;
@@ -150,6 +136,10 @@ pub fn patch_borrowed<'a, Msg>(
                     layout_changed = true;
                 }
             }
+            // Apply any style override that was set via with_style() on the borrowed node
+            if let Some(style) = new_node.renderable_style {
+                let _ = existing_leaf.apply_style(&style);
+            }
         }
         _ => unreachable!("content mismatch should have been excluded by can_patch_borrowed"),
     }
@@ -165,23 +155,6 @@ pub fn patch_borrowed<'a, Msg>(
     }
 }
 
-fn text_node_spans_differ(existing: &TextNode, new: &TextNodeRef) -> bool {
-    let existing_spans = existing.spans();
-    let new_spans = new.spans();
-
-    if existing_spans.len() != new_spans.len() {
-        return true;
-    }
-
-    for (e, n) in existing_spans.iter().zip(new_spans.iter()) {
-        if e.style != n.style || e.content != n.content.as_ref() {
-            return true;
-        }
-    }
-
-    false
-}
-
 fn can_patch_borrowed<'a, Msg>(existing: &RetainedNode<Msg>, new_node: &NodeRef<'a, Msg>) -> bool {
     if existing.id != 0 && new_node.id != 0 && existing.id != new_node.id {
         return false;
@@ -194,7 +167,6 @@ fn can_patch_borrowed<'a, Msg>(existing: &RetainedNode<Msg>, new_node: &NodeRef<
     }
 
     match (&existing.content, &new_node.content) {
-        (RetainedNodeContent::Text(_), NodeContent::Text(_)) => true,
         (RetainedNodeContent::Element(existing_element), NodeContent::Element(new_element)) => {
             existing_element.kind == new_element.kind
         }
@@ -337,7 +309,6 @@ fn can_patch<Msg>(existing: &RetainedNode<Msg>, new_node: &RetainedNode<Msg>) ->
     }
 
     match (&existing.content, &new_node.content) {
-        (RetainedNodeContent::Text(_), RetainedNodeContent::Text(_)) => true,
         (
             RetainedNodeContent::Element(existing_element),
             RetainedNodeContent::Element(new_element),
@@ -516,8 +487,9 @@ mod tests {
             }
             PatchResult::Replaced(_) => panic!("expected patch"),
         };
+        // Use into_text() since text is now a Renderable
         assert_eq!(
-            patched.as_text().expect("text node").spans()[0].content,
+            patched.into_text().expect("text node").spans()[0].content,
             "longer text"
         );
     }

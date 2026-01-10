@@ -460,8 +460,10 @@ impl<'a, Model, Msg: 'static> Program<'a, Model, Msg> {
     }
 
     fn render_view(&mut self, buffer: &mut DoubleBuffer) -> Result<(), ProgramError> {
+        let _span = tracing::debug_span!("render_compute").entered();
         self.rebuild_view();
         if let Some(current_view) = self.current_view.as_ref() {
+            let _span = tracing::debug_span!("paint_buffer").entered();
             Renderer::new(buffer, &self.palette).render(current_view, self.current_size)
         } else {
             Ok(())
@@ -511,6 +513,7 @@ impl<'a, Model, Msg: 'static> Program<'a, Model, Msg> {
         terminal: &mut PlatformTerminal,
     ) -> Result<(), ProgramError> {
         self.render_view(buffer)?;
+        let _span = tracing::debug_span!("flush_tty").entered();
         write!(terminal, "\x1b[?2026h")
             .map_err(|e| ProgramError::terminal(format!("Failed to write sync start: {}", e)))?;
         buffer.flush(terminal)?;
@@ -523,11 +526,16 @@ impl<'a, Model, Msg: 'static> Program<'a, Model, Msg> {
     }
 
     fn rebuild_view(&mut self) {
+        let _span = tracing::debug_span!("rebuild_view").entered();
         // View now returns NodeRef which can borrow from the model
-        let new_view: NodeRef<'_, Msg> = (self.view)(self.model);
+        let new_view: NodeRef<'_, Msg> = {
+            let _span = tracing::debug_span!("view_fn").entered();
+            (self.view)(self.model)
+        };
 
         if let Some(existing_view) = self.current_view.take() {
             // Patch the retained node with the borrowed node
+            let _span = tracing::debug_span!("patch").entered();
             let patched = patch_borrowed(existing_view, new_view);
             self.current_view = Some(match patched {
                 PatchResult::Patched { node, .. } => node,
@@ -540,16 +548,19 @@ impl<'a, Model, Msg: 'static> Program<'a, Model, Msg> {
 
         if let Some(view) = self.current_view.as_mut() {
             info!("computing layout with: {:?}", self.current_size);
-            compute_root_layout(
-                view,
-                u64::MAX.into(),
-                taffy::Size {
-                    width: taffy::AvailableSpace::Definite(self.current_size.width as f32),
-                    height: taffy::AvailableSpace::Definite(self.current_size.height as f32),
-                },
-            );
-            crate::dom::rounding::round_layout(view);
-            crate::dom::print::print_tree(view);
+            {
+                let _span = tracing::debug_span!("layout").entered();
+                compute_root_layout(
+                    view,
+                    u64::MAX.into(),
+                    taffy::Size {
+                        width: taffy::AvailableSpace::Definite(self.current_size.width as f32),
+                        height: taffy::AvailableSpace::Definite(self.current_size.height as f32),
+                    },
+                );
+                crate::dom::rounding::round_layout(view);
+                crate::dom::print::print_tree(view);
+            }
 
             // TODO early exit if Transition::Quit
             let mut pending_resize_msgs: Vec<Msg> = Vec::new();
@@ -645,7 +656,6 @@ impl<'a, Model, Msg: 'static> Program<'a, Model, Msg> {
                     }
                     None
                 }
-                crate::dom::RetainedNodeContent::Text(_) => None,
                 crate::dom::RetainedNodeContent::Renderable(_) => None,
             }
         }

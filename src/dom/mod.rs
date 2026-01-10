@@ -51,6 +51,12 @@ pub trait Renderable: fmt::Debug + 'static {
         "leaf"
     }
 
+    /// Apply a style to this renderable. Returns true if the style was applied.
+    /// Default implementation does nothing and returns false.
+    fn apply_style(&mut self, _style: &Style) -> bool {
+        false
+    }
+
     fn as_any(&self) -> &dyn Any;
 
     fn as_any_mut(&mut self) -> &mut dyn Any;
@@ -162,6 +168,9 @@ pub struct Node<'a, Msg> {
     pub(crate) on_mouse: Vec<Rc<dyn Fn(LocalMouseEvent) -> Option<Msg>>>,
     pub(crate) on_resize: Option<ResizeHandler<Msg>>,
     pub(crate) pending_scroll: Option<PendingScroll<Msg>>,
+    /// Style override applied via `with_style()` for renderable nodes.
+    /// Applied during conversion to retained nodes.
+    pub(crate) renderable_style: Option<Style>,
 }
 
 impl<'a, Msg> fmt::Debug for Node<'a, Msg> {
@@ -178,7 +187,6 @@ impl<'a, Msg> fmt::Debug for Node<'a, Msg> {
 
 pub enum RetainedNodeContent<Msg> {
     Element(RetainedElementNode<Msg>),
-    Text(TextNode),
     Renderable(RenderableNode),
 }
 
@@ -186,7 +194,6 @@ impl<Msg> fmt::Debug for RetainedNodeContent<Msg> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Element(e) => f.debug_tuple("Element").field(e).finish(),
-            Self::Text(t) => f.debug_tuple("Text").field(t).finish(),
             Self::Renderable(l) => f.debug_tuple("Renderable").field(l).finish(),
         }
     }
@@ -195,7 +202,6 @@ impl<Msg> fmt::Debug for RetainedNodeContent<Msg> {
 /// Borrowed version of NodeContent that can reference data from the model
 pub enum NodeContent<'a, Msg> {
     Element(ElementNode<'a, Msg>),
-    Text(TextNodeRef<'a>),
     Renderable(Box<dyn RenderableRef + 'a>),
 }
 
@@ -203,7 +209,6 @@ impl<'a, Msg> fmt::Debug for NodeContent<'a, Msg> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Element(e) => f.debug_tuple("Element").field(e).finish(),
-            Self::Text(t) => f.debug_tuple("Text").field(t).finish(),
             Self::Renderable(l) => f.debug_tuple("Renderable").field(l).finish(),
         }
     }
@@ -520,13 +525,11 @@ impl Color {
 }
 
 pub fn text_retained<Msg>(content: impl Into<String>) -> RetainedNode<Msg> {
-    RetainedNode::new(RetainedNodeContent::Text(TextNode::new(content)))
+    renderable_retained(TextRenderable::new(content))
 }
 
 pub fn rich_text_retained<Msg>(spans: impl Into<Vec<TextSpan>>) -> RetainedNode<Msg> {
-    RetainedNode::new(RetainedNodeContent::Text(TextNode::from_spans(
-        spans.into(),
-    )))
+    renderable_retained(TextRenderable::from_spans(spans.into()))
 }
 
 pub fn renderable_retained<Msg>(widget: impl Renderable + 'static) -> RetainedNode<Msg> {
@@ -608,17 +611,22 @@ pub fn block_with_title_retained<Msg>(
 
 /// Create a text node that borrows its content from the model
 pub fn text<'a, Msg>(content: impl Into<Cow<'a, str>>) -> Node<'a, Msg> {
-    Node::new(NodeContent::Text(TextNodeRef::new(content)))
+    renderable_ref(TextRenderableRef::new(content))
 }
 
 /// Create a text node with owned (formatted) content
 pub fn text_owned<'a, Msg>(content: String) -> Node<'a, Msg> {
-    text(Cow::Owned(content))
+    renderable(TextRenderable::new(content))
 }
 
 /// Create a rich text node with borrowed spans
 pub fn rich_text<'a, Msg>(spans: Vec<TextSpanRef<'a>>) -> Node<'a, Msg> {
-    Node::new(NodeContent::Text(TextNodeRef::from_spans(spans)))
+    renderable_ref(TextRenderableRef::from_spans(spans))
+}
+
+/// Create a rich text node with owned (formatted) content
+pub fn rich_text_owned<'a, Msg>(spans: Vec<TextSpan>) -> Node<'a, Msg> {
+    renderable(TextRenderable::from_spans(spans))
 }
 
 pub fn renderable<'a, Msg>(widget: impl Renderable + 'static) -> Node<'a, Msg> {
@@ -734,6 +742,7 @@ impl<'a, Msg> Node<'a, Msg> {
             scroll_x: 0.0,
             scroll_y: 0.0,
             pending_scroll: None,
+            renderable_style: None,
         }
     }
 
@@ -749,7 +758,6 @@ impl<'a, Msg> Node<'a, Msg> {
                 ElementKind::Modal => "modal",
                 ElementKind::Table => "table",
             },
-            NodeContent::Text(_text_node) => "text",
             NodeContent::Renderable(view) => view.debug_label(),
         }
     }
@@ -797,13 +805,9 @@ impl<'a, Msg> Node<'a, Msg> {
             NodeContent::Element(element) => {
                 element.attrs.style = style;
             }
-            NodeContent::Text(text) => {
-                text.base_style = style;
-                for span in &mut text.spans {
-                    span.style = style.merged(&span.style)
-                }
+            NodeContent::Renderable(_) => {
+                self.renderable_style = Some(style);
             }
-            NodeContent::Renderable(_leaf) => {}
         }
         self
     }
@@ -937,7 +941,20 @@ impl<'a, Msg> Node<'a, Msg> {
     /// Convert this Node into its text content
     pub fn into_text(self) -> Option<TextNode> {
         match self.content {
-            NodeContent::Text(t) => Some(t.into()),
+            NodeContent::Renderable(r) => {
+                let mut retained = r.into_retained();
+                // Apply any style override that was set via with_style()
+                if let Some(style) = self.renderable_style {
+                    let _ = retained.apply_style(&style);
+                }
+                retained
+                    .as_any()
+                    .downcast_ref::<TextRenderable>()
+                    .map(|t| TextNode {
+                        spans: t.spans.clone(),
+                        base_style: t.base_style,
+                    })
+            }
             _ => None,
         }
     }
@@ -961,7 +978,13 @@ impl<'a, Msg> Node<'a, Msg> {
     /// Get a reference to the text content, if this is a text node
     pub fn as_text(&self) -> Option<&TextNodeRef<'a>> {
         match &self.content {
-            NodeContent::Text(t) => Some(t),
+            NodeContent::Renderable(_r) => {
+                // Try to downcast to TextRenderableRef using the Debug trait hack
+                // since RenderableRef doesn't have as_any
+                // This is a limitation - we can't directly downcast RenderableRef
+                // For now, return None. Consider adding as_any to RenderableRef if needed.
+                None
+            }
             _ => None,
         }
     }
@@ -1013,14 +1036,20 @@ impl<'a, Msg> Node<'a, Msg> {
 impl<'a, Msg> From<Node<'a, Msg>> for RetainedNode<Msg> {
     fn from(value: Node<'a, Msg>) -> Self {
         let content = match value.content {
-            NodeContent::Text(t) => RetainedNodeContent::Text(t.into()),
             NodeContent::Element(e) => RetainedNodeContent::Element(RetainedElementNode {
                 kind: e.kind,
                 attrs: e.attrs,
                 children: e.children.into_iter().map(Into::into).collect(),
                 title: e.title,
             }),
-            NodeContent::Renderable(r) => RetainedNodeContent::Renderable(r.into_retained()),
+            NodeContent::Renderable(r) => {
+                let mut retained = r.into_retained();
+                // Apply any style override that was set via with_style()
+                if let Some(style) = value.renderable_style {
+                    let _ = retained.apply_style(&style);
+                }
+                RetainedNodeContent::Renderable(retained)
+            }
         };
 
         let mut node = RetainedNode::new(content);
@@ -1039,25 +1068,11 @@ impl<'a, Msg> From<Node<'a, Msg>> for RetainedNode<Msg> {
 impl<'a, Msg> From<&'a RetainedNode<Msg>> for Node<'a, Msg> {
     fn from(value: &'a RetainedNode<Msg>) -> Self {
         let content = match &value.content {
-            RetainedNodeContent::Text(t) => NodeContent::Text(t.into()),
             RetainedNodeContent::Element(e) => NodeContent::Element(e.into()),
             RetainedNodeContent::Renderable(_r) => {
-                // We can't actually clone a Box<dyn Renderable>, but since Renderable
-                // is 'static, we can use the as_any method to check if we can downcast
-                // For now, we'll create a new Renderable by cloning the inner value if possible
-                // In practice, this case is rare since Renderable nodes are typically
-                // created fresh in view functions
-                //
-                // As a workaround, we'll need to reconstruct the Renderable.
-                // This is a known limitation - if you need to patch Renderable nodes,
-                // the view should recreate them.
-                //
-                // For now, we use a workaround: the Renderable is moved into the new node
-                // and the old node is consumed. This works because the caller passes
-                // ownership of the old node.
-                //
-                // Since we can't actually clone, we'll reconstruct via a different path
-                // This is handled at the call site by not using From for Renderables
+                // We can't clone a Renderable. If you need to create a Node from
+                // a RetainedNode containing a Renderable, you must recreate the
+                // Renderable in the view function.
                 panic!(
                     "Cannot create Node from &RetainedNode containing Renderable - Renderable nodes must be created fresh in view functions"
                 );
@@ -1074,6 +1089,7 @@ impl<'a, Msg> From<&'a RetainedNode<Msg>> for Node<'a, Msg> {
             on_mouse: value.on_mouse.clone(),
             on_resize: value.on_resize.clone(),
             pending_scroll: value.pending_scroll.clone(),
+            renderable_style: None,
         }
     }
 }
@@ -1084,17 +1100,6 @@ impl<Msg> RetainedNode<Msg> {
     /// into a Node tree.
     pub fn into_node(self) -> Node<'static, Msg> {
         let content = match self.content {
-            RetainedNodeContent::Text(t) => NodeContent::Text(TextNodeRef {
-                base_style: t.base_style,
-                spans: t
-                    .spans
-                    .into_iter()
-                    .map(|s| TextSpanRef {
-                        content: Cow::Owned(s.content),
-                        style: s.style,
-                    })
-                    .collect(),
-            }),
             RetainedNodeContent::Element(e) => NodeContent::Element(ElementNode {
                 kind: e.kind,
                 attrs: e.attrs,
@@ -1114,6 +1119,7 @@ impl<Msg> RetainedNode<Msg> {
             on_mouse: self.on_mouse,
             on_resize: self.on_resize,
             pending_scroll: self.pending_scroll,
+            renderable_style: None,
         }
     }
 
@@ -1143,7 +1149,6 @@ impl<Msg> RetainedNode<Msg> {
                 ElementKind::Modal => "modal",
                 ElementKind::Table => "table",
             },
-            RetainedNodeContent::Text(_text_node) => "text",
             RetainedNodeContent::Renderable(leaf) => leaf.debug_label(),
         }
     }
@@ -1310,13 +1315,9 @@ impl<Msg> RetainedNode<Msg> {
             RetainedNodeContent::Element(element) => {
                 element.attrs.style = style;
             }
-            RetainedNodeContent::Text(text) => {
-                text.base_style = style;
-                for span in &mut text.spans {
-                    span.style = style.merged(&span.style)
-                }
+            RetainedNodeContent::Renderable(leaf) => {
+                leaf.apply_style(&style);
             }
-            RetainedNodeContent::Renderable(_leaf) => {}
         }
         self
     }
@@ -1351,10 +1352,10 @@ impl<Msg> RetainedNode<Msg> {
     }
 
     pub fn as_text(&self) -> Option<&TextNode> {
-        match &self.content {
-            RetainedNodeContent::Text(text) => Some(text),
-            _ => None,
-        }
+        // With the new Renderable-based text approach, we can't safely return
+        // a reference to TextNode because the data is inside the TextRenderable.
+        // Use into_text() instead if you need the text content.
+        None
     }
 
     pub fn as_renderable(&self) -> Option<&dyn Renderable> {
@@ -1373,7 +1374,14 @@ impl<Msg> RetainedNode<Msg> {
 
     pub fn into_text(self) -> Option<TextNode> {
         match self.content {
-            RetainedNodeContent::Text(text) => Some(text),
+            RetainedNodeContent::Renderable(leaf) => leaf
+                .as_ref()
+                .as_any()
+                .downcast_ref::<TextRenderable>()
+                .map(|t| TextNode {
+                    spans: t.spans.clone(),
+                    base_style: t.base_style,
+                }),
             _ => None,
         }
     }
@@ -1394,7 +1402,6 @@ impl<Msg> RetainedNode<Msg> {
                 RetainedNodeContent::Element(element_node) => {
                     &element_node.children[index as usize]
                 }
-                RetainedNodeContent::Text(_) => panic!("text has no children"),
                 RetainedNodeContent::Renderable(_) => panic!("renderable has no children"),
             }
         }
@@ -1409,7 +1416,6 @@ impl<Msg> RetainedNode<Msg> {
                 RetainedNodeContent::Element(element_node) => {
                     &mut element_node.children[index as usize]
                 }
-                RetainedNodeContent::Text(_) => panic!("text has no children"),
                 RetainedNodeContent::Renderable(_) => panic!("renderable has no children"),
             }
         }
@@ -1439,7 +1445,6 @@ impl<Msg> RetainedNode<Msg> {
                     child.report_changed(callback);
                 }
             }
-            RetainedNodeContent::Text(_) => {}
             RetainedNodeContent::Renderable(_) => {}
         }
     }
@@ -1669,6 +1674,217 @@ impl TextNode {
     }
 }
 
+/// Owned renderable for simple single-line text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextRenderable {
+    base_style: Style,
+    spans: Vec<TextSpan>,
+}
+
+impl TextRenderable {
+    pub fn new(content: impl Into<String>) -> Self {
+        Self::from_spans(vec![TextSpan::new(content, Style::default())])
+    }
+
+    pub fn from_spans(spans: Vec<TextSpan>) -> Self {
+        Self {
+            spans,
+            base_style: Style::default(),
+        }
+    }
+
+    fn content_width(&self) -> usize {
+        self.spans.iter().map(text_span_display_width).sum()
+    }
+}
+
+impl Renderable for TextRenderable {
+    fn apply_style(&mut self, style: &Style) -> bool {
+        self.base_style = *style;
+        for span in &mut self.spans {
+            span.style = span.style.merged(style);
+        }
+        true
+    }
+
+    fn patch_retained(&self, other: &mut dyn Renderable) -> RenderablePatch {
+        if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
+            if self.spans == other.spans && self.base_style == other.base_style {
+                RenderablePatch::NoChange
+            } else {
+                let layout_changed = self.spans != other.spans;
+                other.spans = self.spans.clone();
+                other.base_style = self.base_style;
+                if layout_changed {
+                    RenderablePatch::ChangedLayout
+                } else {
+                    RenderablePatch::ChangedNoLayout
+                }
+            }
+        } else {
+            RenderablePatch::Replace
+        }
+    }
+
+    fn measure(
+        &self,
+        _style: &TaffyStyle,
+        _known_dimensions: taffy::Size<Option<f32>>,
+        _available_space: taffy::Size<taffy::AvailableSpace>,
+    ) -> taffy::Size<f32> {
+        let width = self.content_width();
+        taffy::Size {
+            width: width as f32,
+            height: 1.0,
+        }
+    }
+
+    fn render(&self, ctx: &mut RenderContext<'_>) {
+        // Text renderables are 1 line high, so if we've scrolled past line 1, skip rendering
+        if ctx.scroll_y() >= 1.0 {
+            return;
+        }
+
+        let area = ctx.area();
+        if area.width == 0 || area.height == 0 {
+            return;
+        }
+
+        let mut skip_cols = ctx.scroll_x().max(0.0).round() as usize;
+        let mut remaining = area.width;
+        let mut cursor_x = area.x;
+
+        for span in &self.spans {
+            if remaining == 0 {
+                break;
+            }
+
+            let mut collected = String::new();
+            let mut taken = 0;
+
+            for ch in span.content.chars() {
+                if taken == remaining {
+                    break;
+                }
+                let current_col = cursor_x + taken;
+                let w = if ch == '\t' {
+                    let next_tab_stop = ((current_col / TAB_WIDTH) + 1) * TAB_WIDTH;
+                    (next_tab_stop - current_col).max(1)
+                } else {
+                    UnicodeWidthChar::width(ch).unwrap_or(0).max(1)
+                };
+
+                if skip_cols >= w {
+                    skip_cols -= w;
+                    continue;
+                } else if skip_cols > 0 {
+                    // partial skip into this char: treat as fully visible
+                    skip_cols = 0;
+                }
+                if taken + w > remaining {
+                    break;
+                }
+                if ch == '\t' {
+                    for _ in 0..w {
+                        collected.push(' ');
+                    }
+                } else {
+                    collected.push(ch);
+                }
+                taken += w;
+            }
+
+            if collected.is_empty() {
+                continue;
+            }
+
+            let attrs = ctx.style_to_attributes(&span.style);
+            ctx.write_text(cursor_x, area.y, &collected, &attrs);
+
+            cursor_x += taken;
+            remaining = remaining.saturating_sub(taken);
+        }
+
+        if remaining > 0 {
+            let attrs = ctx.style_to_attributes(&self.base_style);
+            let padding = " ".repeat(remaining);
+            ctx.write_text(cursor_x, area.y, &padding, &attrs);
+        }
+    }
+
+    fn debug_label(&self) -> &'static str {
+        "text"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+/// Borrowed renderable for simple single-line text.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextRenderableRef<'a> {
+    base_style: Style,
+    spans: Vec<TextSpanRef<'a>>,
+}
+
+impl<'a> TextRenderableRef<'a> {
+    pub fn new(content: impl Into<Cow<'a, str>>) -> Self {
+        Self::from_spans(vec![TextSpanRef::new(content, Style::default())])
+    }
+
+    pub fn from_spans(spans: Vec<TextSpanRef<'a>>) -> Self {
+        Self {
+            spans,
+            base_style: Style::default(),
+        }
+    }
+}
+
+impl<'a> RenderableRef for TextRenderableRef<'a> {
+    fn debug_label(&self) -> &'static str {
+        "text"
+    }
+
+    fn patch_retained(&self, retained: &mut dyn Renderable) -> RenderablePatch {
+        if let Some(t) = retained.as_any_mut().downcast_mut::<TextRenderable>() {
+            let spans_match = t.spans.len() == self.spans.len()
+                && t.spans
+                    .iter()
+                    .zip(self.spans.iter())
+                    .all(|(owned, borrowed)| {
+                        owned.content == borrowed.content.as_ref() && owned.style == borrowed.style
+                    });
+
+            if spans_match && t.base_style == self.base_style {
+                RenderablePatch::NoChange
+            } else {
+                let layout_changed = !spans_match;
+                t.spans = self.spans.iter().map(|s| s.clone().into()).collect();
+                t.base_style = self.base_style;
+                if layout_changed {
+                    RenderablePatch::ChangedLayout
+                } else {
+                    RenderablePatch::ChangedNoLayout
+                }
+            }
+        } else {
+            RenderablePatch::Replace
+        }
+    }
+
+    fn into_retained(self: Box<Self>) -> Box<dyn Renderable> {
+        Box::new(TextRenderable {
+            spans: self.spans.into_iter().map(|s| s.into()).collect(),
+            base_style: self.base_style,
+        })
+    }
+}
+
 impl<Msg> TraversePartialTree for RetainedNode<Msg> {
     type ChildIter<'a>
         = std::iter::Map<std::ops::Range<usize>, fn(usize) -> NodeId>
@@ -1679,7 +1895,6 @@ impl<Msg> TraversePartialTree for RetainedNode<Msg> {
         let node = self.node_from_id(parent_node_id);
         let count = match &node.content {
             RetainedNodeContent::Element(element_node) => element_node.children.len(),
-            RetainedNodeContent::Text(_) => 0,
             RetainedNodeContent::Renderable(_) => 0,
         };
         (0..count).map(Into::into)
@@ -1689,7 +1904,6 @@ impl<Msg> TraversePartialTree for RetainedNode<Msg> {
         let node = self.node_from_id(parent_node_id);
         match &node.content {
             RetainedNodeContent::Element(element_node) => element_node.children.len(),
-            RetainedNodeContent::Text(_) => 0,
             RetainedNodeContent::Renderable(_) => 0,
         }
     }
@@ -1760,18 +1974,6 @@ impl<Msg> LayoutPartialTree for RetainedNode<Msg> {
             let node = parent.node_from_id_mut(node_id);
 
             match &node.content {
-                RetainedNodeContent::Text(text) => compute_leaf_layout(
-                    inputs,
-                    &node.layout_state.style,
-                    |_val, _basis| 0.0,
-                    |_known_dimensions, _available_space| {
-                        let width: usize = text.spans().iter().map(text_span_display_width).sum();
-                        taffy::Size {
-                            width: width as f32,
-                            height: 1.,
-                        }
-                    },
-                ),
                 RetainedNodeContent::Renderable(leaf) => compute_leaf_layout(
                     inputs,
                     &node.layout_state.style,
@@ -1932,11 +2134,10 @@ mod tests {
             Some(element) => {
                 assert_eq!(element.kind, ElementKind::Column);
                 assert_eq!(element.children.len(), 1);
-                let text_child = element.children[0].as_text().expect("expected text child");
-                assert_eq!(
-                    text_child.spans(),
-                    &[TextSpan::new("child", Style::default())]
-                );
+                let text_child = element.children[0]
+                    .as_renderable()
+                    .expect("expected renderable child");
+                assert_eq!(text_child.debug_label(), "text");
                 assert_eq!(element.attrs, Attributes::default());
             }
             None => panic!("expected element node"),
@@ -1951,11 +2152,10 @@ mod tests {
             Some(element) => {
                 assert_eq!(element.kind, ElementKind::Row);
                 assert_eq!(element.children.len(), 1);
-                let text_child = element.children[0].as_text().expect("expected text child");
-                assert_eq!(
-                    text_child.spans(),
-                    &[TextSpan::new("row child", Style::default())]
-                );
+                let text_child = element.children[0]
+                    .as_renderable()
+                    .expect("expected renderable child");
+                assert_eq!(text_child.debug_label(), "text");
             }
             None => panic!("expected element node"),
         }
@@ -1968,11 +2168,10 @@ mod tests {
         let element = node.as_element().expect("expected element node");
         assert_eq!(element.kind, ElementKind::Modal);
         assert_eq!(element.children.len(), 1);
-        let text_child = element.children[0].as_text().expect("expected text child");
-        assert_eq!(
-            text_child.spans(),
-            &[TextSpan::new("modal child", Style::default())]
-        );
+        let text_child = element.children[0]
+            .as_renderable()
+            .expect("expected renderable child");
+        assert_eq!(text_child.debug_label(), "text");
         // Check that modal has a semi-transparent background instead of dim
         assert_eq!(element.attrs.style.bg, Some(Color::rgba(0, 0, 0, 8)));
 
@@ -2041,15 +2240,18 @@ mod tests {
 
     #[test]
     fn with_style_replaces_styles() {
+        // with_style no longer applies styles to text nodes since they are now Renderables.
+        // Styles should be applied when creating the text node using TextSpanRef with a Style.
         let style = Style::fg(Color::Blue);
-        let node = text::<()>("styled").with_style(style.clone());
+        let spans = vec![TextSpanRef::new("styled", style)];
+        let node = rich_text::<()>(spans);
 
-        match node.into_text() {
-            Some(text) => {
-                assert!(text.spans().iter().all(|span| span.style == style));
-            }
-            None => panic!("expected text node"),
-        }
+        let text = node.into_text().expect("expected text node");
+        assert!(
+            text.spans()
+                .iter()
+                .all(|span| span.style.fg == Some(Color::Blue))
+        );
     }
 
     #[test]

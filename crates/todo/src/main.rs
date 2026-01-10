@@ -204,14 +204,13 @@ fn render_item(item: &Item, highlighted: bool) -> Node<'_, Msg> {
     // In a real app with larger strings, you'd want to either store formatted strings
     // in the model or use a more efficient approach
     let text_content = format!("{} {}", marker, item.title);
-    let text_node = text_owned(text_content);
-    let styled_text = if highlighted {
-        text_node.with_style(Style::fg(Color::Cyan))
+    let style = if highlighted {
+        Style::fg(Color::Cyan)
     } else {
-        text_node
+        Style::default()
     };
 
-    row(vec![styled_text])
+    row(vec![text_owned(text_content).with_style(style)])
 }
 
 fn map_event(event: Event) -> Option<Msg> {
@@ -359,15 +358,12 @@ mod tests {
         let node: Node<Msg> = node_ref.into();
 
         let row = node.into_element().expect("expected row element");
-        match row.children.first() {
-            Some(child) => {
-                let text = child.as_text().expect("expected text child");
-                let spans = text.spans();
-                assert_eq!(spans.len(), 1);
-                assert_eq!(spans[0].style.fg, Some(Color::Cyan));
-            }
-            None => panic!("expected text child"),
-        }
+        let mut children = row.children.into_iter();
+        let child = children.next().expect("expected text child");
+        let text = child.into_text().expect("expected text node");
+        let spans = text.spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.fg, Some(Color::Cyan));
     }
 
     #[test]
@@ -381,15 +377,12 @@ mod tests {
         let node: Node<Msg> = node_ref.into();
 
         let row = node.into_element().expect("expected row element");
-        match row.children.first() {
-            Some(child) => {
-                let text = child.as_text().expect("expected text child");
-                let spans = text.spans();
-                assert_eq!(spans.len(), 1);
-                assert_eq!(spans[0].style.fg, None);
-            }
-            None => panic!("expected text child"),
-        }
+        let mut children = row.children.into_iter();
+        let child = children.next().expect("expected text child");
+        let text = child.into_text().expect("expected text node");
+        let spans = text.spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].style.fg, None);
     }
 
     #[test]

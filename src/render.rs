@@ -1,6 +1,6 @@
 use crate::buffer::{CellAttributes, CursorShape, DoubleBuffer};
 use crate::dom::{
-    Color, ElementKind, RetainedElementNode, RetainedNode, RetainedNodeContent, Style, TextNode,
+    Color, ElementKind, RetainedElementNode, RetainedNode, RetainedNodeContent, Style,
 };
 use crate::error::ProgramError;
 use crate::event::Size;
@@ -171,7 +171,6 @@ pub struct Renderer<'a> {
 const SCROLLBAR_TRACK_CHAR: char = ' ';
 const SCROLLBAR_THUMB_CHAR: char = '█';
 const SCROLLBAR_HORZ_THUMB_CHAR: char = '▀';
-const TAB_WIDTH: usize = 8;
 
 impl<'a> Renderer<'a> {
     pub fn new(buffer: &'a mut DoubleBuffer, palette: &'a Palette) -> Self {
@@ -244,21 +243,6 @@ impl<'a> Renderer<'a> {
         }
 
         match &node.content {
-            RetainedNodeContent::Text(text) => {
-                if child_scroll_y >= 1.0 {
-                    return;
-                }
-                // Apply horizontal windowing if x-overflow is scroll
-                let skip_cols = {
-                    let local = if is_scroll_x {
-                        node.scroll_x.max(0.0)
-                    } else {
-                        0.0
-                    };
-                    (local + child_scroll_x).round() as usize
-                };
-                self.render_text(text, node_origin, area, skip_cols)
-            }
             RetainedNodeContent::Element(element) => {
                 let border_style =
                     if matches!(element.kind, ElementKind::Block) && element.attrs.style.border {
@@ -308,79 +292,6 @@ impl<'a> Renderer<'a> {
                 };
                 leaf.render(&mut ctx);
             }
-        }
-    }
-
-    fn render_text(
-        &mut self,
-        text: &TextNode,
-        _parent_origin: Point,
-        clip: Rect,
-        mut skip_cols: usize,
-    ) {
-        let mut remaining = clip.width;
-        if remaining == 0 {
-            return;
-        }
-
-        let mut cursor_x = clip.x;
-
-        for span in text.spans() {
-            if remaining == 0 {
-                break;
-            }
-
-            let mut collected = String::new();
-            let mut taken = 0;
-
-            // Skip leading columns according to horizontal scroll, then take up to remaining
-            for ch in span.content.chars() {
-                if taken == remaining {
-                    break;
-                }
-                let current_col = cursor_x + taken;
-                let w = if ch == '\t' {
-                    let next_tab_stop = ((current_col / TAB_WIDTH) + 1) * TAB_WIDTH;
-                    (next_tab_stop - current_col).max(1)
-                } else {
-                    UnicodeWidthChar::width(ch).unwrap_or(0).max(1)
-                };
-
-                if skip_cols >= w {
-                    skip_cols -= w;
-                    continue;
-                } else if skip_cols > 0 {
-                    // partial skip into this char: treat as fully visible
-                    skip_cols = 0;
-                }
-                if taken + w > remaining {
-                    break;
-                }
-                if ch == '\t' {
-                    for _ in 0..w {
-                        collected.push(' ');
-                    }
-                } else {
-                    collected.push(ch);
-                }
-                taken += w;
-            }
-
-            if collected.is_empty() {
-                continue;
-            }
-
-            let attrs = style_to_attributes(self.palette, &span.style);
-            self.buffer.write_text(cursor_x, clip.y, &collected, &attrs);
-
-            cursor_x += taken;
-            remaining = remaining.saturating_sub(taken);
-        }
-
-        if remaining > 0 {
-            let attrs = style_to_attributes(self.palette, text.base_style());
-            let padding = " ".repeat(remaining);
-            self.buffer.write_text(cursor_x, clip.y, &padding, &attrs);
         }
     }
 
@@ -1668,7 +1579,8 @@ mod tests {
         let mut buffer = DoubleBuffer::new(10, 2);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
-        let node = text::<()>("color").with_style(Style::fg(Color::Blue));
+
+        let node = rich_text::<()>(vec![TextSpanRef::new("color", Style::fg(Color::Blue))]);
         let mut node: RetainedNode<()> = node.into();
         prepare_layout(&mut node, Size::new(10, 2));
 

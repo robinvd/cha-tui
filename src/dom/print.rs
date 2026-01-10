@@ -52,7 +52,6 @@ pub fn print_tree<Msg>(root: &RetainedNode<Msg>) {
                     print_node(child, has_sibling, new_string.clone());
                 }
             }
-            crate::dom::RetainedNodeContent::Text(_) => {}
             crate::dom::RetainedNodeContent::Renderable(_) => {}
         }
 

@@ -42,6 +42,7 @@ pub use crate::dom::{
     modal_retained,
     renderable,
     rich_text,
+    rich_text_owned,
     rich_text_retained,
     row,
     row_retained,

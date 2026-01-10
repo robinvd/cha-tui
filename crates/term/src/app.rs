@@ -18,6 +18,7 @@ use chatui::{
 };
 use smol::channel::Receiver;
 use tracing::warn;
+use tracing_subscriber::fmt::format::FmtSpan;
 
 use crate::filter;
 use crate::focus::Focus;
@@ -3006,7 +3007,12 @@ pub fn run() -> Result<(), miette::Report> {
         use tracing_subscriber::prelude::*;
         let log_file = File::create(&log_file_path).expect("failed to create log file");
         tracing_subscriber::registry()
-            .with(fmt::layer().with_writer(log_file).with_ansi(false))
+            .with(
+                fmt::layer()
+                    .with_writer(log_file)
+                    .with_ansi(false)
+                    .with_span_events(FmtSpan::CLOSE),
+            )
             .init();
     }
 
