@@ -818,11 +818,13 @@ fn map_key_event(key: termina::event::KeyEvent) -> Option<Event> {
     let code = map_key_code(key.code)?;
     let kind = map_key_event_kind(key.kind);
     let keypad = key.state.contains(termina::event::KeyEventState::KEYPAD);
+    let shift = key.modifiers.contains(termina::event::Modifiers::SHIFT)
+        || matches!(key.code, termina::event::KeyCode::BackTab);
     let event_key = Key::with_kitty_extras(
         code,
         key.modifiers.contains(termina::event::Modifiers::CONTROL),
         key.modifiers.contains(termina::event::Modifiers::ALT),
-        key.modifiers.contains(termina::event::Modifiers::SHIFT),
+        shift,
         key.modifiers.contains(termina::event::Modifiers::SUPER),
         key.modifiers.contains(termina::event::Modifiers::HYPER),
         key.modifiers.contains(termina::event::Modifiers::META),
@@ -856,7 +858,7 @@ fn map_key_code(code: termina::event::KeyCode) -> Option<KeyCode> {
         TnKeyCode::PageDown => Some(KeyCode::PageDown),
         TnKeyCode::Home => Some(KeyCode::Home),
         TnKeyCode::End => Some(KeyCode::End),
-        TnKeyCode::Tab => Some(KeyCode::Tab),
+        TnKeyCode::Tab | TnKeyCode::BackTab => Some(KeyCode::Tab),
         TnKeyCode::Function(n) => Some(KeyCode::Function(n)),
         TnKeyCode::Insert => Some(KeyCode::Insert),
         TnKeyCode::Delete => Some(KeyCode::Delete),
@@ -1233,5 +1235,24 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         assert!(program.model.completed);
+    }
+
+    #[test]
+    fn backtab_is_mapped_to_shift_tab() {
+        let key = termina::event::KeyEvent {
+            code: termina::event::KeyCode::BackTab,
+            modifiers: termina::event::Modifiers::empty(),
+            kind: termina::event::KeyEventKind::Press,
+            state: termina::event::KeyEventState::empty(),
+        };
+        let event = super::convert_input_event(termina::Event::Key(key));
+
+        match event {
+            Some(Event::Key(key)) => {
+                assert_eq!(key.code, KeyCode::Tab);
+                assert!(key.shift);
+            }
+            _ => panic!("Expected Key event, got {:?}", event),
+        }
     }
 }
