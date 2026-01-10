@@ -1,4 +1,4 @@
-use chatui::dom::{Node, Renderable, Style, renderable};
+use chatui::dom::{Node, Renderable, RenderablePatch, Style, renderable};
 use chatui::render::RenderContext;
 use taffy::Dimension;
 
@@ -31,6 +31,26 @@ impl Divider {
 }
 
 impl Renderable for Divider {
+    fn patch_retained(&self, other: &mut dyn Renderable) -> RenderablePatch {
+        if let Some(o) = other.as_any_mut().downcast_mut::<Self>() {
+            let layout_changed =
+                std::mem::discriminant(&o.orientation) != std::mem::discriminant(&self.orientation);
+            if o.style == self.style && !layout_changed {
+                RenderablePatch::NoChange
+            } else {
+                o.style = self.style;
+                o.orientation = self.orientation;
+                if layout_changed {
+                    RenderablePatch::ChangedLayout
+                } else {
+                    RenderablePatch::ChangedNoLayout
+                }
+            }
+        } else {
+            RenderablePatch::Replace
+        }
+    }
+
     fn measure(
         &self,
         _style: &taffy::Style,
@@ -84,6 +104,10 @@ impl Renderable for Divider {
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
 }

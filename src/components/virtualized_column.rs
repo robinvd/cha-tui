@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::dom::{Node, Renderable, renderable};
+use crate::dom::{Node, Renderable, RenderablePatch, renderable};
 use crate::geometry::Rect;
 use crate::render::RenderContext;
 
@@ -54,8 +54,8 @@ impl fmt::Debug for VirtualizedColumn {
 }
 
 impl Renderable for VirtualizedColumn {
-    fn eq(&self, _other: &dyn Renderable) -> bool {
-        false
+    fn patch_retained(&self, _other: &mut dyn Renderable) -> RenderablePatch {
+        RenderablePatch::Replace
     }
 
     fn measure(
@@ -150,6 +150,10 @@ impl Renderable for VirtualizedColumn {
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
 }

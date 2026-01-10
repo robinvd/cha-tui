@@ -63,7 +63,7 @@ pub use components::input::{
     HighlightLayerId, HighlightSpan, InputMode, InputMsg, InputState, InputStyle,
     default_keybindings as default_input_keybindings, input,
 };
-pub use components::paragraph::{Paragraph, paragraph, rich_paragraph};
+pub use components::paragraph::{Paragraph, paragraph, rich_paragraph, rich_paragraph_ref};
 pub use components::scroll::{
     ScrollAxis, ScrollMsg, ScrollState, ScrollTarget, scrollable_content,
 };

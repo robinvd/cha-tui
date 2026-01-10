@@ -33,8 +33,9 @@ const TAB_WIDTH: usize = 8;
 type ResizeHandler<Msg> = Rc<dyn Fn(&TaffyLayout) -> Option<Msg>>;
 
 pub trait Renderable: fmt::Debug + 'static {
-    fn eq(&self, _other: &dyn Renderable) -> bool {
-        false
+    fn patch_retained(&self, other: &mut dyn Renderable) -> RenderablePatch {
+        let _ = other;
+        RenderablePatch::Replace
     }
 
     fn measure(
@@ -52,11 +53,55 @@ pub trait Renderable: fmt::Debug + 'static {
 
     fn as_any(&self) -> &dyn Any;
 
-    /// Patch this renderable with a new value. Returns true if patched, false if replacement needed.
-    /// The `new` parameter is `&dyn Any` to maintain object safety.
-    fn patch(&mut self, new: &dyn Any) -> bool {
-        let _ = new;
-        false // default: replace
+    fn as_any_mut(&mut self) -> &mut dyn Any;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenderablePatch {
+    NoChange,
+    ChangedNoLayout,
+    ChangedLayout,
+    Replace,
+}
+
+pub trait RenderableRef: fmt::Debug {
+    fn debug_label(&self) -> &'static str {
+        "leaf"
+    }
+
+    fn patch_retained(&self, retained: &mut dyn Renderable) -> RenderablePatch {
+        let _ = retained;
+        RenderablePatch::Replace
+    }
+
+    fn into_retained(self: Box<Self>) -> Box<dyn Renderable>;
+}
+
+impl<T: Renderable> RenderableRef for T {
+    fn into_retained(self: Box<Self>) -> Box<dyn Renderable> {
+        self
+    }
+
+    fn debug_label(&self) -> &'static str {
+        Renderable::debug_label(self)
+    }
+
+    fn patch_retained(&self, retained: &mut dyn Renderable) -> RenderablePatch {
+        Renderable::patch_retained(self, retained)
+    }
+}
+
+impl RenderableRef for Box<dyn Renderable> {
+    fn into_retained(self: Box<Self>) -> Box<dyn Renderable> {
+        *self
+    }
+
+    fn debug_label(&self) -> &'static str {
+        (**self).debug_label()
+    }
+
+    fn patch_retained(&self, retained: &mut dyn Renderable) -> RenderablePatch {
+        (**self).patch_retained(retained)
     }
 }
 
@@ -151,7 +196,7 @@ impl<Msg> fmt::Debug for RetainedNodeContent<Msg> {
 pub enum NodeContent<'a, Msg> {
     Element(ElementNode<'a, Msg>),
     Text(TextNodeRef<'a>),
-    Renderable(RenderableNode),
+    Renderable(Box<dyn RenderableRef + 'a>),
 }
 
 impl<'a, Msg> fmt::Debug for NodeContent<'a, Msg> {
@@ -160,18 +205,6 @@ impl<'a, Msg> fmt::Debug for NodeContent<'a, Msg> {
             Self::Element(e) => f.debug_tuple("Element").field(e).finish(),
             Self::Text(t) => f.debug_tuple("Text").field(t).finish(),
             Self::Renderable(l) => f.debug_tuple("Renderable").field(l).finish(),
-        }
-    }
-}
-
-impl<'a, Msg> From<&'a RetainedNodeContent<Msg>> for NodeContent<'a, Msg> {
-    fn from(value: &'a RetainedNodeContent<Msg>) -> Self {
-        match value {
-            RetainedNodeContent::Element(e) => NodeContent::Element(ElementNode::from(e)),
-            RetainedNodeContent::Text(t) => NodeContent::Text(TextNodeRef::from(t)),
-            RetainedNodeContent::Renderable(_) => {
-                panic!("Cannot borrow Renderable - it requires 'static")
-            }
         }
     }
 }
@@ -589,7 +622,15 @@ pub fn rich_text<'a, Msg>(spans: Vec<TextSpanRef<'a>>) -> Node<'a, Msg> {
 }
 
 pub fn renderable<'a, Msg>(widget: impl Renderable + 'static) -> Node<'a, Msg> {
-    Node::new(NodeContent::Renderable(Box::new(widget)))
+    Node::new(NodeContent::Renderable(Box::new(
+        widget,
+    )))
+}
+
+pub fn renderable_ref<'a, Msg>(widget: impl RenderableRef + 'a) -> Node<'a, Msg> {
+    Node::new(NodeContent::Renderable(Box::new(
+        widget,
+    )))
 }
 
 pub fn column<'a, Msg>(children: Vec<Node<'a, Msg>>) -> Node<'a, Msg> {
@@ -713,7 +754,7 @@ impl<'a, Msg> Node<'a, Msg> {
                 ElementKind::Table => "table",
             },
             NodeContent::Text(_text_node) => "text",
-            NodeContent::Renderable(leaf) => leaf.debug_label(),
+            NodeContent::Renderable(view) => view.debug_label(),
         }
     }
 
@@ -929,20 +970,31 @@ impl<'a, Msg> Node<'a, Msg> {
         }
     }
 
+    /// Get a reference to the renderable content, if this is a renderable node.
+    pub fn as_renderable(&self) -> Option<&(dyn RenderableRef + 'a)> {
+        self.as_renderable_ref()
+    }
+
     /// Get a reference to the renderable content, if this is a renderable node
-    pub fn as_renderable(&self) -> Option<&dyn Renderable> {
+    pub fn as_renderable_ref(&self) -> Option<&(dyn RenderableRef + 'a)> {
         match &self.content {
             NodeContent::Renderable(r) => Some(r.as_ref()),
             _ => None,
         }
     }
 
-    /// Convert this Node into its renderable content
-    pub fn into_renderable(self) -> Option<RenderableNode> {
+    /// Convert this Node into its renderable content, converting to a retained renderable
+    pub fn into_renderable_retained(self) -> Option<RenderableNode> {
         match self.content {
-            NodeContent::Renderable(r) => Some(r),
+            NodeContent::Renderable(r) => Some(r.into_retained()),
             _ => None,
         }
+    }
+
+    /// Convert this Node into its renderable content.
+    /// Only works for owned renderables (those implementing `Renderable`).
+    pub fn into_renderable(self) -> Option<RenderableNode> {
+        self.into_renderable_retained()
     }
 
     /// Get mouse messages from handlers on this node
@@ -972,7 +1024,7 @@ impl<'a, Msg> From<Node<'a, Msg>> for RetainedNode<Msg> {
                 children: e.children.into_iter().map(Into::into).collect(),
                 title: e.title,
             }),
-            NodeContent::Renderable(r) => RetainedNodeContent::Renderable(r),
+            NodeContent::Renderable(r) => RetainedNodeContent::Renderable(r.into_retained()),
         };
 
         let mut node = RetainedNode::new(content);
@@ -1053,7 +1105,7 @@ impl<Msg> RetainedNode<Msg> {
                 children: e.children.into_iter().map(|c| c.into_node()).collect(),
                 title: e.title,
             }),
-            RetainedNodeContent::Renderable(r) => NodeContent::Renderable(r),
+            RetainedNodeContent::Renderable(r) => NodeContent::Renderable(Box::new(r)),
         };
 
         Node {
@@ -1806,16 +1858,19 @@ mod tests {
     }
 
     impl Renderable for DummyRenderable {
-        fn eq(&self, other: &dyn Renderable) -> bool {
-            other
-                .as_any()
-                .downcast_ref::<Self>()
-                .map(|other| {
-                    other.label == self.label
-                        && other.width == self.width
-                        && other.height == self.height
-                })
-                .unwrap_or(false)
+        fn patch_retained(&self, other: &mut dyn Renderable) -> RenderablePatch {
+            if let Some(other) = other.as_any_mut().downcast_ref::<Self>() {
+                if other.label == self.label
+                    && other.width == self.width
+                    && other.height == self.height
+                {
+                    RenderablePatch::NoChange
+                } else {
+                    RenderablePatch::Replace
+                }
+            } else {
+                RenderablePatch::Replace
+            }
         }
 
         fn measure(
@@ -1837,6 +1892,10 @@ mod tests {
         }
 
         fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn as_any_mut(&mut self) -> &mut dyn Any {
             self
         }
     }
@@ -1950,8 +2009,7 @@ mod tests {
         let node: Node<()> = renderable(DummyRenderable::new("dummy", 5.0, 2.0));
 
         assert_eq!(node.get_debug_label(), "dummy");
-        let leaf_ref = node.as_renderable().expect("expected leaf reference");
-        assert!(leaf_ref.eq(leaf_ref));
+        let _leaf_ref = node.as_renderable().expect("expected leaf reference");
 
         let leaf_rc = node.into_renderable().expect("expected leaf rc");
         let concrete = leaf_rc
@@ -1969,13 +2027,20 @@ mod tests {
         let b: Node<()> = renderable(DummyRenderable::new("widget", 3.0, 1.0));
         let c: Node<()> = renderable(DummyRenderable::new("widget", 4.0, 1.0));
 
-        let renderable_a = a.as_renderable().expect("expected renderable node");
+        let _renderable_a = a.as_renderable().expect("expected renderable node");
         let renderable_b = b.as_renderable().expect("expected renderable node");
         let renderable_c = c.as_renderable().expect("expected renderable node");
 
-        assert!(renderable_a.eq(renderable_b));
-        assert!(renderable_b.eq(renderable_a));
-        assert!(!renderable_a.eq(renderable_c));
+        let mut retained_a = a.into_renderable().unwrap();
+
+        assert_eq!(
+            renderable_b.patch_retained(&mut *retained_a),
+            RenderablePatch::NoChange
+        );
+        assert_eq!(
+            renderable_c.patch_retained(&mut *retained_a),
+            RenderablePatch::Replace
+        );
     }
 
     #[test]

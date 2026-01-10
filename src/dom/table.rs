@@ -25,7 +25,7 @@ type GridComponent = GridTemplateComponent<GridIdent>;
 /// use chatui::{TableColumn, TableColumnWidth, text};
 ///
 /// let column = TableColumn::new(TableColumnWidth::Auto)
-///     .with_header(text::<()>("Name"));
+///     .with_header(text::<()>("Name").into());
 /// ```
 #[derive(Debug)]
 pub struct TableColumn<Msg> {
@@ -60,7 +60,7 @@ impl<Msg> TableColumn<Msg> {
     /// use chatui::{TableColumn, TableColumnWidth, text};
     ///
     /// let column = TableColumn::new(TableColumnWidth::Auto)
-    ///     .with_header(text::<()>("Column Name"));
+    ///     .with_header(text::<()>("Column Name").into());
     /// ```
     pub fn with_header(mut self, header: Node<Msg>) -> Self {
         self.header = Some(header);
@@ -83,8 +83,8 @@ impl<Msg> TableColumn<Msg> {
 /// use chatui::{TableRow, text};
 ///
 /// let row = TableRow::new(vec![
-///     text::<()>("Cell 1"),
-///     text::<()>("Cell 2"),
+///     text::<()>("Cell 1").into(),
+///     text::<()>("Cell 2").into(),
 /// ]);
 /// ```
 #[derive(Debug)]
@@ -102,8 +102,8 @@ impl<Msg> TableRow<Msg> {
     /// use chatui::{TableRow, text};
     ///
     /// let row = TableRow::new(vec![
-    ///     text::<()>("Alice"),
-    ///     text::<()>("Engineer"),
+    ///     text::<()>("Alice").into(),
+    ///     text::<()>("Engineer").into(),
     /// ]);
     /// ```
     pub fn new(cells: Vec<Node<Msg>>) -> Self {
@@ -183,19 +183,19 @@ impl TableColumnWidth {
 ///
 /// let columns = vec![
 ///     TableColumn::new(TableColumnWidth::Auto)
-///         .with_header(text::<()>("Name")),
+///         .with_header(text::<()>("Name").into()),
 ///     TableColumn::new(TableColumnWidth::Flexible(1.0))
-///         .with_header(text::<()>("Role")),
+///         .with_header(text::<()>("Role").into()),
 /// ];
 ///
 /// let rows = vec![
 ///     TableRow::new(vec![
-///         text::<()>("Alice"),
-///         text::<()>("Engineer"),
+///         text::<()>("Alice").into(),
+///         text::<()>("Engineer").into(),
 ///     ]),
 ///     TableRow::new(vec![
-///         text::<()>("Bob"),
-///         text::<()>("Designer"),
+///         text::<()>("Bob").into(),
+///         text::<()>("Designer").into(),
 ///     ]),
 /// ];
 ///

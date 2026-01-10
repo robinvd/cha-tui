@@ -46,7 +46,7 @@ use alacritty_terminal::vte::ansi::{self, CursorShape as AlacCursorShape, Handle
 use smol::channel::{self, Receiver, Sender};
 
 use crate::buffer::{CellAttributes, CursorShape};
-use crate::dom::{Node, Renderable, renderable};
+use crate::dom::{Node, Renderable, RenderablePatch, renderable};
 use crate::event::{
     Key, KeyCode, KeyEventKind, LocalMouseEvent, MediaKeyCode, ModifierKeyCode, MouseButton,
     MouseEventKind, MouseScrollAxis, MouseScrollDirection,
@@ -1567,6 +1567,7 @@ pub fn default_terminal_keybindings<Msg>(
 }
 
 /// Renderable widget for the terminal.
+#[derive(Clone)]
 struct TerminalRenderable {
     term: Arc<FairMutex<Term<TerminalEventListener>>>,
     cols: u16,
@@ -1625,15 +1626,27 @@ impl TerminalRenderable {
 }
 
 impl Renderable for TerminalRenderable {
-    fn eq(&self, other: &dyn Renderable) -> bool {
-        let Some(o) = other.as_any().downcast_ref::<Self>() else {
-            return false;
-        };
-        Arc::ptr_eq(&self.term, &o.term)
-            && self.cols == o.cols
-            && self.rows == o.rows
-            && self.version == o.version
-            && self.focused == o.focused
+    fn patch_retained(&self, other: &mut dyn Renderable) -> RenderablePatch {
+        if let Some(o) = other.as_any_mut().downcast_mut::<Self>() {
+            if Arc::ptr_eq(&self.term, &o.term)
+                && self.cols == o.cols
+                && self.rows == o.rows
+                && self.version == o.version
+                && self.focused == o.focused
+            {
+                RenderablePatch::NoChange
+            } else {
+                let layout_changed = self.cols != o.cols || self.rows != o.rows;
+                *o = self.clone();
+                if layout_changed {
+                    RenderablePatch::ChangedLayout
+                } else {
+                    RenderablePatch::ChangedNoLayout
+                }
+            }
+        } else {
+            RenderablePatch::Replace
+        }
     }
 
     fn measure(
@@ -1821,6 +1834,10 @@ impl Renderable for TerminalRenderable {
     }
 
     fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn Any {
         self
     }
 }
@@ -2115,8 +2132,10 @@ mod tests {
         let renderable2 = TerminalRenderable::new(&state, true);
 
         // The renderables should not be equal due to version difference
-        assert!(
-            !renderable1.eq(&renderable2),
+        let mut retained1 = Box::new(renderable1) as Box<dyn Renderable>;
+        assert_ne!(
+            renderable2.patch_retained(&mut *retained1),
+            RenderablePatch::NoChange,
             "renderables with different versions should not be equal"
         );
     }
@@ -2161,16 +2180,21 @@ mod tests {
         let unfocused_renderable = TerminalRenderable::new(&state, false);
 
         // They should not be equal due to different focus state
+        let mut retained = Box::new(focused_renderable.clone()) as Box<dyn Renderable>;
+        let result = unfocused_renderable.patch_retained(&mut *retained);
+        assert_ne!(result, RenderablePatch::Replace, "should patch in place");
         assert!(
-            !focused_renderable.eq(&unfocused_renderable),
-            "renderables with different focus should not be equal"
+            format!("{:?}", retained).contains("focused: false"),
+            "should update focus to false"
         );
 
         // Two focused renderables should be equal (same state and focus)
         let another_focused_renderable = TerminalRenderable::new(&state, true);
+        let result = another_focused_renderable.patch_retained(&mut *retained);
+        assert_ne!(result, RenderablePatch::Replace, "should patch in place");
         assert!(
-            focused_renderable.eq(&another_focused_renderable),
-            "renderables with same focus should be equal"
+            format!("{:?}", retained).contains("focused: true"),
+            "should update focus back to true"
         );
     }
 

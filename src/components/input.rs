@@ -6,7 +6,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::Style;
 use crate::buffer::{CellAttributes, CursorShape};
-use crate::dom::{Color, Node, Renderable, renderable};
+use crate::dom::{Color, Node, Renderable, RenderablePatch, renderable};
 use crate::event::{Key, KeyCode, LocalMouseEvent, MouseButton, MouseEventKind};
 use crate::render::RenderContext;
 use taffy::AvailableSpace;
@@ -3852,32 +3852,41 @@ impl InputRenderable {
 }
 
 impl Renderable for InputRenderable {
-    fn eq(&self, other: &dyn Renderable) -> bool {
-        let Some(o) = other.as_any().downcast_ref::<Self>() else {
-            return false;
-        };
+    fn patch_retained(&self, other: &mut dyn Renderable) -> RenderablePatch {
+        if let Some(o) = other.as_any_mut().downcast_mut::<Self>() {
+            let layout_changed = o.max_width != self.max_width
+                || o.content_line_count != self.content_line_count
+                || o.visual_row_count != self.visual_row_count;
 
-        if o.rope != self.rope
-            || o.primary_cursor != self.primary_cursor
-            || o.selection != self.selection
-            || o.base_style != self.base_style
-            || o.selection_style != self.selection_style
-            || o.cursor_style != self.cursor_style
-            || o.max_width != self.max_width
-            || o.content_line_count != self.content_line_count
-            || o.visual_row_count != self.visual_row_count
-            || o.cursor_line != self.cursor_line
-            || o.cursor_visual_line != self.cursor_visual_line
-            || o.len_chars != self.len_chars
-            || o.gutter_metrics != self.gutter_metrics
-            || o.gutter_style != self.gutter_style
-            || o.hint_layout != self.hint_layout
-            || o.highlight_runs != self.highlight_runs
-        {
-            return false;
+            let changed = layout_changed
+                || o.rope != self.rope
+                || o.primary_cursor != self.primary_cursor
+                || o.selection != self.selection
+                || o.base_style != self.base_style
+                || o.selection_style != self.selection_style
+                || o.cursor_style != self.cursor_style
+                || o.cursor_line != self.cursor_line
+                || o.cursor_visual_line != self.cursor_visual_line
+                || o.len_chars != self.len_chars
+                || o.gutter_metrics != self.gutter_metrics
+                || o.gutter_style != self.gutter_style
+                || o.hint_layout != self.hint_layout
+                || o.highlight_runs != self.highlight_runs;
+
+            if !changed {
+                return RenderablePatch::NoChange;
+            }
+
+            *o = self.clone();
+
+            if layout_changed {
+                RenderablePatch::ChangedLayout
+            } else {
+                RenderablePatch::ChangedNoLayout
+            }
+        } else {
+            RenderablePatch::Replace
         }
-
-        true
     }
 
     fn measure(
@@ -3983,6 +3992,10 @@ impl Renderable for InputRenderable {
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
 }

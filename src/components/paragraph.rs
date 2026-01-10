@@ -1,4 +1,7 @@
-use crate::dom::{Node, Renderable, RetainedNode, Style, TextSpan, renderable};
+use crate::dom::{
+    Node, Renderable, RenderablePatch, RenderableRef, RetainedNode, Style, TextSpan, renderable,
+    renderable_ref,
+};
 use crate::render::RenderContext;
 use taffy::style::AvailableSpace;
 use unicode_width::UnicodeWidthChar;
@@ -9,6 +12,12 @@ const TAB_WIDTH: usize = 8;
 pub struct Paragraph {
     spans: Vec<TextSpan>,
     base_style: Style,
+}
+
+#[derive(Debug)]
+pub struct ParagraphRef<'a> {
+    pub spans: &'a [TextSpan],
+    pub base_style: Style,
 }
 
 #[derive(Default)]
@@ -48,6 +57,14 @@ impl Paragraph {
     /// This is useful for view functions that need to return Node instead of RetainedNode.
     pub fn to_node<'a, Msg: 'static>(self) -> Node<'a, Msg> {
         crate::dom::renderable(self)
+    }
+
+    /// Creates a borrowed Node that references the spans in this Paragraph.
+    pub fn to_node_ref<'a, Msg: 'static>(&'a self) -> Node<'a, Msg> {
+        renderable_ref(ParagraphRef {
+            spans: &self.spans,
+            base_style: self.base_style,
+        })
     }
 
     fn char_width_at_column(ch: char, column: usize) -> usize {
@@ -248,11 +265,23 @@ impl Paragraph {
 }
 
 impl Renderable for Paragraph {
-    fn eq(&self, other: &dyn Renderable) -> bool {
-        let Some(other) = other.as_any().downcast_ref::<Self>() else {
-            return false;
-        };
-        self.spans == other.spans && self.base_style == other.base_style
+    fn patch_retained(&self, other: &mut dyn Renderable) -> RenderablePatch {
+        if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
+            if self.spans == other.spans && self.base_style == other.base_style {
+                RenderablePatch::NoChange
+            } else {
+                let layout_changed = self.spans != other.spans;
+                other.spans = self.spans.clone();
+                other.base_style = self.base_style;
+                if layout_changed {
+                    RenderablePatch::ChangedLayout
+                } else {
+                    RenderablePatch::ChangedNoLayout
+                }
+            }
+        } else {
+            RenderablePatch::Replace
+        }
     }
 
     fn measure(
@@ -310,6 +339,42 @@ impl Renderable for Paragraph {
     fn as_any(&self) -> &dyn std::any::Any {
         self
     }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl<'a> RenderableRef for ParagraphRef<'a> {
+    fn debug_label(&self) -> &'static str {
+        "paragraph"
+    }
+
+    fn patch_retained(&self, retained: &mut dyn Renderable) -> RenderablePatch {
+        if let Some(p) = retained.as_any_mut().downcast_mut::<Paragraph>() {
+            if p.spans == self.spans && p.base_style == self.base_style {
+                RenderablePatch::NoChange
+            } else {
+                let layout_changed = p.spans != self.spans;
+                p.spans = self.spans.to_vec();
+                p.base_style = self.base_style;
+                if layout_changed {
+                    RenderablePatch::ChangedLayout
+                } else {
+                    RenderablePatch::ChangedNoLayout
+                }
+            }
+        } else {
+            RenderablePatch::Replace
+        }
+    }
+
+    fn into_retained(self: Box<Self>) -> Box<dyn Renderable> {
+        Box::new(Paragraph {
+            spans: self.spans.to_vec(),
+            base_style: self.base_style,
+        })
+    }
 }
 
 pub fn paragraph<Msg: 'static>(content: impl Into<String>) -> Node<'static, Msg> {
@@ -318,6 +383,13 @@ pub fn paragraph<Msg: 'static>(content: impl Into<String>) -> Node<'static, Msg>
 
 pub fn rich_paragraph<Msg: 'static>(spans: impl Into<Vec<TextSpan>>) -> Node<'static, Msg> {
     Paragraph::from_spans(spans.into()).to_node()
+}
+
+pub fn rich_paragraph_ref<'a, Msg: 'static>(spans: &'a [TextSpan]) -> Node<'a, Msg> {
+    renderable_ref(ParagraphRef {
+        spans,
+        base_style: Style::default(),
+    })
 }
 
 #[cfg(test)]

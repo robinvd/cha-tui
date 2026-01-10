@@ -1,7 +1,7 @@
 use chatui::Style;
-use chatui::dom::Renderable;
 #[cfg(test)]
 use chatui::dom::RetainedNode;
+use chatui::dom::{Renderable, RenderablePatch};
 use chatui::render::RenderContext;
 use taffy::{self, AvailableSpace};
 use tracing::info;
@@ -46,12 +46,18 @@ impl DiffLeaf {
 }
 
 impl Renderable for DiffLeaf {
-    fn eq(&self, other: &dyn Renderable) -> bool {
-        other
-            .as_any()
-            .downcast_ref::<Self>()
-            .map(|o| o.lines == self.lines && o.gutter == self.gutter)
-            .unwrap_or(false)
+    fn patch_retained(&self, other: &mut dyn Renderable) -> RenderablePatch {
+        if let Some(o) = other.as_any_mut().downcast_mut::<Self>() {
+            if o.lines == self.lines && o.gutter == self.gutter {
+                RenderablePatch::NoChange
+            } else {
+                o.lines = self.lines.clone();
+                o.gutter = self.gutter.clone();
+                RenderablePatch::ChangedLayout
+            }
+        } else {
+            RenderablePatch::Replace
+        }
     }
 
     fn measure(
@@ -206,6 +212,10 @@ impl Renderable for DiffLeaf {
     }
 
     fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
     }
 }

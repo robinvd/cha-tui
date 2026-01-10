@@ -1,6 +1,6 @@
 use crate::dom::{
-    ElementNode, Node, NodeContent, RetainedElementNode, RetainedNode, RetainedNodeContent,
-    TextNode, TextNodeRef,
+    ElementNode, Node, NodeContent, RenderablePatch, RetainedElementNode,
+    RetainedNode, RetainedNodeContent, TextNode, TextNodeRef,
 };
 
 pub type NodeRef<'a, Msg> = Node<'a, Msg>;
@@ -74,12 +74,17 @@ pub fn patch<Msg>(
         (
             RetainedNodeContent::Renderable(existing_leaf),
             RetainedNodeContent::Renderable(new_leaf),
-        ) => {
-            if !existing_leaf.eq(&*new_leaf) {
+        ) => match new_leaf.patch_retained(&mut **existing_leaf) {
+            RenderablePatch::NoChange => {}
+            RenderablePatch::ChangedNoLayout => {}
+            RenderablePatch::ChangedLayout => {
+                layout_changed = true;
+            }
+            RenderablePatch::Replace => {
                 *existing_leaf = new_leaf;
                 layout_changed = true;
             }
-        }
+        },
         _ => unreachable!("content mismatch should have been excluded by can_patch"),
     }
 
@@ -133,12 +138,17 @@ pub fn patch_borrowed<'a, Msg>(
             let element_changed = patch_element_ref(existing_element, new_element);
             layout_changed |= element_changed;
         }
-        (RetainedNodeContent::Renderable(existing_leaf), NodeContent::Renderable(new_leaf)) => {
-            // For Renderable, we can only patch if they're equal
-            // Otherwise we need to replace
-            if !existing_leaf.eq(&*new_leaf) {
-                *existing_leaf = new_leaf;
-                layout_changed = true;
+        (RetainedNodeContent::Renderable(existing_leaf), NodeContent::Renderable(new_leaf_ref)) => {
+            match new_leaf_ref.patch_retained(&mut **existing_leaf) {
+                RenderablePatch::NoChange => {}
+                RenderablePatch::ChangedNoLayout => {}
+                RenderablePatch::ChangedLayout => {
+                    layout_changed = true;
+                }
+                RenderablePatch::Replace => {
+                    *existing_leaf = new_leaf_ref.into_retained();
+                    layout_changed = true;
+                }
             }
         }
         _ => unreachable!("content mismatch should have been excluded by can_patch_borrowed"),

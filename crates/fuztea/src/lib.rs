@@ -1579,7 +1579,7 @@ mod tests {
         column_config: &ColumnConfig,
         view_width: usize,
     ) -> Node<'static, ()> {
-        use chatui::dom::{Renderable, renderable};
+        use chatui::dom::{Renderable, RenderablePatch, renderable};
         use chatui::render::RenderContext;
         use std::any::Any;
 
@@ -1592,6 +1592,11 @@ mod tests {
         }
 
         impl Renderable for ItemRenderer {
+            fn patch_retained(&self, other: &mut dyn Renderable) -> RenderablePatch {
+                let _ = other;
+                RenderablePatch::Replace
+            }
+
             fn render(&self, ctx: &mut RenderContext<'_>) {
                 render_list_item_internal(
                     ctx,
@@ -1616,6 +1621,10 @@ mod tests {
             }
 
             fn as_any(&self) -> &dyn Any {
+                self
+            }
+
+            fn as_any_mut(&mut self) -> &mut dyn Any {
                 self
             }
         }
