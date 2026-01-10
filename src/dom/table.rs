@@ -1,8 +1,14 @@
-use super::{ElementKind, ElementNode, Node, NodeContent, text};
+use super::{
+    ElementKind, RetainedElementNode as ElementNode, RetainedNode,
+    RetainedNodeContent as NodeContent, text_retained as text,
+};
 use taffy::style::{
     AlignContent, CoreStyle, Dimension, GridTemplateComponent, Style as TaffyStyle,
     TrackSizingFunction,
 };
+
+// Type alias for convenience - in this file we're working with owned (retained) nodes
+type Node<Msg> = RetainedNode<Msg>;
 use taffy::style_helpers::{flex, length, line, percent, span};
 
 type GridIdent = <TaffyStyle as CoreStyle>::CustomIdent;
@@ -276,15 +282,22 @@ mod tests {
     #[test]
     fn builds_basic_table() {
         let columns = vec![
-            TableColumn::new(TableColumnWidth::Auto).with_header(dom::text::<()>("Name")),
-            TableColumn::new(TableColumnWidth::Flexible(1.0)).with_header(dom::text::<()>("Role")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(dom::text::<()>("Name").into()),
+            TableColumn::new(TableColumnWidth::Flexible(1.0))
+                .with_header(dom::text::<()>("Role").into()),
         ];
         let rows = vec![
-            TableRow::new(vec![dom::text::<()>("Alice"), dom::text::<()>("Engineer")]),
-            TableRow::new(vec![dom::text::<()>("Bob"), dom::text::<()>("Designer")]),
+            TableRow::new(vec![
+                dom::text::<()>("Alice").into(),
+                dom::text::<()>("Engineer").into(),
+            ]),
+            TableRow::new(vec![
+                dom::text::<()>("Bob").into(),
+                dom::text::<()>("Designer").into(),
+            ]),
         ];
 
-        let table_node = table(columns, rows);
+        let table_node: RetainedNode<()> = table(columns, rows).into();
 
         let element = table_node.as_element().expect("element");
         assert_eq!(element.kind, ElementKind::Table);
@@ -308,7 +321,7 @@ mod tests {
             TableColumn::new(TableColumnWidth::Auto),
             TableColumn::new(TableColumnWidth::Auto),
         ];
-        let rows = vec![TableRow::new(vec![dom::text::<()>("Only one cell")])];
+        let rows = vec![TableRow::new(vec![dom::text::<()>("Only one cell").into()])];
 
         let _ = table(columns, rows);
     }
@@ -320,8 +333,8 @@ mod tests {
             TableColumn::new(TableColumnWidth::Flexible(1.0)),
         ];
         let rows = vec![TableRow::new(vec![
-            dom::text::<()>("Left"),
-            dom::text::<()>("Right"),
+            dom::text::<()>("Left").into(),
+            dom::text::<()>("Right").into(),
         ])];
 
         let table_node = table(columns, rows);
@@ -336,18 +349,19 @@ mod tests {
     #[test]
     fn mixed_column_widths() {
         let columns = vec![
-            TableColumn::new(TableColumnWidth::Fixed(10.0)).with_header(dom::text::<()>("ID")),
-            TableColumn::new(TableColumnWidth::Auto).with_header(dom::text::<()>("Name")),
+            TableColumn::new(TableColumnWidth::Fixed(10.0))
+                .with_header(dom::text::<()>("ID").into()),
+            TableColumn::new(TableColumnWidth::Auto).with_header(dom::text::<()>("Name").into()),
             TableColumn::new(TableColumnWidth::Flexible(2.0))
-                .with_header(dom::text::<()>("Description")),
+                .with_header(dom::text::<()>("Description").into()),
             TableColumn::new(TableColumnWidth::Percent(15.0))
-                .with_header(dom::text::<()>("Status")),
+                .with_header(dom::text::<()>("Status").into()),
         ];
         let rows = vec![TableRow::new(vec![
-            dom::text::<()>("1"),
-            dom::text::<()>("Item"),
-            dom::text::<()>("A long description"),
-            dom::text::<()>("OK"),
+            dom::text::<()>("1").into(),
+            dom::text::<()>("Item").into(),
+            dom::text::<()>("A long description").into(),
+            dom::text::<()>("OK").into(),
         ])];
 
         let table_node = table(columns, rows);
@@ -370,8 +384,10 @@ mod tests {
     #[test]
     fn empty_table_with_only_headers() {
         let columns = vec![
-            TableColumn::new(TableColumnWidth::Auto).with_header(dom::text::<()>("Column 1")),
-            TableColumn::new(TableColumnWidth::Auto).with_header(dom::text::<()>("Column 2")),
+            TableColumn::new(TableColumnWidth::Auto)
+                .with_header(dom::text::<()>("Column 1").into()),
+            TableColumn::new(TableColumnWidth::Auto)
+                .with_header(dom::text::<()>("Column 2").into()),
         ];
         let rows = vec![];
 
@@ -396,9 +412,10 @@ mod tests {
 
     #[test]
     fn single_cell_table() {
-        let columns =
-            vec![TableColumn::new(TableColumnWidth::Auto).with_header(dom::text::<()>("Header"))];
-        let rows = vec![TableRow::new(vec![dom::text::<()>("Cell")])];
+        let columns = vec![
+            TableColumn::new(TableColumnWidth::Auto).with_header(dom::text::<()>("Header").into()),
+        ];
+        let rows = vec![TableRow::new(vec![dom::text::<()>("Cell").into()])];
 
         let table_node = table(columns, rows);
         let element = table_node.as_element().expect("element");
@@ -420,9 +437,18 @@ mod tests {
             TableColumn::new(TableColumnWidth::Auto),
         ];
         let rows = vec![
-            TableRow::new(vec![dom::text::<()>("R1C1"), dom::text::<()>("R1C2")]),
-            TableRow::new(vec![dom::text::<()>("R2C1"), dom::text::<()>("R2C2")]),
-            TableRow::new(vec![dom::text::<()>("R3C1"), dom::text::<()>("R3C2")]),
+            TableRow::new(vec![
+                dom::text::<()>("R1C1").into(),
+                dom::text::<()>("R1C2").into(),
+            ]),
+            TableRow::new(vec![
+                dom::text::<()>("R2C1").into(),
+                dom::text::<()>("R2C2").into(),
+            ]),
+            TableRow::new(vec![
+                dom::text::<()>("R3C1").into(),
+                dom::text::<()>("R3C2").into(),
+            ]),
         ];
 
         let table_node = table(columns, rows);

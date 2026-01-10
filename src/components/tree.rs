@@ -2,9 +2,9 @@ use std::collections::HashSet;
 use std::hash::Hash;
 use std::rc::Rc;
 
-use crate::dom::{Node, TextSpan};
+use crate::dom::{RetainedNode, TextSpan};
 use crate::event::LocalMouseEvent;
-use crate::{Style, column, rich_text, row};
+use crate::{Style, column_retained, rich_text_retained, row_retained};
 
 /// The type of node represented in the tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -363,7 +363,7 @@ pub fn tree_view<Msg, Id>(
     style: &TreeStyle,
     map_msg: impl Fn(TreeMsg<Id>) -> Msg + 'static,
     is_active: bool,
-) -> Node<Msg>
+) -> RetainedNode<Msg>
 where
     Id: Clone + Eq + Hash + 'static,
     Msg: 'static,
@@ -424,11 +424,11 @@ where
             merged
         };
 
-        let row_text = rich_text::<Msg>(spans)
+        let row_text = rich_text_retained::<Msg>(spans)
             .with_style(row_style)
             .with_width(taffy::Dimension::percent(1.));
 
-        let mut node = row(vec![row_text])
+        let mut node = row_retained(vec![row_text])
             .with_id(id_prefix)
             .with_id_mixin(id_prefix, index as u64);
 
@@ -452,7 +452,7 @@ where
         rows.push(node);
     }
 
-    column(rows)
+    column_retained(rows)
 }
 
 #[cfg(test)]

@@ -1,5 +1,7 @@
 use crate::buffer::{CellAttributes, CursorShape, DoubleBuffer};
-use crate::dom::{Color, ElementKind, ElementNode, Node, NodeContent, Style, TextNode};
+use crate::dom::{
+    Color, ElementKind, RetainedElementNode, RetainedNode, RetainedNodeContent, Style, TextNode,
+};
 use crate::error::ProgramError;
 use crate::event::Size;
 use crate::geometry::{Point, Rect};
@@ -176,7 +178,11 @@ impl<'a> Renderer<'a> {
         Self { buffer, palette }
     }
 
-    pub fn render<Msg>(&mut self, root: &Node<Msg>, size: Size) -> Result<(), ProgramError> {
+    pub fn render<Msg>(
+        &mut self,
+        root: &RetainedNode<Msg>,
+        size: Size,
+    ) -> Result<(), ProgramError> {
         let width = size.width as usize;
         let height = size.height as usize;
 
@@ -203,7 +209,7 @@ impl<'a> Renderer<'a> {
 
     fn render_node<Msg>(
         &mut self,
-        node: &Node<Msg>,
+        node: &RetainedNode<Msg>,
         parent_origin: Point,
         clip: Rect,
         scroll: ScrollState,
@@ -238,7 +244,7 @@ impl<'a> Renderer<'a> {
         }
 
         match &node.content {
-            NodeContent::Text(text) => {
+            RetainedNodeContent::Text(text) => {
                 if child_scroll_y >= 1.0 {
                     return;
                 }
@@ -253,7 +259,7 @@ impl<'a> Renderer<'a> {
                 };
                 self.render_text(text, node_origin, area, skip_cols)
             }
-            NodeContent::Element(element) => {
+            RetainedNodeContent::Element(element) => {
                 let border_style =
                     if matches!(element.kind, ElementKind::Block) && element.attrs.style.border {
                         Some(&element.attrs.style)
@@ -284,7 +290,7 @@ impl<'a> Renderer<'a> {
                     self.render_hscrollbar(node_origin, area, &layout, node.scroll_x, border_style);
                 }
             }
-            NodeContent::Renderable(leaf) => {
+            RetainedNodeContent::Renderable(leaf) => {
                 let leaf_scroll_y = child_scroll_y + node.scroll_y;
                 let mut ctx = RenderContext::new(
                     self.buffer,
@@ -380,7 +386,7 @@ impl<'a> Renderer<'a> {
 
     fn render_element<Msg>(
         &mut self,
-        element: &ElementNode<Msg>,
+        element: &RetainedElementNode<Msg>,
         parent_origin: Point,
         clip: Rect,
         scroll: ScrollState,
@@ -402,7 +408,7 @@ impl<'a> Renderer<'a> {
 
     fn render_children<Msg>(
         &mut self,
-        children: &[Node<Msg>],
+        children: &[RetainedNode<Msg>],
         parent_origin: Point,
         clip: Rect,
         scroll: ScrollState,
@@ -621,7 +627,7 @@ impl<'a> Renderer<'a> {
 
     fn render_modal<Msg>(
         &mut self,
-        element: &ElementNode<Msg>,
+        element: &RetainedElementNode<Msg>,
         parent_origin: Point,
         clip: Rect,
         scroll_y: f32,
@@ -637,7 +643,7 @@ impl<'a> Renderer<'a> {
 
     fn render_block<Msg>(
         &mut self,
-        element: &ElementNode<Msg>,
+        element: &RetainedElementNode<Msg>,
         parent_origin: Point,
         clip: Rect,
         scroll: ScrollState,
@@ -822,15 +828,15 @@ mod tests {
     use crate::components::scroll::{ScrollBehavior, ScrollMsg, ScrollState, scrollable_content};
     use crate::dom::rounding::round_layout;
     use crate::dom::{
-        Color, Style, TableColumn, TableColumnWidth, TableRow, TextSpan, block, block_with_title,
-        column, modal, rich_text, row, table, text,
+        Color, Node, RetainedNode, Style, TableColumn, TableColumnWidth, TableRow, TextSpanRef,
+        block, block_with_title, column, modal, rich_text, row, table, text,
     };
     use crate::palette::Palette;
     use crate::paragraph;
     use taffy::prelude::TaffyZero;
     use taffy::{AvailableSpace, Dimension, compute_root_layout};
 
-    fn prepare_layout<Msg>(node: &mut Node<Msg>, size: Size) {
+    fn prepare_layout<Msg>(node: &mut RetainedNode<Msg>, size: Size) {
         compute_root_layout(
             node,
             u64::MAX.into(),
@@ -842,17 +848,22 @@ mod tests {
         round_layout(node);
     }
 
-    fn render_to_lines(node: &mut Node<()>, width: usize, height: usize) -> Vec<String> {
+    fn render_to_lines<Msg>(
+        node: impl Into<RetainedNode<Msg>>,
+        width: usize,
+        height: usize,
+    ) -> Vec<String> {
+        let mut node: RetainedNode<Msg> = node.into();
         let size = Size::new(
             width.try_into().expect("width fits in u16"),
             height.try_into().expect("height fits in u16"),
         );
-        prepare_layout(node, size);
+        prepare_layout(&mut node, size);
 
         let mut buffer = DoubleBuffer::new(width, height);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
-        renderer.render(node, size).expect("render should succeed");
+        renderer.render(&node, size).expect("render should succeed");
 
         renderer
             .buffer()
@@ -878,9 +889,10 @@ mod tests {
             .with_scroll(scroll_offset)
             .with_height(Dimension::length(5.0))
             .with_width(Dimension::percent(1.0));
-        let mut root = column(vec![scrollable])
+        let mut root: RetainedNode<()> = column(vec![scrollable])
             .with_width(Dimension::percent(1.0))
-            .with_height(Dimension::percent(1.0));
+            .with_height(Dimension::percent(1.0))
+            .into();
         prepare_layout(&mut root, Size::new(6, 5));
 
         let mut renderer = Renderer::new(&mut buffer, &palette);
@@ -906,7 +918,7 @@ mod tests {
             .with_scroll(scroll_offset)
             .with_width(Dimension::percent(1.0))
             .with_height(Dimension::percent(1.0));
-        let mut root = scrollable;
+        let mut root: RetainedNode<()> = scrollable.into();
         prepare_layout(&mut root, Size::new(8, 7));
 
         let mut renderer = Renderer::new(&mut buffer, &palette);
@@ -923,12 +935,12 @@ mod tests {
     }
 
     fn render_paragraph_with_scroll(scroll_offset: f32) -> Vec<String> {
-        let mut node = paragraph::<()>("L0\nL1\nL2\nL3\nL4\nL5")
+        let node = paragraph::<()>("L0\nL1\nL2\nL3\nL4\nL5")
             .with_scroll(scroll_offset)
             .with_width(Dimension::percent(1.0))
             .with_height(Dimension::percent(1.0));
 
-        render_to_lines(&mut node, 8, 3)
+        render_to_lines(node, 8, 3)
     }
 
     fn render_scrollable_paragraph(scroll_offset: f32) -> Vec<String> {
@@ -948,7 +960,7 @@ mod tests {
         });
         scroll_state.set_offset(scroll_offset);
 
-        let mut node = scrollable_content(
+        let node = scrollable_content(
             "chat",
             &scroll_state,
             3,
@@ -960,7 +972,7 @@ mod tests {
         .with_width(Dimension::percent(1.0))
         .with_height(Dimension::percent(1.0));
 
-        render_to_lines(&mut node, 32, 6)
+        render_to_lines(node, 32, 6)
     }
 
     fn render_scrollable_multi_paragraph(scroll_offset: f32) -> Vec<String> {
@@ -979,7 +991,7 @@ mod tests {
         });
         scroll_state.set_offset(scroll_offset);
 
-        let mut node = scrollable_content(
+        let node = scrollable_content(
             "multi",
             &scroll_state,
             3,
@@ -989,7 +1001,7 @@ mod tests {
         .with_width(Dimension::percent(1.0))
         .with_height(Dimension::percent(1.0));
 
-        render_to_lines(&mut node, 16, 4)
+        render_to_lines(node, 16, 4)
     }
 
     fn thumb_rows(lines: &[String]) -> Vec<usize> {
@@ -1015,7 +1027,9 @@ mod tests {
         let mut buffer = DoubleBuffer::new(10, 4);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
-        let mut node = text::<()>("hello");
+        let node = text::<()>("hello");
+        let node: RetainedNode<()> = node.into();
+        let mut node: RetainedNode<()> = node.into();
         prepare_layout(&mut node, Size::new(10, 4));
 
         renderer
@@ -1032,10 +1046,12 @@ mod tests {
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
         let spans = vec![
-            TextSpan::new("+", Style::fg(Color::Green)),
-            TextSpan::new("fn", Style::fg(Color::Cyan)),
+            TextSpanRef::new("+", Style::fg(Color::Green)),
+            TextSpanRef::new("fn", Style::fg(Color::Cyan)),
         ];
-        let mut node = rich_text::<()>(spans);
+        let node = rich_text::<()>(spans);
+        let node: RetainedNode<()> = node.into();
+        let mut node: RetainedNode<()> = node.into();
         prepare_layout(&mut node, Size::new(10, 2));
 
         renderer
@@ -1058,8 +1074,9 @@ mod tests {
         let mut buffer = DoubleBuffer::new(6, 1);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
-        let spans = vec![TextSpan::new("abcdef", Style::fg(Color::Red))];
-        let mut node = rich_text::<()>(spans).with_scroll_x(2.0);
+        let spans = vec![TextSpanRef::new("abcdef", Style::fg(Color::Red))];
+        let node = rich_text::<()>(spans).with_scroll_x(2.0);
+        let mut node: RetainedNode<()> = node.into();
         prepare_layout(&mut node, Size::new(6, 1));
 
         renderer
@@ -1073,9 +1090,9 @@ mod tests {
 
     #[test]
     fn text_node_expands_tabs_to_spaces() {
-        let mut node = text::<()>("a\tb").with_width(Dimension::length(16.0));
+        let node = text::<()>("a\tb").with_width(Dimension::length(16.0));
 
-        let lines = render_to_lines(&mut node, 16, 1);
+        let lines = render_to_lines(node, 16, 1);
         let line = &lines[0];
 
         assert!(line.starts_with("a       b"), "unexpected line: {line:?}");
@@ -1087,9 +1104,9 @@ mod tests {
 
     #[test]
     fn tab_advances_to_next_tab_stop() {
-        let mut node = text::<()>("abc\tdef").with_width(Dimension::length(16.0));
+        let node = text::<()>("abc\tdef").with_width(Dimension::length(16.0));
 
-        let lines = render_to_lines(&mut node, 16, 1);
+        let lines = render_to_lines(node, 16, 1);
         let line = &lines[0];
         let def_index = line.find("def").expect("expected def in rendered line");
 
@@ -1109,12 +1126,14 @@ mod tests {
             .map(|idx| text::<()>(format!("Item {idx} 1234567890abcdef")))
             .collect();
         let col = column(lines).with_flex_shrink(0.);
-        let mut root = block::<()>(vec![col])
+        let root = block::<()>(vec![col])
             .with_scroll(y_scroll)
             .with_scroll_x(x_scroll)
             .with_width(Dimension::percent(1.0))
             .with_height(Dimension::percent(1.0));
 
+        let root: RetainedNode<()> = root.into();
+        let mut root: RetainedNode<()> = root.into();
         prepare_layout(&mut root, Size::new(12, 8));
 
         renderer
@@ -1154,16 +1173,22 @@ mod tests {
     #[test]
     fn table_renders_header_and_rows_aligned() {
         let columns = vec![
-            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Name")),
-            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Role")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Name").into()),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Role").into()),
         ];
         let rows = vec![
-            TableRow::new(vec![text::<()>("Alice"), text::<()>("Engineer")]),
-            TableRow::new(vec![text::<()>("Bob"), text::<()>("Designer")]),
+            TableRow::new(vec![
+                text::<()>("Alice").into(),
+                text::<()>("Engineer").into(),
+            ]),
+            TableRow::new(vec![
+                text::<()>("Bob").into(),
+                text::<()>("Designer").into(),
+            ]),
         ];
-        let mut table = table(columns, rows);
+        let table = table(columns, rows);
 
-        let lines = render_to_lines(&mut table, 18, 4);
+        let lines = render_to_lines(table, 18, 4);
         assert!(lines[0].contains("Name"));
         assert!(lines[0].contains("Role"));
         assert!(lines[1].contains("Alice"));
@@ -1187,16 +1212,16 @@ mod tests {
     #[test]
     fn table_respects_fixed_column_width() {
         let columns = vec![
-            TableColumn::new(TableColumnWidth::Fixed(6.0)).with_header(text::<()>("Key")),
-            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Value")),
+            TableColumn::new(TableColumnWidth::Fixed(6.0)).with_header(text::<()>("Key").into()),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Value").into()),
         ];
         let rows = vec![
-            TableRow::new(vec![text::<()>("A"), text::<()>("One")]),
-            TableRow::new(vec![text::<()>("B"), text::<()>("Two")]),
+            TableRow::new(vec![text::<()>("A").into(), text::<()>("One").into()]),
+            TableRow::new(vec![text::<()>("B").into(), text::<()>("Two").into()]),
         ];
-        let mut table = table(columns, rows);
+        let table = table(columns, rows);
 
-        let lines = render_to_lines(&mut table, 12, 4);
+        let lines = render_to_lines(table, 12, 4);
         let value_col = lines[0].find("Value").expect("header Value present");
         let one_col = lines[1].find("One").expect("row One present");
         let two_col = lines[2].find("Two").expect("row Two present");
@@ -1224,16 +1249,16 @@ mod tests {
     #[test]
     fn table_with_gap_spacing() {
         let columns = vec![
-            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("A")),
-            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("B")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("A").into()),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("B").into()),
         ];
         let rows = vec![
-            TableRow::new(vec![text::<()>("X"), text::<()>("Y")]),
-            TableRow::new(vec![text::<()>("Z"), text::<()>("W")]),
+            TableRow::new(vec![text::<()>("X").into(), text::<()>("Y").into()]),
+            TableRow::new(vec![text::<()>("Z").into(), text::<()>("W").into()]),
         ];
-        let mut table = table(columns, rows).with_gap(2, 1);
+        let table = table(columns, rows).with_gap(2, 1);
 
-        let lines = render_to_lines(&mut table, 10, 5);
+        let lines = render_to_lines(table, 10, 5);
 
         // With a gap of 2 columns, the second column should be further right
         let a_pos = lines[0].find('A').expect("A present");
@@ -1250,12 +1275,12 @@ mod tests {
             TableColumn::new(TableColumnWidth::Auto),
         ];
         let rows = vec![
-            TableRow::new(vec![text::<()>("Data1"), text::<()>("Data2")]),
-            TableRow::new(vec![text::<()>("Data3"), text::<()>("Data4")]),
+            TableRow::new(vec![text::<()>("Data1").into(), text::<()>("Data2").into()]),
+            TableRow::new(vec![text::<()>("Data3").into(), text::<()>("Data4").into()]),
         ];
-        let mut table = table(columns, rows);
+        let table = table(columns, rows);
 
-        let lines = render_to_lines(&mut table, 15, 3);
+        let lines = render_to_lines(table, 15, 3);
 
         // First line should contain first row data, not headers
         assert!(
@@ -1279,15 +1304,15 @@ mod tests {
     #[test]
     fn table_single_column() {
         let columns =
-            vec![TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Column"))];
+            vec![TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Column").into())];
         let rows = vec![
-            TableRow::new(vec![text::<()>("Row1")]),
-            TableRow::new(vec![text::<()>("Row2")]),
-            TableRow::new(vec![text::<()>("Row3")]),
+            TableRow::new(vec![text::<()>("Row1").into()]),
+            TableRow::new(vec![text::<()>("Row2").into()]),
+            TableRow::new(vec![text::<()>("Row3").into()]),
         ];
-        let mut table = table(columns, rows);
+        let table = table(columns, rows);
 
-        let lines = render_to_lines(&mut table, 10, 5);
+        let lines = render_to_lines(table, 10, 5);
 
         assert!(lines[0].contains("Column"), "Header should render");
         assert!(lines[1].contains("Row1"), "First row should render");
@@ -1298,17 +1323,26 @@ mod tests {
     #[test]
     fn table_with_mixed_column_widths() {
         let columns = vec![
-            TableColumn::new(TableColumnWidth::Fixed(5.0)).with_header(text::<()>("ID")),
-            TableColumn::new(TableColumnWidth::Flexible(1.0)).with_header(text::<()>("Name")),
-            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Val")),
+            TableColumn::new(TableColumnWidth::Fixed(5.0)).with_header(text::<()>("ID").into()),
+            TableColumn::new(TableColumnWidth::Flexible(1.0))
+                .with_header(text::<()>("Name").into()),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Val").into()),
         ];
         let rows = vec![
-            TableRow::new(vec![text::<()>("1"), text::<()>("Alice"), text::<()>("X")]),
-            TableRow::new(vec![text::<()>("2"), text::<()>("Bob"), text::<()>("Y")]),
+            TableRow::new(vec![
+                text::<()>("1").into(),
+                text::<()>("Alice").into(),
+                text::<()>("X").into(),
+            ]),
+            TableRow::new(vec![
+                text::<()>("2").into(),
+                text::<()>("Bob").into(),
+                text::<()>("Y").into(),
+            ]),
         ];
-        let mut table = table(columns, rows);
+        let table = table(columns, rows);
 
-        let lines = render_to_lines(&mut table, 20, 4);
+        let lines = render_to_lines(table, 20, 4);
 
         // Verify all content is present
         assert!(lines[0].contains("ID"), "ID header present");
@@ -1321,13 +1355,13 @@ mod tests {
     #[test]
     fn table_empty_with_headers_only() {
         let columns = vec![
-            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Col1")),
-            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Col2")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Col1").into()),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("Col2").into()),
         ];
         let rows = vec![];
-        let mut table = table(columns, rows);
+        let table = table(columns, rows);
 
-        let lines = render_to_lines(&mut table, 15, 2);
+        let lines = render_to_lines(table, 15, 2);
 
         // Only headers should render
         assert!(lines[0].contains("Col1"), "First header present");
@@ -1341,20 +1375,20 @@ mod tests {
         use crate::dom::{column, text};
 
         let columns = vec![
-            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("A")),
-            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("B")),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("A").into()),
+            TableColumn::new(TableColumnWidth::Auto).with_header(text::<()>("B").into()),
         ];
         let rows = vec![
-            TableRow::new(vec![text::<()>("1"), text::<()>("2")]),
-            TableRow::new(vec![text::<()>("3"), text::<()>("4")]),
+            TableRow::new(vec![text::<()>("1").into(), text::<()>("2").into()]),
+            TableRow::new(vec![text::<()>("3").into(), text::<()>("4").into()]),
         ];
         let table_node = table(columns, rows);
 
         // Wrap table in a column (flexbox container)
-        let mut view = column(vec![text::<()>("Title"), table_node]);
+        let view = column(vec![text::<()>("Title"), table_node.into_node()]);
 
         // This should not panic - before the fix in child_count(), this would panic
-        let lines = render_to_lines(&mut view, 20, 6);
+        let lines = render_to_lines(view, 20, 6);
         assert!(lines.len() > 0, "Should render without panicking");
 
         // ACTUALLY CHECK THE CONTENT
@@ -1369,8 +1403,9 @@ mod tests {
         let mut buffer = DoubleBuffer::new(6, 1);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
-        let spans = vec![TextSpan::new("ab漢cdef", Style::fg(Color::Yellow))];
-        let mut node = rich_text::<()>(spans).with_scroll_x(2.0);
+        let spans = vec![TextSpanRef::new("ab漢cdef", Style::fg(Color::Yellow))];
+        let node = rich_text::<()>(spans).with_scroll_x(2.0);
+        let mut node: RetainedNode<()> = node.into();
         prepare_layout(&mut node, Size::new(6, 1));
 
         renderer
@@ -1387,10 +1422,11 @@ mod tests {
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
         let spans = vec![
-            TextSpan::new("abc", Style::fg(Color::Red)),
-            TextSpan::new("def", Style::fg(Color::Green)),
+            TextSpanRef::new("abc", Style::fg(Color::Red)),
+            TextSpanRef::new("def", Style::fg(Color::Green)),
         ];
-        let mut node = rich_text::<()>(spans);
+        let node = rich_text::<()>(spans);
+        let mut node: RetainedNode<()> = node.into();
         prepare_layout(&mut node, Size::new(4, 2));
 
         renderer
@@ -1453,7 +1489,8 @@ mod tests {
         let mut buffer = DoubleBuffer::new(6, 4);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
-        let mut node = column(vec![text::<()>("top"), text::<()>("bottom")]);
+        let node = column(vec![text::<()>("top"), text::<()>("bottom")]);
+        let mut node: RetainedNode<()> = node.into();
         prepare_layout(&mut node, Size::new(6, 4));
 
         renderer
@@ -1502,9 +1539,9 @@ mod tests {
     fn render_output_keeps_single_spaces_after_emoji() {
         let text_content = "chatui on  main [$!?⇡] is 📦 v0.1.0 via 🦀 v1.89.0 took 2m23s";
         let width = grapheme_width(text_content) + 2;
-        let mut node = text::<()>(text_content);
+        let node = text::<()>(text_content);
 
-        let lines = render_to_lines(&mut node, width, 1);
+        let lines = render_to_lines(node, width, 1);
         assert_eq!(lines[0].trim_end(), text_content);
     }
 
@@ -1513,7 +1550,8 @@ mod tests {
         let mut buffer = DoubleBuffer::new(10, 2);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
-        let mut node = row(vec![text::<()>("left"), text::<()>("right")]);
+        let node = row(vec![text::<()>("left"), text::<()>("right")]);
+        let mut node: RetainedNode<()> = node.into();
         prepare_layout(&mut node, Size::new(10, 2));
 
         renderer
@@ -1530,7 +1568,8 @@ mod tests {
         let mut buffer = DoubleBuffer::new(4, 3);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
-        let mut node = block::<()>(Vec::new());
+        let node = block::<()>(Vec::new());
+        let mut node: RetainedNode<()> = node.into();
         prepare_layout(&mut node, Size::new(4, 3));
 
         renderer
@@ -1554,9 +1593,10 @@ mod tests {
         let mut buffer = DoubleBuffer::new(10, 4);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
-        let mut node = block_with_title::<()>(TITLE, Vec::new())
+        let node = block_with_title::<()>(TITLE, Vec::new())
             .with_min_width(Dimension::length(10.))
             .with_min_height(Dimension::length(3.));
+        let mut node: RetainedNode<()> = node.into();
         prepare_layout(&mut node, Size::new(10, 4));
 
         renderer
@@ -1591,7 +1631,8 @@ mod tests {
 
         let overlay = modal(vec![modal_content]);
 
-        let mut root = column(vec![base, overlay]).with_fill();
+        let root = column(vec![base, overlay]).with_fill();
+        let mut root: RetainedNode<()> = root.into();
         prepare_layout(&mut root, Size::new(12, 6));
 
         renderer
@@ -1627,7 +1668,8 @@ mod tests {
         let mut buffer = DoubleBuffer::new(10, 2);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
-        let mut node = text::<()>("color").with_style(Style::fg(Color::Blue));
+        let node = text::<()>("color").with_style(Style::fg(Color::Blue));
+        let mut node: RetainedNode<()> = node.into();
         prepare_layout(&mut node, Size::new(10, 2));
 
         renderer
@@ -1683,11 +1725,12 @@ mod tests {
             text::<()>("[ ] Add focus styles"),
         ]);
 
-        let mut root = block::<()>(vec![column(vec![header, input_block, items])]);
+        let root = column(vec![header, input_block, items]);
 
         let mut buffer = DoubleBuffer::new(90, 12);
         let palette = Palette::default();
         let mut renderer = Renderer::new(&mut buffer, &palette);
+        let mut root: RetainedNode<()> = root.into();
         prepare_layout(&mut root, Size::new(90, 12));
 
         renderer
@@ -1697,9 +1740,9 @@ mod tests {
         let screen = renderer.buffer().to_string();
         let lines: Vec<&str> = screen.lines().collect();
 
-        assert!(lines[0].starts_with("┌"));
-        assert_eq!(&lines.get(1).unwrap()[..8], "│TODOs");
-        assert_eq!(&lines.get(2).unwrap()[..6], "│┌");
+        assert!(lines[0].starts_with("TODOs"));
+        assert!(lines[1].starts_with("┌"));
+        assert!(lines[2].starts_with("│N"));
         assert!(
             lines
                 .iter()
@@ -1712,11 +1755,12 @@ mod tests {
         let mut buffer = DoubleBuffer::new(10, 6);
         // Create a column with many lines and apply scroll
         let lines: Vec<Node<()>> = (0..10).map(|i| text::<()>(format!("L{}", i))).collect();
-        let mut root = column(vec![
+        let root = column(vec![
             column(lines)
                 .with_scroll(3.0)
                 .with_height(taffy::Dimension::length(5.0)),
         ]);
+        let mut root: RetainedNode<()> = root.into();
         compute_root_layout(
             &mut root,
             u64::MAX.into(),
@@ -1913,7 +1957,8 @@ mod tests {
         let value = "abcdefghijklmnopqrstuvwxyz";
         let state = crate::InputState::with_value(value);
         let style = crate::InputStyle::default();
-        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+        let node = crate::input::<()>("input", &state, &style, |_| ());
+        let mut node: RetainedNode<()> = node.into();
         prepare_layout(&mut node, Size::new(8, 1));
 
         renderer

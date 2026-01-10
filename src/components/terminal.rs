@@ -760,7 +760,7 @@ pub fn terminal<Msg>(
     state: &TerminalState,
     focused: bool,
     on_event: impl Fn(TerminalMsg) -> Msg + 'static,
-) -> Node<Msg>
+) -> Node<'static, Msg>
 where
     Msg: 'static,
 {
@@ -1828,6 +1828,7 @@ impl Renderable for TerminalRenderable {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dom::RetainedNode;
     use crate::event::{
         LocalMouseEvent, MouseButton, MouseEvent, MouseEventKind, MouseScroll, MouseScrollAxis,
         MouseScrollDirection,
@@ -2707,9 +2708,10 @@ mod tests {
             });
 
             let term_node = terminal::<()>("term", &state, false, |_| ());
-            let mut node =
+            let node =
                 scroll::scrollable_content("scroll-container", &scroll_state, 3, |_| (), term_node);
 
+            let mut node: RetainedNode<()> = node.into();
             compute_root_layout(
                 &mut node,
                 u64::MAX.into(),
@@ -2720,7 +2722,7 @@ mod tests {
             );
             round_layout(&mut node);
 
-            let rendered = render_node_to_string(&mut node, 20, 10).expect("render should succeed");
+            let rendered = render_node_to_string(node, 20, 10).expect("render should succeed");
 
             // First line should show first 20 characters
             let first_line = rendered.lines().next().unwrap_or("");
@@ -2739,9 +2741,10 @@ mod tests {
             });
 
             let term_node = terminal::<()>("term", &state, false, |_| ());
-            let mut node =
+            let node =
                 scroll::scrollable_content("scroll-container", &scroll_state, 3, |_| (), term_node);
 
+            let mut node: RetainedNode<()> = node.into();
             compute_root_layout(
                 &mut node,
                 u64::MAX.into(),
@@ -2752,7 +2755,7 @@ mod tests {
             );
             round_layout(&mut node);
 
-            let rendered = render_node_to_string(&mut node, 20, 10).expect("render should succeed");
+            let rendered = render_node_to_string(node, 20, 10).expect("render should succeed");
 
             // At offset 50, position 50 is '7' (50 % 9 = 5, 5+1 = 6... wait, let me recalculate)
             // Position 50: (50 % 9) + 1 = (5) + 1 = 6
@@ -2832,9 +2835,10 @@ mod tests {
                 .with_flex_grow(0.0);
 
             let content = row(vec![term1, term2]);
-            let mut node =
+            let node =
                 scroll::scrollable_content("scroll-container", &scroll_state, 3, |_| (), content);
 
+            let mut node: RetainedNode<()> = node.into();
             compute_root_layout(
                 &mut node,
                 u64::MAX.into(),
@@ -2845,7 +2849,7 @@ mod tests {
             );
             round_layout(&mut node);
 
-            let rendered = render_node_to_string(&mut node, 20, 5).expect("render should succeed");
+            let rendered = render_node_to_string(node, 20, 5).expect("render should succeed");
 
             // First line should contain only A's
             let first_line = rendered.lines().next().unwrap_or("");
@@ -2876,9 +2880,10 @@ mod tests {
                 .with_flex_grow(0.0);
 
             let content = row(vec![term1, term2]);
-            let mut node =
+            let node =
                 scroll::scrollable_content("scroll-container", &scroll_state, 3, |_| (), content);
 
+            let mut node: RetainedNode<()> = node.into();
             compute_root_layout(
                 &mut node,
                 u64::MAX.into(),
@@ -2889,7 +2894,7 @@ mod tests {
             );
             round_layout(&mut node);
 
-            let rendered = render_node_to_string(&mut node, 20, 5).expect("render should succeed");
+            let rendered = render_node_to_string(node, 20, 5).expect("render should succeed");
 
             // First line should contain only B's (we've scrolled past terminal 1)
             let first_line = rendered.lines().next().unwrap_or("");
@@ -2920,9 +2925,10 @@ mod tests {
                 .with_flex_grow(0.0);
 
             let content = row(vec![term1, term2]);
-            let mut node =
+            let node =
                 scroll::scrollable_content("scroll-container", &scroll_state, 3, |_| (), content);
 
+            let mut node: RetainedNode<()> = node.into();
             compute_root_layout(
                 &mut node,
                 u64::MAX.into(),
@@ -2933,7 +2939,7 @@ mod tests {
             );
             round_layout(&mut node);
 
-            let rendered = render_node_to_string(&mut node, 20, 5).expect("render should succeed");
+            let rendered = render_node_to_string(node, 20, 5).expect("render should succeed");
 
             // First line should start with A's (from remaining of terminal 1)
             // Viewport is 20 cols, scroll offset is 10

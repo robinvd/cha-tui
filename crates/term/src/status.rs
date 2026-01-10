@@ -1,7 +1,7 @@
 //! Status bar component.
 
 use chatui::dom::Color;
-use chatui::{Node, Style, TextSpan, rich_text, row};
+use chatui::{Node, Style, TextSpanRef, rich_text, row};
 
 use super::focus::Focus;
 use super::keymap::{Keymap, Shortcut};
@@ -34,29 +34,29 @@ impl StatusMessage {
 }
 
 /// Render the status bar.
-pub fn status_bar_view(
+pub fn status_bar_view<'a>(
     focus: Focus,
-    status: Option<&StatusMessage>,
+    status: Option<&'a StatusMessage>,
     auto_hide: bool,
-    active_session: Option<(&Project, &Session)>,
+    active_session: Option<(&'a Project, &'a Session)>,
     layout: LayoutKind,
-    keymap: &Keymap,
-) -> Node<Msg> {
+    keymap: &'a Keymap,
+) -> Node<'a, Msg> {
     let base_style = Style::default();
     let key_style = Style::bold();
     let mut right_spans = Vec::new();
     let mut status_node = None;
 
-    let mut left_items: Vec<Node<Msg>> = Vec::new();
+    let mut left_items: Vec<Node<'a, Msg>> = Vec::new();
     left_items.push(
-        rich_text(vec![TextSpan::new(
+        rich_text(vec![TextSpanRef::new(
             format!(" Focus: {} │", focus.status_label()),
             base_style,
         )])
         .with_id("status-focus"),
     );
     left_items.push(
-        rich_text(vec![TextSpan::new(
+        rich_text(vec![TextSpanRef::new(
             format!("Layout: {} │", layout.status_label()),
             base_style,
         )])
@@ -66,14 +66,14 @@ pub fn status_bar_view(
 
     left_items.extend(shortcut_buttons(
         keymap.status_shortcuts(focus),
-        &key_style,
-        &base_style,
+        key_style,
+        base_style,
     ));
 
     if auto_hide && let Some((project, session)) = active_session {
-        right_spans.push(TextSpan::new(&project.name, base_style));
-        right_spans.push(TextSpan::new(" - ", base_style));
-        right_spans.push(TextSpan::new(session.display_name(), base_style));
+        right_spans.push(TextSpanRef::new(&project.name, base_style));
+        right_spans.push(TextSpanRef::new(" - ", base_style));
+        right_spans.push(TextSpanRef::new(session.display_name(), base_style));
     }
 
     if let Some(status) = status {
@@ -85,8 +85,8 @@ pub fn status_bar_view(
         }
         status_node = Some(
             rich_text(vec![
-                TextSpan::new(format!(" {} ", status.text), style),
-                TextSpan::new("│", base_style),
+                TextSpanRef::new(format!(" {} ", status.text), style),
+                TextSpanRef::new("│", base_style),
             ])
             .with_flex_shrink(0.)
             .with_id("status-message"),
@@ -114,11 +114,11 @@ pub fn status_bar_view(
     row(items)
 }
 
-fn shortcut_buttons(
-    shortcuts: &[Shortcut],
-    key_style: &Style,
-    text_style: &Style,
-) -> Vec<Node<Msg>> {
+fn shortcut_buttons<'a>(
+    shortcuts: &'a [Shortcut],
+    key_style: Style,
+    text_style: Style,
+) -> Vec<Node<'a, Msg>> {
     let mut items = Vec::new();
 
     for (idx, shortcut) in shortcuts.iter().enumerate() {
@@ -138,18 +138,18 @@ fn shortcut_buttons(
     items
 }
 
-fn shortcut_button(
+fn shortcut_button<'a>(
     label: impl Into<String>,
     description: &'static str,
     idx: u64,
-    key_style: &Style,
-    text_style: &Style,
+    key_style: Style,
+    text_style: Style,
     on_click: impl Fn() -> Msg + 'static,
-) -> Node<Msg> {
+) -> Node<'a, Msg> {
     let spans = vec![
-        TextSpan::new(label, *key_style),
-        TextSpan::new(" ", *text_style),
-        TextSpan::new(description, *text_style),
+        TextSpanRef::new(label.into(), key_style),
+        TextSpanRef::new(" ", text_style),
+        TextSpanRef::new(description, text_style),
     ];
 
     rich_text(spans)
@@ -178,7 +178,7 @@ mod tests {
         let keymap = Keymap::new(bindings);
         let status = StatusMessage::error("keybindings overflow");
 
-        let mut node = status_bar_view(
+        let node = status_bar_view(
             Focus::Sidebar,
             Some(&status),
             false,
@@ -188,8 +188,7 @@ mod tests {
         )
         .with_fill();
 
-        let output =
-            render_node_to_string(&mut node, 60, 1).expect("status bar render should succeed");
+        let output = render_node_to_string(node, 60, 1).expect("status bar render should succeed");
 
         assert!(output.contains("Focus: sidebar"));
         assert!(output.contains("Layout: zoom"));

@@ -88,7 +88,7 @@ impl Renderable for Divider {
     }
 }
 
-pub fn vertical_divider<Msg>(style: Style) -> Node<Msg> {
+pub fn vertical_divider<Msg>(style: Style) -> Node<'static, Msg> {
     renderable(Divider::vertical(style))
         .with_width(Dimension::length(1.0))
         .with_min_width(Dimension::length(1.0))
@@ -97,7 +97,7 @@ pub fn vertical_divider<Msg>(style: Style) -> Node<Msg> {
         .with_flex_shrink(0.0)
 }
 
-pub fn horizontal_divider<Msg>(style: Style) -> Node<Msg> {
+pub fn horizontal_divider<Msg>(style: Style) -> Node<'static, Msg> {
     renderable(Divider::horizontal(style))
         .with_height(Dimension::length(1.0))
         .with_min_height(Dimension::length(1.0))

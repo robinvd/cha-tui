@@ -69,7 +69,10 @@ impl<'a, Msg> Layout<'a, Msg> {
     }
 }
 
-pub fn view_sessions<Msg: 'static>(sessions: &[Session], layout: Layout<'_, Msg>) -> Node<Msg> {
+pub fn view_sessions<'a, Msg: 'static>(
+    sessions: &'a [Session],
+    layout: Layout<'a, Msg>,
+) -> Node<'a, Msg> {
     match layout.kind {
         LayoutKind::Zoom => view_zoom(sessions, &layout),
         LayoutKind::Tall => view_tall(sessions, &layout),
@@ -80,7 +83,7 @@ pub fn view_sessions<Msg: 'static>(sessions: &[Session], layout: Layout<'_, Msg>
     }
 }
 
-fn terminal_placeholder<Msg: 'static>(focus: bool) -> Node<Msg> {
+fn terminal_placeholder<Msg: 'static>(focus: bool) -> Node<'static, Msg> {
     block_with_title(
         "Terminal",
         vec![text::<Msg>("Select or create a session to start.")],
@@ -99,11 +102,11 @@ fn active_session_id(sessions: &[Session], active: Option<SessionId>) -> Option<
     active.or_else(|| sessions.first().map(|session| session.id))
 }
 
-fn terminal_node<Msg: 'static>(
-    session: &Session,
-    layout: &Layout<'_, Msg>,
+fn terminal_node<'a, Msg: 'static>(
+    session: &'a Session,
+    layout: &Layout<'a, Msg>,
     is_active: bool,
-) -> Node<Msg> {
+) -> Node<'a, Msg> {
     let sid = session.id;
     let is_focused = layout.focus && is_active;
     let on_terminal_msg = Rc::clone(&layout.on_terminal_msg);
@@ -117,7 +120,7 @@ fn terminal_node<Msg: 'static>(
     .on_click(move || on_focus(sid))
 }
 
-fn view_zoom<Msg: 'static>(sessions: &[Session], layout: &Layout<'_, Msg>) -> Node<Msg> {
+fn view_zoom<'a, Msg: 'static>(sessions: &'a [Session], layout: &Layout<'a, Msg>) -> Node<'a, Msg> {
     let Some(active_id) = active_session_id(sessions, layout.active_session) else {
         return terminal_placeholder(layout.focus);
     };
@@ -127,7 +130,7 @@ fn view_zoom<Msg: 'static>(sessions: &[Session], layout: &Layout<'_, Msg>) -> No
     terminal_node(active, layout, true)
 }
 
-fn view_tall<Msg: 'static>(sessions: &[Session], layout: &Layout<'_, Msg>) -> Node<Msg> {
+fn view_tall<'a, Msg: 'static>(sessions: &'a [Session], layout: &Layout<'a, Msg>) -> Node<'a, Msg> {
     let Some(active_id) = active_session_id(sessions, layout.active_session) else {
         return terminal_placeholder(layout.focus);
     };
@@ -158,7 +161,10 @@ fn view_tall<Msg: 'static>(sessions: &[Session], layout: &Layout<'_, Msg>) -> No
     .with_flex_grow(1.0)
 }
 
-fn view_tall3<Msg: 'static>(sessions: &[Session], layout: &Layout<'_, Msg>) -> Node<Msg> {
+fn view_tall3<'a, Msg: 'static>(
+    sessions: &'a [Session],
+    layout: &Layout<'a, Msg>,
+) -> Node<'a, Msg> {
     let Some(active_id) = active_session_id(sessions, layout.active_session) else {
         return terminal_placeholder(layout.focus);
     };
@@ -204,7 +210,10 @@ fn view_tall3<Msg: 'static>(sessions: &[Session], layout: &Layout<'_, Msg>) -> N
     .with_flex_grow(1.0)
 }
 
-fn view_focus<Msg: 'static>(sessions: &[Session], layout: &Layout<'_, Msg>) -> Node<Msg> {
+fn view_focus<'a, Msg: 'static>(
+    sessions: &'a [Session],
+    layout: &Layout<'a, Msg>,
+) -> Node<'a, Msg> {
     let Some(active_id) = active_session_id(sessions, layout.active_session) else {
         return terminal_placeholder(layout.focus);
     };
@@ -243,7 +252,7 @@ fn view_focus<Msg: 'static>(sessions: &[Session], layout: &Layout<'_, Msg>) -> N
     .with_flex_grow(1.0)
 }
 
-fn view_wide<Msg: 'static>(sessions: &[Session], layout: &Layout<'_, Msg>) -> Node<Msg> {
+fn view_wide<'a, Msg: 'static>(sessions: &'a [Session], layout: &Layout<'a, Msg>) -> Node<'a, Msg> {
     let Some(active_id) = active_session_id(sessions, layout.active_session) else {
         return terminal_placeholder(layout.focus);
     };
@@ -274,7 +283,10 @@ fn view_wide<Msg: 'static>(sessions: &[Session], layout: &Layout<'_, Msg>) -> No
     .with_flex_grow(1.0)
 }
 
-fn view_strip<Msg: 'static>(sessions: &[Session], layout: &Layout<'_, Msg>) -> Node<Msg> {
+fn view_strip<'a, Msg: 'static>(
+    sessions: &'a [Session],
+    layout: &Layout<'a, Msg>,
+) -> Node<'a, Msg> {
     let Some(active_id) = active_session_id(sessions, layout.active_session) else {
         return terminal_placeholder(layout.focus);
     };

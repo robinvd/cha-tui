@@ -40,7 +40,7 @@ impl VirtualizedColumn {
         }
     }
 
-    pub fn into_node<Msg: 'static>(self) -> Node<Msg> {
+    pub fn into_node<'a, Msg: 'static>(self) -> Node<'a, Msg> {
         renderable(self)
     }
 }
@@ -154,7 +154,7 @@ impl Renderable for VirtualizedColumn {
     }
 }
 
-pub fn virtualized_column<Msg: 'static>(
+pub fn virtualized_column<'a, Msg: 'static>(
     item_count: usize,
     measure_item: impl Fn(
         usize,
@@ -163,14 +163,15 @@ pub fn virtualized_column<Msg: 'static>(
         TaffySize<AvailableSpace>,
     ) -> TaffySize<f32>
     + 'static,
-    render_item: impl for<'a> Fn(usize, &mut RenderContext<'a>) + 'static,
-) -> Node<Msg> {
+    render_item: impl for<'r> Fn(usize, &mut RenderContext<'r>) + 'static,
+) -> Node<'a, Msg> {
     VirtualizedColumn::new(item_count, measure_item, render_item).into_node()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dom::RetainedNode;
     use crate::dom::rounding::round_layout;
     use crate::test_utils::render_node_to_lines;
     use taffy::prelude::AvailableSpace;
@@ -195,8 +196,8 @@ mod tests {
             rendered_handle.borrow_mut().push(index);
         };
 
-        let mut node: Node<()> = virtualized_column(10, measure_item, render_item).with_scroll(2.0);
-        render_node_to_lines(&mut node, 4, 3).expect("render should succeed");
+        let node: Node<()> = virtualized_column(10, measure_item, render_item).with_scroll(2.0);
+        render_node_to_lines(node, 4, 3).expect("render should succeed");
 
         assert_eq!(*rendered.borrow(), vec![2, 3, 4]);
     }
@@ -215,7 +216,8 @@ mod tests {
 
         let render_item = |_index: usize, _ctx: &mut RenderContext<'_>| {};
 
-        let mut node: Node<()> = virtualized_column(5, measure_item, render_item);
+        let node: Node<()> = virtualized_column(5, measure_item, render_item);
+        let mut node: RetainedNode<()> = node.into();
 
         compute_root_layout(
             &mut node,
@@ -227,7 +229,7 @@ mod tests {
         );
         round_layout(&mut node);
 
-        let layout = node.layout_state().layout;
+        let layout = node.layout_state.layout;
         assert_eq!(layout.size.width, 6.0);
         assert_eq!(layout.size.height, 10.0);
     }
@@ -251,7 +253,8 @@ mod tests {
             rendered_handle.borrow_mut().push(index);
         };
 
-        let mut node: Node<()> = virtualized_column(0, measure_item, render_item);
+        let node: Node<()> = virtualized_column(0, measure_item, render_item);
+        let mut node: RetainedNode<()> = node.into();
 
         compute_root_layout(
             &mut node,
@@ -263,11 +266,11 @@ mod tests {
         );
         round_layout(&mut node);
 
-        let layout = node.layout_state().layout;
+        let layout = node.layout_state.layout;
         assert_eq!(layout.size.width, 0.0);
         assert_eq!(layout.size.height, 0.0);
 
-        render_node_to_lines(&mut node, 4, 3).expect("render should succeed");
+        render_node_to_lines(node, 4, 3).expect("render should succeed");
         assert!(rendered.borrow().is_empty());
     }
 }

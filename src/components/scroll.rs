@@ -5,7 +5,7 @@ use std::{
 };
 
 use crate::{
-    dom::{Node, PendingScroll},
+    dom::{Node, PendingScroll, RetainedNode},
     event::{LocalMouseEvent, MouseEventKind, MouseScrollAxis, MouseScrollDirection, Size},
     hash,
     scroll::ScrollAlignment,
@@ -351,13 +351,13 @@ struct AxisLock {
     expires_at: Instant,
 }
 
-pub fn scrollable_content<Msg>(
+pub fn scrollable_content<'a, Msg>(
     id: &'static str,
     state: &ScrollState,
     wheel_step: i32,
     map_msg: impl Fn(ScrollMsg) -> Msg + 'static,
-    child: Node<Msg>,
-) -> Node<Msg> {
+    child: Node<'a, Msg>,
+) -> Node<'a, Msg> {
     let behavior = state.behavior();
     let map_msg = Rc::new(map_msg);
     let mouse_handler = Rc::clone(&map_msg);
@@ -468,6 +468,21 @@ pub fn scrollable_content<Msg>(
     }
 
     node
+}
+
+/// Version of scrollable_content that works with RetainedNode instead of Node.
+/// This is useful when you have components that return RetainedNode (like paragraph).
+pub fn scrollable_content_retained<Msg>(
+    id: &'static str,
+    state: &ScrollState,
+    wheel_step: i32,
+    map_msg: impl Fn(ScrollMsg) -> Msg + 'static,
+    child: RetainedNode<Msg>,
+) -> RetainedNode<Msg> {
+    // Convert to Node, apply scrollable_content, then convert back
+    let node: Node<Msg> = child.into_node();
+    let node = scrollable_content(id, state, wheel_step, map_msg, node);
+    node.into()
 }
 
 #[cfg(test)]

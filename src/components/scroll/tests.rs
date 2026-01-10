@@ -1,5 +1,5 @@
 use super::*;
-use crate::{column, text};
+use crate::{column, text_owned};
 use std::time::{Duration, Instant};
 use taffy::{
     prelude::{AvailableSpace, TaffyZero},
@@ -106,13 +106,13 @@ fn reports_when_at_end_of_axis() {
 fn scrollable_content_reports_overflow_height_with_flex_end() {
     let scroll_state = ScrollState::new(ScrollBehavior::Vertical);
     let messages = (0..10)
-        .map(|idx| text::<ScrollMsg>(&format!("line {idx}")))
+        .map(|idx| text_owned::<ScrollMsg>(format!("line {idx}")))
         .collect();
     let spacer = column(vec![])
         .with_flex_grow(1.)
         .with_flex_shrink(1.)
         .with_min_height(Dimension::ZERO);
-    let mut node = scrollable_content(
+    let node = scrollable_content(
         "chat",
         &scroll_state,
         1,
@@ -126,6 +126,7 @@ fn scrollable_content_reports_overflow_height_with_flex_end() {
         .with_min_height(Dimension::ZERO),
     )
     .with_fill();
+    let mut node: RetainedNode<ScrollMsg> = node.into();
 
     taffy::compute_root_layout(
         &mut node,
@@ -137,14 +138,14 @@ fn scrollable_content_reports_overflow_height_with_flex_end() {
     );
     crate::dom::rounding::round_layout(&mut node);
 
-    let layout = node.layout_state().layout;
+    let layout = node.layout_state.layout;
     let element = node
         .as_element()
         .expect("scrollable_content returns an element node");
     let total_child_height: f32 = element
         .children
         .iter()
-        .map(|child| child.layout_state().layout.size.height)
+        .map(|child| child.layout_state.layout.size.height)
         .sum();
 
     assert_eq!(layout.size.height, 5.0);

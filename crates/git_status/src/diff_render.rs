@@ -1,5 +1,7 @@
 use chatui::Style;
 use chatui::dom::Renderable;
+#[cfg(test)]
+use chatui::dom::RetainedNode;
 use chatui::render::RenderContext;
 use taffy::{self, AvailableSpace};
 use tracing::info;
@@ -312,12 +314,13 @@ mod tests {
     use taffy::{AvailableSpace, Dimension, Overflow, compute_root_layout};
 
     fn render_diff_leaf(leaf: DiffLeaf, scroll_x: f32, width: u16, height: u16) -> Vec<Vec<char>> {
-        let mut node = renderable::<()>(leaf)
+        let node = renderable::<()>(leaf)
             .with_overflow_x(Overflow::Scroll)
             .with_scroll_x(scroll_x)
             .with_width(Dimension::length(width as f32))
             .with_height(Dimension::length(height as f32));
 
+        let mut node: RetainedNode<()> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -468,13 +471,14 @@ mod tests {
             .with_flex_grow(1.)
             .with_flex_basis(Dimension::ZERO);
 
-        let mut pane = column::<()>(vec![pane_content])
+        let pane = column::<()>(vec![pane_content])
             .with_min_height(Dimension::ZERO)
             .with_flex_grow(1.)
             .with_flex_basis(Dimension::ZERO)
             .with_id("diff-pane")
             .with_width(Dimension::percent(1.0))
             .with_height(Dimension::percent(1.0));
+        let mut pane: RetainedNode<()> = pane.into();
         compute_root_layout(
             &mut pane,
             u64::MAX.into(),

@@ -1,7 +1,8 @@
 use std::hash::Hash;
 
 use crate::dom::{
-    Node, Style, TableColumn, TableColumnWidth, TableRow, TextSpan, rich_text, table,
+    RetainedNode, Style, TableColumn, TableColumnWidth, TableRow, TextSpan, rich_text_retained,
+    table,
 };
 
 /// Selection mode for the data table.
@@ -541,13 +542,13 @@ pub fn data_table_view<Msg, Id>(
     state: &DataTableState<Id>,
     style: &DataTableStyle,
     _map_msg: impl Fn(DataTableMsg<Id>) -> Msg + 'static,
-) -> Node<Msg>
+) -> RetainedNode<Msg>
 where
     Id: Clone + PartialEq + 'static,
     Msg: 'static,
 {
     if state.columns.is_empty() {
-        return crate::dom::column(vec![]);
+        return crate::dom::column_retained(vec![]);
     }
 
     // Build columns for the low-level table
@@ -559,7 +560,7 @@ where
 
             if let Some(header_text) = col_def.header() {
                 let header_spans = vec![TextSpan::new(header_text, style.header_style)];
-                let header_node = rich_text::<Msg>(header_spans);
+                let header_node = rich_text_retained::<Msg>(header_spans);
 
                 // Note: Cannot add click handlers to text nodes directly
                 // Header clicks would need to be handled at a higher level
@@ -576,7 +577,7 @@ where
         .iter()
         .enumerate()
         .map(|(row_idx, row_data)| {
-            let cells: Vec<Node<Msg>> = row_data
+            let cells: Vec<RetainedNode<Msg>> = row_data
                 .cells
                 .iter()
                 .enumerate()
@@ -596,7 +597,7 @@ where
                     // Create cell with styled text
                     // Note: Cannot add mouse handlers to text nodes directly
                     // Mouse interaction would need to be handled at a higher level or via keyboard
-                    rich_text::<Msg>(
+                    rich_text_retained::<Msg>(
                         cell_spans
                             .iter()
                             .map(|span| {

@@ -1,4 +1,4 @@
-use crate::dom::{Node, Renderable, Style, TextSpan, renderable};
+use crate::dom::{Node, Renderable, RetainedNode, Style, TextSpan, renderable};
 use crate::render::RenderContext;
 use taffy::style::AvailableSpace;
 use unicode_width::UnicodeWidthChar;
@@ -40,8 +40,14 @@ impl Paragraph {
         self
     }
 
-    pub fn into_node<Msg: 'static>(self) -> Node<Msg> {
-        renderable(self)
+    pub fn into_node<Msg: 'static>(self) -> RetainedNode<Msg> {
+        renderable(self).into()
+    }
+
+    /// Creates a borrowed Node from this Paragraph.
+    /// This is useful for view functions that need to return Node instead of RetainedNode.
+    pub fn to_node<'a, Msg: 'static>(self) -> Node<'a, Msg> {
+        crate::dom::renderable(self)
     }
 
     fn char_width_at_column(ch: char, column: usize) -> usize {
@@ -306,12 +312,12 @@ impl Renderable for Paragraph {
     }
 }
 
-pub fn paragraph<Msg: 'static>(content: impl Into<String>) -> Node<Msg> {
-    Paragraph::new(content).into_node()
+pub fn paragraph<Msg: 'static>(content: impl Into<String>) -> Node<'static, Msg> {
+    Paragraph::new(content).to_node()
 }
 
-pub fn rich_paragraph<Msg: 'static>(spans: impl Into<Vec<TextSpan>>) -> Node<Msg> {
-    Paragraph::from_spans(spans.into()).into_node()
+pub fn rich_paragraph<Msg: 'static>(spans: impl Into<Vec<TextSpan>>) -> Node<'static, Msg> {
+    Paragraph::from_spans(spans.into()).to_node()
 }
 
 #[cfg(test)]
@@ -319,13 +325,14 @@ mod tests {
     use super::*;
     use crate::{
         ScrollState, Size, buffer::DoubleBuffer, components::scroll, dom::rounding::round_layout,
-        palette::Palette, render::Renderer, row, text,
+        palette::Palette, render::Renderer,
     };
     use taffy::{AvailableSpace, compute_root_layout};
 
     #[test]
     fn paragraph_wraps_to_multiple_lines() {
-        let mut node: Node<()> = paragraph("abcd ef");
+        let node = paragraph("abcd ef");
+        let mut node: RetainedNode<()> = node.into();
 
         taffy::compute_root_layout(
             &mut node,
@@ -371,12 +378,12 @@ mod tests {
                 axis: scroll::ScrollAxis::Vertical,
                 amount: offset,
             });
-            let mut node = scroll::scrollable_content(
+            let mut node = scroll::scrollable_content_retained(
                 "1",
                 &state,
                 3,
                 |_| (),
-                crate::dom::column(vec![p1, p2]),
+                crate::dom::column_retained(vec![p1.into(), p2.into()]),
             )
             .with_fill();
 
@@ -435,8 +442,14 @@ mod tests {
     #[test]
     fn test_in_scroll2() {
         let view = |offset: i32| {
-            let p1 = row(vec![text("> "), paragraph::<()>("p1: 1\n2\n3\n4\n5")]);
-            let p2 = row(vec![text("> "), paragraph::<()>("p2: 1\n2\n3\n4\n5")]);
+            let p1 = crate::dom::row_retained(vec![
+                crate::dom::text_retained("> "),
+                paragraph::<()>("p1: 1\n2\n3\n4\n5").into(),
+            ]);
+            let p2 = crate::dom::row_retained(vec![
+                crate::dom::text_retained("> "),
+                paragraph::<()>("p2: 1\n2\n3\n4\n5").into(),
+            ]);
 
             let mut state = ScrollState::vertical();
             state.update(crate::ScrollMsg::Resize {
@@ -453,12 +466,12 @@ mod tests {
                 axis: scroll::ScrollAxis::Vertical,
                 amount: offset,
             });
-            let mut node = scroll::scrollable_content(
+            let mut node = scroll::scrollable_content_retained(
                 "1",
                 &state,
                 3,
                 |_| (),
-                crate::dom::column(vec![p1, p2]),
+                crate::dom::column_retained(vec![p1.into(), p2.into()]),
             )
             .with_fill();
 

@@ -557,7 +557,7 @@ where
 pub fn view<T, Msg>(
     model: &FuzzyFinder<T>,
     map_msg: impl Fn(FuzzyFinderMsg) -> Msg + Clone + 'static,
-) -> Node<Msg>
+) -> Node<'_, Msg>
 where
     T: Clone + Send + Sync + 'static,
     Msg: 'static,
@@ -627,7 +627,7 @@ where
     column(content).with_fill()
 }
 
-fn render_column_header<T, Msg>(model: &FuzzyFinder<T>) -> Node<Msg>
+fn render_column_header<T, Msg>(model: &FuzzyFinder<T>) -> Node<'_, Msg>
 where
     T: Clone + Send + Sync + 'static,
     Msg: 'static,
@@ -663,7 +663,7 @@ where
 fn render_list_mapped<T, Msg>(
     model: &FuzzyFinder<T>,
     map_msg: impl Fn(FuzzyFinderMsg) -> Msg + 'static,
-) -> Node<Msg>
+) -> Node<'_, Msg>
 where
     T: Clone + Send + Sync + 'static,
     Msg: 'static,
@@ -985,20 +985,20 @@ mod tests {
             map_msg,
         );
 
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 8).expect("render default view");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 8).expect("render default view");
         assert!(rendered.contains("alpha"), "rendered output:\n{rendered}");
         assert!(rendered.contains("beta"), "rendered output:\n{rendered}");
 
         model.set_query("be");
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 8).expect("render filtered view");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 8).expect("render filtered view");
         assert!(!rendered.contains("alpha"), "rendered output:\n{rendered}");
         assert!(rendered.contains("beta"), "rendered output:\n{rendered}");
 
         model.set_query("zzz");
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 8).expect("render empty view");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 8).expect("render empty view");
         assert!(rendered.contains("No matches"));
     }
 
@@ -1042,8 +1042,8 @@ mod tests {
             map_msg,
         );
 
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 8).expect("render");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 8).expect("render");
         assert!(
             rendered.contains("item-00"),
             "should show item-00:\n{rendered}"
@@ -1065,8 +1065,8 @@ mod tests {
             );
         }
 
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 8).expect("render after scroll");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 8).expect("render after scroll");
         assert!(
             rendered.contains("item-10"),
             "should show item-10 after scrolling:\n{rendered}"
@@ -1100,8 +1100,8 @@ mod tests {
             );
         }
 
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 8).expect("render");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 8).expect("render");
         assert!(
             rendered.contains("item-15"),
             "should show item-15:\n{rendered}"
@@ -1115,8 +1115,8 @@ mod tests {
             );
         }
 
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 8).expect("render after scroll up");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 8).expect("render after scroll up");
         assert!(
             rendered.contains("item-05"),
             "should show item-05 after scrolling up:\n{rendered}"
@@ -1144,8 +1144,8 @@ mod tests {
         let selected = model.list.selection();
         assert!(selected >= 2, "selection should jump: {}", selected);
 
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 10).expect("render");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 10).expect("render");
         let selected_item = format!("item-{:02}", selected);
         assert!(
             rendered.contains(&selected_item),
@@ -1189,8 +1189,8 @@ mod tests {
             map_msg,
         );
 
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 20).expect("render");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 20).expect("render");
         assert!(
             rendered.contains("line-30"),
             "selected item should still be visible:\n{rendered}"
@@ -1245,8 +1245,8 @@ mod tests {
             map_msg,
         );
 
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 10).expect("render");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 10).expect("render");
 
         let lines: Vec<&str> = rendered.lines().collect();
         assert_eq!(
@@ -1337,8 +1337,8 @@ mod tests {
             map_msg,
         );
 
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 10).expect("render");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 10).expect("render");
 
         assert!(
             rendered.contains("Name"),
@@ -1381,8 +1381,8 @@ mod tests {
 
         model.set_query("%Type Animal");
 
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 10).expect("render");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 10).expect("render");
 
         assert!(
             rendered.contains("Cat"),
@@ -1424,8 +1424,8 @@ mod tests {
 
         model.set_query("Al %Type Person");
 
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 40, 10).expect("render");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 40, 10).expect("render");
 
         assert!(
             rendered.contains("Alice") || rendered.contains("Alfred"),
@@ -1460,8 +1460,8 @@ mod tests {
             map_msg,
         );
 
-        let mut node = view(&model, |msg| msg);
-        let rendered = render_node_to_string(&mut node, 30, 10).expect("render");
+        let node = view(&model, |msg| msg);
+        let rendered = render_node_to_string(node, 30, 10).expect("render");
 
         let lines: Vec<&str> = rendered.lines().collect();
         let header_line = lines
@@ -1567,8 +1567,8 @@ mod tests {
             .with_separator(",")
             .with_search_columns(vec![2, 3]);
 
-        let mut node = render_list_item_internal_wrapper(&["col1".to_string()], &[], &config, 80);
-        let rendered = render_node_to_string(&mut node, 80, 1).expect("render");
+        let node = render_list_item_internal_wrapper(&["col1".to_string()], &[], &config, 80);
+        let rendered = render_node_to_string(node, 80, 1).expect("render");
         // It should render empty strings for missing columns, not panic or show nothing unexpectedly
         assert_eq!(rendered.trim(), "");
     }
@@ -1578,7 +1578,7 @@ mod tests {
         match_indices: &[(usize, Vec<u32>)],
         column_config: &ColumnConfig,
         view_width: usize,
-    ) -> Node<()> {
+    ) -> Node<'static, ()> {
         use chatui::dom::{Renderable, renderable};
         use chatui::render::RenderContext;
         use std::any::Any;

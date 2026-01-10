@@ -1055,7 +1055,7 @@ fn listen_for_agent(model: &mut Model) -> Transition<Msg> {
     }))
 }
 
-fn view(model: &Model) -> Node<Msg> {
+fn view(model: &Model) -> Node<'_, Msg> {
     let activity_style = if model.agent_in_progress {
         Style::fg(Color::Palette(3)).merged(&Style::bold())
     } else {
@@ -1072,13 +1072,13 @@ fn view(model: &Model) -> Node<Msg> {
     }
 
     let header = row(vec![
-        text::<Msg>(&format!("kaeru – {}", model.server_label)).with_style(Style::bold()),
-        text::<Msg>(&format!("  {}", status_text)).with_style(Style::dim()),
-        text::<Msg>(&format!("  {activity_label}")).with_style(activity_style),
+        text::<Msg>(format!("kaeru – {}", model.server_label)).with_style(Style::bold()),
+        text::<Msg>(format!("  {}", status_text)).with_style(Style::dim()),
+        text::<Msg>(format!("  {activity_label}")).with_style(activity_style),
     ])
     .with_min_height(Dimension::length(1.0));
 
-    let mut message_nodes: Vec<Node<Msg>> = Vec::new();
+    let mut message_nodes: Vec<Node<'_, Msg>> = Vec::new();
 
     if model.timeline.is_empty() {
         message_nodes.push(text::<Msg>("No messages yet. Type to chat.").with_style(Style::dim()));
@@ -1087,7 +1087,7 @@ fn view(model: &Model) -> Node<Msg> {
     }
 
     let total_nodes = message_nodes.len();
-    let message_nodes: Vec<Node<Msg>> = message_nodes
+    let message_nodes: Vec<Node<'_, Msg>> = message_nodes
         .into_iter()
         .enumerate()
         .map(|(idx, mut node)| {
@@ -1140,7 +1140,7 @@ fn view(model: &Model) -> Node<Msg> {
     column(vec![chat_log, input_area, header]).with_fill()
 }
 
-fn render_entry(entry: &ChatEntry) -> Node<Msg> {
+fn render_entry(entry: &ChatEntry) -> Node<'_, Msg> {
     match entry {
         ChatEntry::Message(message) => render_message(message),
         ChatEntry::Thought(thought) => render_thought(thought),
@@ -1150,8 +1150,8 @@ fn render_entry(entry: &ChatEntry) -> Node<Msg> {
     }
 }
 
-fn render_plan(plan: &Plan) -> Node<Msg> {
-    let entries: Vec<Node<Msg>> = plan
+fn render_plan(plan: &Plan) -> Node<'_, Msg> {
+    let entries: Vec<Node<'_, Msg>> = plan
         .entries
         .iter()
         .map(|entry| {
@@ -1196,8 +1196,15 @@ fn render_plan(plan: &Plan) -> Node<Msg> {
         .with_style(Style::bg(Color::Palette(8)))
 }
 
-fn render_tool_call(call: &ToolCall) -> Node<Msg> {
-    let status_label = format_tool_status(call.status);
+fn render_tool_call(call: &ToolCall) -> Node<'_, Msg> {
+    let status_label = match call.status {
+        ToolCallStatus::Completed => "Completed".to_string(),
+        ToolCallStatus::Failed => "Failed".to_string(),
+        ToolCallStatus::InProgress => "Working...".to_string(),
+        ToolCallStatus::Pending => "Pending".to_string(),
+        _ => "Unknown".to_string(),
+    };
+
     let status_style = match call.status {
         ToolCallStatus::Completed => Style::fg(Color::Palette(2)).merged(&Style::bold()),
         ToolCallStatus::Failed => Style::fg(Color::Palette(1)).merged(&Style::bold()),
@@ -1209,7 +1216,7 @@ fn render_tool_call(call: &ToolCall) -> Node<Msg> {
     let mut rows = vec![
         row(vec![
             text::<Msg>("⚙").with_style(Style::dim().merged(&Style::bold())),
-            text::<Msg>(&status_label).with_style(status_style),
+            text::<Msg>(status_label).with_style(status_style),
             paragraph::rich_paragraph::<Msg>(vec![TextSpan::new(&call.title, Style::bold())])
                 .with_flex_grow(1.)
                 .with_min_width(Dimension::ZERO),
@@ -1232,9 +1239,9 @@ fn render_tool_call(call: &ToolCall) -> Node<Msg> {
     column(rows).with_gap(0, 0).with_style(Style::dim())
 }
 
-fn render_permission_prompt_view(prompt: &PermissionPrompt) -> Node<Msg> {
+fn render_permission_prompt_view(prompt: &PermissionPrompt) -> Node<'_, Msg> {
     let tool_label = describe_tool_call(&prompt.request.tool_call);
-    let options: Vec<Node<Msg>> = if prompt.request.options.is_empty() {
+    let options: Vec<Node<'_, Msg>> = if prompt.request.options.is_empty() {
         vec![text::<Msg>("No permission options provided").with_style(Style::dim())]
     } else {
         prompt
@@ -1253,7 +1260,7 @@ fn render_permission_prompt_view(prompt: &PermissionPrompt) -> Node<Msg> {
                 };
 
                 row(vec![
-                    text::<Msg>(&format!("{}.", idx + 1)).with_style(Style::dim()),
+                    text::<Msg>(format!("{}.", idx + 1)).with_style(Style::dim()),
                     text::<Msg>(&option.name).with_style(if selected {
                         Style::bold()
                     } else {
@@ -1295,7 +1302,7 @@ fn permission_kind_label(kind: &PermissionOptionKind) -> &'static str {
     }
 }
 
-fn render_message(message: &ChatMessage) -> Node<Msg> {
+fn render_message(message: &ChatMessage) -> Node<'_, Msg> {
     let (label, mut label_style, msg_style) = match message.author {
         Author::User => (
             ">",
@@ -1322,7 +1329,7 @@ fn render_message(message: &ChatMessage) -> Node<Msg> {
         .with_style(msg_style)
 }
 
-fn render_thought(thought: &str) -> Node<Msg> {
+fn render_thought(thought: &str) -> Node<'_, Msg> {
     row(vec![
         text::<Msg>("💭").with_style(Style::dim().merged(&Style::bold())),
         paragraph::rich_paragraph::<Msg>(vec![TextSpan::new(thought, Style::dim())])

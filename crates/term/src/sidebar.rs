@@ -503,12 +503,12 @@ pub fn move_project_down(projects: &mut [Project], pid: ProjectId) -> bool {
 }
 
 /// Render the sidebar.
-pub fn sidebar_view(
-    model: &Model,
+pub fn sidebar_view<'a>(
+    model: &'a Model,
     focused: bool,
-    wrap_tree: impl Fn(TreeMsg<TreeId>) -> AppMsg + 'static,
+    map_tree_msg: impl Fn(TreeMsg<TreeId>) -> AppMsg + 'static,
     on_click: impl Fn() -> AppMsg + 'static,
-) -> Node<AppMsg> {
+) -> Node<'a, AppMsg> {
     if model.auto_hide && !focused {
         return chatui::column(vec![]);
     }
@@ -517,10 +517,11 @@ pub fn sidebar_view(
     let tree_node = if model.tree.visible().is_empty() {
         text::<AppMsg>("No projects yet. Press p to add one.")
     } else {
-        tree_view("session-tree", &model.tree, &style, wrap_tree, focused)
+        tree_view("session-tree", &model.tree, &style, map_tree_msg, focused)
             .with_min_height(Dimension::ZERO)
             .with_flex_grow(1.)
             .with_flex_basis(Dimension::ZERO)
+            .into_node()
     };
 
     let scroll_node = scrollable_content(

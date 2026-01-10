@@ -1,9 +1,9 @@
 //! Contains the print_tree function for printing a debug representation of the tree
 
-use super::Node;
+use super::RetainedNode;
 
 /// Prints a debug representation of the computed layout for a tree of nodes, starting with the passed root node.
-pub fn print_tree<Msg>(root: &Node<Msg>) {
+pub fn print_tree<Msg>(root: &RetainedNode<Msg>) {
     if tracing::Level::DEBUG < tracing::level_filters::LevelFilter::current() {
         return;
     }
@@ -11,7 +11,7 @@ pub fn print_tree<Msg>(root: &Node<Msg>) {
     print_node(root, false, String::new());
 
     /// Recursive function that prints each node in the tree
-    fn print_node<Msg>(node: &Node<Msg>, has_sibling: bool, lines_string: String) {
+    fn print_node<Msg>(node: &RetainedNode<Msg>, has_sibling: bool, lines_string: String) {
         let layout = &node.get_final_layout();
         let label = node.get_debug_label();
 
@@ -45,15 +45,15 @@ pub fn print_tree<Msg>(root: &Node<Msg>) {
         let new_string = lines_string + bar;
 
         match &node.content {
-            crate::dom::NodeContent::Element(element_node) => {
+            crate::dom::RetainedNodeContent::Element(element_node) => {
                 let num_children = element_node.children.len();
                 for (index, child) in &mut element_node.children.iter().enumerate() {
                     let has_sibling = index < num_children - 1;
                     print_node(child, has_sibling, new_string.clone());
                 }
             }
-            crate::dom::NodeContent::Text(_) => {}
-            crate::dom::NodeContent::Renderable(_) => {}
+            crate::dom::RetainedNodeContent::Text(_) => {}
+            crate::dom::RetainedNodeContent::Renderable(_) => {}
         }
 
         // Recurse into children

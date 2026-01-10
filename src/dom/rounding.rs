@@ -1,4 +1,4 @@
-use crate::Node;
+use crate::dom::RetainedNode;
 use taffy::{Layout, Size};
 
 /// Rounds the calculated layout to exact pixel values
@@ -13,16 +13,11 @@ use taffy::{Layout, Size};
 ///
 /// In order to prevent innacuracies caused by rounding already-rounded values, we read from `unrounded_layout`
 /// and write to `final_layout`.
-pub fn round_layout<M>(root: &mut Node<M>) {
+pub fn round_layout<M>(root: &mut RetainedNode<M>) {
     return round_layout_inner(root, 0.0, 0.0);
 
     /// Recursive function to apply rounding to all descendents
-    fn round_layout_inner<M>(
-        // tree: &mut impl RoundTree,
-        node: &mut Node<M>,
-        cumulative_x: f32,
-        cumulative_y: f32,
-    ) {
+    fn round_layout_inner<M>(node: &mut RetainedNode<M>, cumulative_x: f32, cumulative_y: f32) {
         let unrounded_layout = node.get_unrounded_layout();
         let mut layout = unrounded_layout;
 
@@ -73,13 +68,13 @@ pub fn round_layout<M>(root: &mut Node<M>) {
         node.set_final_layout(&layout);
 
         match &mut node.content {
-            crate::dom::NodeContent::Element(element_node) => {
+            crate::dom::RetainedNodeContent::Element(element_node) => {
                 for child in &mut element_node.children {
                     round_layout_inner(child, cumulative_x, cumulative_y);
                 }
             }
-            crate::dom::NodeContent::Text(_) => {}
-            crate::dom::NodeContent::Renderable(_) => {}
+            crate::dom::RetainedNodeContent::Text(_) => {}
+            crate::dom::RetainedNodeContent::Renderable(_) => {}
         }
     }
 

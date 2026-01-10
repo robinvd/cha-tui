@@ -16,7 +16,7 @@ use chatui::event::{Event, Key, KeyCode};
 use chatui::{
     HighlightLayerId, InputMsg, InputState, InputStyle, Program, ScrollMsg, ScrollState, Style,
     TextSpan, Transition, block_with_title, column, default_input_keybindings, input, modal,
-    rich_text, text,
+    rich_text_retained, text,
 };
 use color_eyre::eyre::WrapErr;
 use highlight::DocumentHighlighter;
@@ -580,7 +580,7 @@ fn key_matches_char(key: &Key, target: char) -> bool {
     matches!(key.code, KeyCode::Char(ch) if matches_ignore_case(ch, target))
 }
 
-fn view(model: &Model) -> chatui::Node<Msg> {
+fn view(model: &Model) -> chatui::Node<'_, Msg> {
     let raw_editor = input::<Msg>("text-editor-input", &model.input, &model.style, Msg::Input)
         .with_width(Dimension::percent(1.0))
         .with_height(Dimension::percent(1.0))
@@ -606,7 +606,7 @@ fn view(model: &Model) -> chatui::Node<Msg> {
     column(items).with_fill()
 }
 
-fn render_status_bar(model: &Model) -> chatui::Node<Msg> {
+fn render_status_bar(model: &Model) -> chatui::Node<'_, Msg> {
     let dirty_symbol = if model.dirty { '+' } else { ' ' };
 
     let shortcuts = "Ctrl-S save  Ctrl-Q/Esc quit";
@@ -631,9 +631,10 @@ fn render_status_bar(model: &Model) -> chatui::Node<Msg> {
         TextSpan::new(shortcuts, status_bar_style()),
     ]);
 
-    rich_text(spans)
+    rich_text_retained(spans)
         .with_width(Dimension::percent(1.0))
         .with_style(status_bar_style())
+        .into_node()
 }
 
 fn status_bar_style() -> Style {
@@ -661,7 +662,7 @@ fn ellipsize_left(text: &str, max_chars: usize) -> String {
     }
 }
 
-fn render_confirm_quit_modal() -> chatui::Node<Msg> {
+fn render_confirm_quit_modal() -> chatui::Node<'static, Msg> {
     let title = text::<Msg>("Quit without saving?").with_style(Style::bold());
     let body = text::<Msg>("y/Enter: quit, n/Esc: keep editing").with_style(Style::dim());
     let reminder = text::<Msg>("Ctrl-S saves before quitting.").with_style(Style::dim());
@@ -746,8 +747,8 @@ mod tests {
 
         let mut model = Model::load(path).expect("load model");
         model.dirty = true;
-        let mut node = view(&model);
-        let rendered = render_node_to_string(&mut node, 40, 10).expect("render view");
+        let node = view(&model);
+        let rendered = render_node_to_string(node, 40, 10).expect("render view");
         assert!(
             rendered.contains("[+]"),
             "status bar should show plus indicator for dirty buffers: {rendered}"
@@ -762,8 +763,8 @@ mod tests {
 
         let mut model = Model::load(path).expect("load model");
         model.status = Some(Status::success("Saved OK"));
-        let mut node = view(&model);
-        let rendered = render_node_to_string(&mut node, 80, 12).expect("render view");
+        let node = view(&model);
+        let rendered = render_node_to_string(node, 80, 12).expect("render view");
         assert!(
             rendered.contains("Saved OK"),
             "status message should appear in view: {rendered}"
@@ -778,8 +779,8 @@ mod tests {
 
         let mut model = Model::load(path).expect("load model");
         model.confirm_quit = true;
-        let mut node = view(&model);
-        let rendered = render_node_to_string(&mut node, 60, 15).expect("render view");
+        let node = view(&model);
+        let rendered = render_node_to_string(node, 60, 15).expect("render view");
         assert!(
             rendered.contains("Quit without saving?"),
             "confirm modal should render when requested: {rendered}"

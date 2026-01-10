@@ -18,12 +18,14 @@ use std::result::Result as StdResult;
 use chatui::components::scroll::{
     ScrollAxis, ScrollMsg, ScrollState, ScrollTarget, scrollable_content,
 };
+#[cfg(test)]
+use chatui::dom::RetainedNode;
 use chatui::dom::{Color, Node, TextSpan, renderable};
 use chatui::event::{Event, Key, KeyCode};
 use chatui::program::TaskFn;
 use chatui::{
     InputMsg, InputState, InputStyle, Program, Style, Transition, TreeNodeKind, block_with_title,
-    column, default_input_keybindings, input, modal, rich_text, row, text,
+    column, default_input_keybindings, input, modal, rich_text_retained, row, text,
 };
 use chatui::{TreeMsg, TreeNode, TreeState, TreeStyle, tree_view};
 use facet::Facet;
@@ -388,7 +390,7 @@ fn handle_fuzzy_key(model: &mut Model, key: Key) -> Transition<Msg> {
     update(model, Msg::Fuzzy(FuzzyMsg::Inner(inner_msg)))
 }
 
-fn view(model: &Model) -> Node<Msg> {
+fn view(model: &Model) -> Node<'_, Msg> {
     let layout = row(vec![
         render_left_pane(model)
             .with_flex_grow(1.)
@@ -421,12 +423,13 @@ fn view(model: &Model) -> Node<Msg> {
         header_spans.push(TextSpan::new(error, error_style()));
     }
 
-    let header_left = rich_text::<Msg>(header_spans)
+    let header_left = rich_text_retained::<Msg>(header_spans)
         .with_flex_grow(1.)
         .with_flex_shrink(1.)
         .with_flex_basis(Dimension::ZERO)
         .with_min_width(Dimension::ZERO)
-        .with_id("header-title");
+        .with_id("header-title")
+        .into_node();
 
     let header_right = if let Some(spec) = model.view_mode.spec() {
         let mut spans = vec![
@@ -436,7 +439,9 @@ fn view(model: &Model) -> Node<Msg> {
         if model.status_loading {
             spans.push(TextSpan::new("  refreshing…", Style::dim()));
         }
-        rich_text::<Msg>(spans).with_id("header-diff-spec")
+        rich_text_retained::<Msg>(spans)
+            .with_id("header-diff-spec")
+            .into_node()
     } else {
         let branch_label = model
             .current_branch()
@@ -449,7 +454,9 @@ fn view(model: &Model) -> Node<Msg> {
         if model.status_loading {
             branch_spans.push(TextSpan::new("  refreshing…", Style::dim()));
         }
-        rich_text::<Msg>(branch_spans).with_id("header-branch")
+        rich_text_retained::<Msg>(branch_spans)
+            .with_id("header-branch")
+            .into_node()
     };
 
     let header = row(vec![header_left, header_right])
@@ -479,7 +486,7 @@ fn view(model: &Model) -> Node<Msg> {
     layered
 }
 
-fn render_left_pane(model: &Model) -> Node<Msg> {
+fn render_left_pane(model: &Model) -> Node<'_, Msg> {
     let fuzzy_state = model.fuzzy_finder();
     let fuzzy_focus = fuzzy_state.map(|s| s.original_focus);
     match &model.view_mode {
@@ -492,7 +499,7 @@ fn render_working_tree_pane(
     wt: &WorkingTreeState,
     focus: Focus,
     fuzzy_focus: Option<Focus>,
-) -> Node<Msg> {
+) -> Node<'_, Msg> {
     let unstaged_content = if fuzzy_focus == Some(Focus::Unstaged) {
         render_fuzzy_finder_inline(wt.fuzzy_finder.as_ref().unwrap())
     } else {
@@ -590,7 +597,10 @@ fn render_working_tree_pane(
     .with_id("left-pane")
 }
 
-fn render_changed_pane(diff: &DiffModeState, fuzzy_state: Option<&FuzzyFinderState>) -> Node<Msg> {
+fn render_changed_pane<'a>(
+    diff: &'a DiffModeState,
+    fuzzy_state: Option<&'a FuzzyFinderState>,
+) -> Node<'a, Msg> {
     let is_fuzzy_active = fuzzy_state.is_some();
     let changed_content = if is_fuzzy_active {
         render_fuzzy_finder_inline(fuzzy_state.unwrap())
@@ -643,12 +653,12 @@ fn render_changed_pane(diff: &DiffModeState, fuzzy_state: Option<&FuzzyFinderSta
     .with_id("left-pane")
 }
 
-fn render_file_tree(
+fn render_file_tree<'a>(
     id_prefix: &'static str,
-    tree: &TreeState<FileNodeId>,
+    tree: &'a TreeState<FileNodeId>,
     is_active: bool,
     map_msg: impl Fn(TreeMsg<FileNodeId>) -> Msg + 'static,
-) -> Node<Msg> {
+) -> Node<'a, Msg> {
     if tree.visible().is_empty() {
         return column(vec![text::<Msg>("(no files)").with_style(inactive_style())])
             .with_min_height(Dimension::ZERO)
@@ -665,6 +675,7 @@ fn render_file_tree(
         .with_min_height(Dimension::ZERO)
         .with_flex_grow(1.)
         .with_flex_basis(Dimension::ZERO)
+        .into_node()
 }
 
 fn file_tree_style() -> TreeStyle {
@@ -680,7 +691,7 @@ fn file_tree_style() -> TreeStyle {
     }
 }
 
-fn render_diff_pane(model: &Model) -> Node<Msg> {
+fn render_diff_pane(model: &Model) -> Node<'_, Msg> {
     let mut diff_title = match model.current_entry() {
         Some(entry) => {
             if model.diff_truncated {
@@ -727,7 +738,7 @@ fn render_diff_pane(model: &Model) -> Node<Msg> {
         .with_id("diff-pane")
 }
 
-fn render_shortcuts_bar(model: &Model) -> Node<Msg> {
+fn render_shortcuts_bar(model: &Model) -> Node<'_, Msg> {
     let shortcuts = shortcuts::display_shortcuts(model);
     let items: Vec<Node<Msg>> = shortcuts
         .into_iter()
@@ -739,7 +750,7 @@ fn render_shortcuts_bar(model: &Model) -> Node<Msg> {
                 TextSpan::new(shortcut.description, shortcut_description_style()),
             ];
 
-            let item = row(vec![rich_text::<Msg>(spans)])
+            let item = row(vec![rich_text_retained::<Msg>(spans).into_node()])
                 .with_padding_2d(1, 0)
                 .with_flex_grow(0.)
                 .with_flex_shrink(0.)
@@ -772,7 +783,7 @@ fn render_shortcuts_bar(model: &Model) -> Node<Msg> {
                 .with_overflow_x(taffy::Overflow::Clip),
             // Make the help toggle in the shortcuts bar clickable so users can switch
             // between the compact and expanded views via mouse.
-            rich_text(&[
+            rich_text_retained(vec![
                 TextSpan::new("?", shortcut_key_style()),
                 TextSpan::new(" ", Style::default()),
                 TextSpan::new(
@@ -785,7 +796,8 @@ fn render_shortcuts_bar(model: &Model) -> Node<Msg> {
                 ),
             ])
             .on_click(|| Msg::Global(GlobalMsg::ToggleShortcutsHelp))
-            .with_id("more-less-button"),
+            .with_id("more-less-button")
+            .into_node(),
         ])],
     )
     .with_min_height(Dimension::ZERO)
@@ -794,7 +806,7 @@ fn render_shortcuts_bar(model: &Model) -> Node<Msg> {
     .with_id("shortcuts-bar")
 }
 
-fn render_diff_lines(lines: &[DiffLine], show_line_numbers: bool) -> Node<Msg> {
+fn render_diff_lines(lines: &[DiffLine], show_line_numbers: bool) -> Node<'_, Msg> {
     if lines.is_empty() {
         return column(vec![
             text::<Msg>("No diff available").with_style(inactive_style()),
@@ -814,7 +826,7 @@ fn render_diff_lines(lines: &[DiffLine], show_line_numbers: bool) -> Node<Msg> {
     .with_id("diff_lines")
 }
 
-fn render_commit_modal(state: &CommitModal) -> Node<Msg> {
+fn render_commit_modal(state: &CommitModal) -> Node<'_, Msg> {
     let title = text::<Msg>("Commit staged changes").with_style(Style::bold());
     let input_style = commit_input_style();
 
@@ -860,9 +872,9 @@ fn commit_input_style() -> InputStyle {
     style
 }
 
-fn render_delete_modal(state: &DeleteModal) -> Node<Msg> {
+fn render_delete_modal(state: &DeleteModal) -> Node<'static, Msg> {
     let title = text::<Msg>("Delete unstaged changes?").with_style(Style::bold());
-    let details = text::<Msg>(&state.display_text()).with_style(Style::dim());
+    let details = chatui::text_owned::<Msg>(state.display_text()).with_style(Style::dim());
     let instructions = text::<Msg>("y/Enter to confirm, n/Esc to cancel").with_style(Style::dim());
 
     let content = column(vec![title, details, instructions])
@@ -878,7 +890,7 @@ fn render_delete_modal(state: &DeleteModal) -> Node<Msg> {
     .with_id("delete-modal")
 }
 
-fn render_fuzzy_finder_inline(state: &FuzzyFinderState) -> Node<Msg> {
+fn render_fuzzy_finder_inline(state: &FuzzyFinderState) -> Node<'_, Msg> {
     fuztea::view(&state.finder, |msg| Msg::Fuzzy(FuzzyMsg::Inner(msg)))
 }
 
@@ -3215,13 +3227,14 @@ mod tests {
         width: u16,
         height: u16,
     ) -> Vec<String> {
-        let mut node = render_file_tree("test-tree", tree, is_active, |tree_msg| Msg::Section {
+        let node = render_file_tree("test-tree", tree, is_active, |tree_msg| Msg::Section {
             focus: Focus::Unstaged,
             msg: SectionMsg::Tree(tree_msg),
         })
         .with_width(Dimension::percent(1.0))
         .with_height(Dimension::percent(1.0));
 
+        let mut node: RetainedNode<Msg> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -3403,9 +3416,10 @@ mod tests {
         assert!(added_numbers.old.is_none());
         assert_eq!(added_numbers.new, Some(1));
 
-        let mut node = render_diff_lines(&lines, true)
+        let node = render_diff_lines(&lines, true)
             .with_width(Dimension::percent(1.0))
             .with_height(Dimension::percent(1.0));
+        let mut node: RetainedNode<Msg> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -3536,9 +3550,10 @@ mod tests {
             .diff_scroll
             .set_offset_for(ScrollAxis::Horizontal, 8.0);
 
-        let mut pane = render_diff_pane(&model)
+        let pane = render_diff_pane(&model)
             .with_width(Dimension::percent(1.0))
             .with_height(Dimension::percent(1.0));
+        let mut pane: RetainedNode<Msg> = pane.into();
         compute_root_layout(
             &mut pane,
             u64::MAX.into(),
@@ -3594,9 +3609,11 @@ mod tests {
             Style::default(),
         )];
         let line = DiffLine::from_spans(with_prefix('+', spans));
-        let mut node = render_diff_lines(&[line], false)
+        let binding = [line];
+        let node = render_diff_lines(&binding, false)
             .with_width(Dimension::length(40.0))
             .with_height(Dimension::length(1.0));
+        let mut node: RetainedNode<Msg> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),

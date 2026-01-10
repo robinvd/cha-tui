@@ -182,7 +182,7 @@ pub fn modal_update(state: &mut ModalState, msg: ModalMsg) -> ModalResult {
 pub fn modal_view<Msg: Clone + 'static>(
     state: &ModalState,
     wrap_input: impl Fn(ModalMsg) -> Msg + 'static,
-) -> Node<Msg> {
+) -> Node<'_, Msg> {
     let (title, input_state, scroll, vcs_label) = match state {
         ModalState::NewProject { input, scroll } => ("Add project", input, scroll, None),
         ModalState::NewWorktree {

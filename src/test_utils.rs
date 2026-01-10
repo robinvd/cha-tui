@@ -2,7 +2,7 @@ use std::convert::TryInto;
 
 use crate::ProgramError;
 use crate::buffer::DoubleBuffer;
-use crate::dom::{Node, rounding::round_layout};
+use crate::dom::{RetainedNode, rounding::round_layout};
 use crate::event::Size;
 use crate::palette::Palette;
 use crate::render::Renderer;
@@ -10,7 +10,7 @@ use crate::render::Renderer;
 use taffy::compute_root_layout;
 use taffy::prelude::AvailableSpace;
 
-fn layout_node<Msg>(node: &mut Node<Msg>, size: Size) {
+fn layout_node<Msg>(node: &mut RetainedNode<Msg>, size: Size) {
     compute_root_layout(
         node,
         u64::MAX.into(),
@@ -44,19 +44,20 @@ fn try_size(width: usize, height: usize) -> Result<Size, ProgramError> {
 ///
 /// The layout is recomputed for the provided bounds before rendering.
 pub fn render_node_to_lines<Msg>(
-    node: &mut Node<Msg>,
+    node: impl Into<RetainedNode<Msg>>,
     width: usize,
     height: usize,
 ) -> Result<Vec<String>, ProgramError> {
+    let mut node: RetainedNode<Msg> = node.into();
     let size = try_size(width, height)?;
 
-    layout_node(node, size);
+    layout_node(&mut node, size);
 
     let mut buffer = DoubleBuffer::new(width, height);
     let palette = Palette::default();
     {
         let mut renderer = Renderer::new(&mut buffer, &palette);
-        renderer.render(node, size)?;
+        renderer.render(&node, size)?;
     }
 
     Ok(buffer_to_lines(&buffer))
@@ -64,7 +65,7 @@ pub fn render_node_to_lines<Msg>(
 
 /// Render a node into a single string with newline-separated rows.
 pub fn render_node_to_string<Msg>(
-    node: &mut Node<Msg>,
+    node: impl Into<RetainedNode<Msg>>,
     width: usize,
     height: usize,
 ) -> Result<String, ProgramError> {

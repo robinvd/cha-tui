@@ -1,8 +1,8 @@
 use std::panic;
 
-use chatui::dom::{Color, Node};
+use chatui::dom::Color;
 use chatui::event::{Event, Key, KeyCode};
-use chatui::{Program, Style, Transition, block, column, row, text};
+use chatui::{Node, Program, Style, Transition, block, column, row, text, text_owned};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 enum Focus {
@@ -35,8 +35,8 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
     }
 }
 
-fn view(model: &Model) -> Node<Msg> {
-    let header = text::<Msg>("TODOs (Esc/q quit from list, ↑/↓ move, space toggles, Enter adds)")
+fn view(model: &Model) -> Node<'_, Msg> {
+    let header = text("TODOs (Esc/q quit from list, ↑/↓ move, space toggles, Enter adds)")
         .with_style(Style::bold());
 
     let items = model
@@ -57,7 +57,7 @@ fn view(model: &Model) -> Node<Msg> {
     .with_fill()
 }
 
-fn render_input(model: &Model) -> Node<Msg> {
+fn render_input(model: &Model) -> Node<'_, Msg> {
     let cursor = if model.focus == Focus::Input {
         "_"
     } else {
@@ -75,8 +75,8 @@ fn render_input(model: &Model) -> Node<Msg> {
     };
 
     block(vec![column(vec![
-        text::<Msg>("New TODO (Enter adds):"),
-        text::<Msg>(prompt).with_style(value_style),
+        text("New TODO (Enter adds):"),
+        text_owned(prompt).with_style(value_style),
     ])])
 }
 
@@ -198,9 +198,13 @@ fn handle_char(model: &mut Model, key: Key, ch: char) -> Transition<Msg> {
     }
 }
 
-fn render_item(item: &Item, highlighted: bool) -> Node<Msg> {
+fn render_item(item: &Item, highlighted: bool) -> Node<'_, Msg> {
     let marker = if item.completed { "[x]" } else { "[ ]" };
-    let text_node = text::<Msg>(format!("{} {}", marker, item.title));
+    // Note: we use text_owned here because we need to format (concatenate strings)
+    // In a real app with larger strings, you'd want to either store formatted strings
+    // in the model or use a more efficient approach
+    let text_content = format!("{} {}", marker, item.title);
+    let text_node = text_owned(text_content);
     let styled_text = if highlighted {
         text_node.with_style(Style::fg(Color::Cyan))
     } else {
@@ -351,7 +355,8 @@ mod tests {
             completed: false,
         };
 
-        let node = render_item(&item, true);
+        let node_ref = render_item(&item, true);
+        let node: Node<Msg> = node_ref.into();
 
         let row = node.into_element().expect("expected row element");
         match row.children.first() {
@@ -372,7 +377,8 @@ mod tests {
             completed: false,
         };
 
-        let node = render_item(&item, false);
+        let node_ref = render_item(&item, false);
+        let node: Node<Msg> = node_ref.into();
 
         let row = node.into_element().expect("expected row element");
         match row.children.first() {
@@ -549,7 +555,8 @@ mod tests {
             focus: Focus::List,
         };
 
-        let root = view(&model);
+        let root_ref = view(&model);
+        let root: Node<Msg> = root_ref.into();
         let column = root.into_element().expect("expected column element");
         let mut column_children = column.children.into_iter();
         let block = column_children
@@ -601,7 +608,8 @@ mod tests {
             focus: Focus::Input,
         };
 
-        let root = view(&model);
+        let root_ref = view(&model);
+        let root: Node<Msg> = root_ref.into();
         let column = root.into_element().expect("expected column element");
         let mut column_children = column.children.into_iter();
         let block = column_children

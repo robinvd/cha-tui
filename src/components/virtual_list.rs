@@ -239,12 +239,12 @@ pub fn default_keybindings<UpdateMsg>(
     Some(map(action))
 }
 
-pub fn virtual_list<Msg>(
+pub fn virtual_list<'a, Msg>(
     id: &'static str,
     state: &VirtualListState,
     map_msg: impl Fn(VirtualListAction) -> Msg + 'static,
-    render_item: impl for<'a> Fn(usize, bool, &mut RenderContext<'a>) + 'static,
-) -> Node<Msg>
+    render_item: impl for<'r> Fn(usize, bool, &mut RenderContext<'r>) + 'static,
+) -> Node<'a, Msg>
 where
     Msg: 'static,
 {
@@ -314,6 +314,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dom::RetainedNode;
     use crate::dom::rounding::round_layout;
     use crate::event::{Key, MouseButton, MouseEvent, MouseEventKind};
     use crate::test_utils::render_node_to_string;
@@ -345,7 +346,7 @@ mod tests {
             },
         );
 
-        let mut node = node;
+        let mut node: RetainedNode<VirtualListAction> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -356,7 +357,7 @@ mod tests {
         );
         round_layout(&mut node);
 
-        let rendered = render_node_to_string(&mut node, 12, 3).expect("render list");
+        let rendered = render_node_to_string(node, 12, 3).expect("render list");
         assert!(rendered.contains("> row-1"), "rendered:\n{rendered}");
     }
 

@@ -221,7 +221,7 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
     Transition::Continue
 }
 
-fn view(model: &Model) -> chatui::Node<Msg> {
+fn view(model: &Model) -> chatui::Node<'_, Msg> {
     let style = DataTableStyle {
         alternate_row_style: Some(Style {
             bg: Some(Color::rgba(30, 30, 40, 255)),
@@ -236,7 +236,8 @@ fn view(model: &Model) -> chatui::Node<Msg> {
 
     let table = data_table_view(&model.table_state, &style, Msg::TableEvent)
         .with_flex_grow(1.0)
-        .with_width(Dimension::percent(1.));
+        .with_width(Dimension::percent(1.))
+        .into_node();
 
     column(vec![
         text(format!("Directory: {}", model.current_dir.display())),
@@ -329,9 +330,9 @@ mod tests {
 
         let mut model = Model::new(root_path.clone());
 
-        let mut root_view = view(&model);
+        let root_view = view(&model);
         let rendered_root =
-            render_node_to_string(&mut root_view, 80, 12).expect("render root directory");
+            render_node_to_string(root_view, 80, 12).expect("render root directory");
         assert!(
             rendered_root.contains("nested/"),
             "root view should list nested directory"
@@ -350,9 +351,9 @@ mod tests {
             "model should navigate into nested directory"
         );
 
-        let mut nested_view = view(&model);
+        let nested_view = view(&model);
         let rendered_nested =
-            render_node_to_string(&mut nested_view, 80, 12).expect("render nested directory");
+            render_node_to_string(nested_view, 80, 12).expect("render nested directory");
         assert!(
             rendered_nested.contains("inner.txt"),
             "nested view should show inner.txt"
@@ -368,9 +369,9 @@ mod tests {
         ));
         assert_eq!(model.current_dir, root_path);
 
-        let mut final_view = view(&model);
+        let final_view = view(&model);
         let rendered_final =
-            render_node_to_string(&mut final_view, 80, 12).expect("render after returning");
+            render_node_to_string(final_view, 80, 12).expect("render after returning");
         assert!(
             rendered_final.contains("nested/"),
             "final view should list nested directory again"

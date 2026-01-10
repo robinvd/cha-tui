@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use taffy::{Dimension, FlexWrap};
 
+#[cfg(test)]
+use chatui::RetainedNode;
 use chatui::event::{Event, Key, KeyCode};
 use chatui::{
     InputMsg, InputState, Node, Program, ScrollAxis, ScrollMsg, ScrollState, ScrollTarget,
@@ -2793,7 +2795,7 @@ fn delete_selected(model: &mut Model) {
     }
 }
 
-fn terminal_pane(model: &Model) -> Node<Msg> {
+fn terminal_pane(model: &Model) -> Node<'_, Msg> {
     let layout_kind = model.active_layout();
     let focus = model.focus.is_terminal();
     let on_strip_scroll: Rc<dyn Fn(ScrollMsg) -> Msg> = Rc::new(Msg::StripScroll);
@@ -2852,7 +2854,7 @@ fn index_key_label(index: usize) -> String {
 }
 
 /// Fullscreen welcome view shown when no projects are active.
-fn welcome_view(model: &Model) -> Node<Msg> {
+fn welcome_view(model: &Model) -> Node<'_, Msg> {
     let new_project_key = model
         .keymap
         .find_chord(keymap::Scope::Sidebar, Action::NewProject)
@@ -2917,7 +2919,7 @@ fn welcome_view(model: &Model) -> Node<Msg> {
         .with_align_items(taffy::AlignItems::Center)
 }
 
-fn render_fuzzy_finder_modal(state: &FuzzyFinderState) -> Node<Msg> {
+fn render_fuzzy_finder_modal(state: &FuzzyFinderState) -> Node<'_, Msg> {
     let (content, title) = match &state.kind {
         FuzzyFinderKind::Layout(finder) => (
             fuztea::view(finder, |msg| Msg::Fuzzy(FuzzyMsg::Inner(msg)))
@@ -2948,7 +2950,7 @@ fn render_fuzzy_finder_modal(state: &FuzzyFinderState) -> Node<Msg> {
     chatui::modal(vec![modal_block]).with_id("fuzzy-modal")
 }
 
-fn view(model: &Model) -> Node<Msg> {
+fn view(model: &Model) -> Node<'_, Msg> {
     // Show fullscreen welcome when no projects are active
     if !has_active_projects(&model.projects) {
         let mut nodes = vec![welcome_view(model)];
@@ -3094,19 +3096,19 @@ mod tests {
     }
 
     fn collect_terminal_layouts(
-        node: &Node<Msg>,
+        node: &RetainedNode<Msg>,
         origin: (f32, f32),
         layouts: &mut Vec<TerminalLayout>,
     ) {
-        let layout = node.layout_state().layout;
-        let x = origin.0 + layout.location.x;
-        let y = origin.1 + layout.location.y;
+        let layout = &node.layout_state();
+        let x = origin.0 + layout.layout.location.x;
+        let y = origin.1 + layout.layout.location.y;
 
         if let Some(renderable) = node.as_renderable() {
             if renderable.debug_label() == "terminal" {
                 layouts.push(TerminalLayout {
-                    width: layout.size.width,
-                    height: layout.size.height,
+                    width: layout.layout.size.width,
+                    height: layout.layout.size.height,
                     x,
                     y,
                 });
@@ -3120,13 +3122,13 @@ mod tests {
     }
 
     fn collect_divider_layouts(
-        node: &Node<Msg>,
+        node: &RetainedNode<Msg>,
         origin: (f32, f32),
         layouts: &mut Vec<DividerLayout>,
     ) {
-        let layout = node.layout_state().layout;
-        let x = origin.0 + layout.location.x;
-        let y = origin.1 + layout.location.y;
+        let layout = &node.layout_state();
+        let x = origin.0 + layout.layout.location.x;
+        let y = origin.1 + layout.layout.location.y;
 
         if let Some(renderable) = node.as_renderable() {
             if renderable.debug_label() == "divider" {
@@ -3136,8 +3138,8 @@ mod tests {
                     .expect("divider renderable");
                 layouts.push(DividerLayout {
                     orientation: divider.orientation,
-                    width: layout.size.width,
-                    height: layout.size.height,
+                    width: layout.layout.size.width,
+                    height: layout.layout.size.height,
                     x,
                     y,
                 });
@@ -3851,7 +3853,8 @@ mod tests {
             session: first_session,
         });
 
-        let mut node = terminal_pane(&model).with_fill();
+        let node = terminal_pane(&model).with_fill();
+        let mut node: RetainedNode<Msg> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -3893,7 +3896,8 @@ mod tests {
         });
         model.set_active_layout(LayoutKind::Wide);
 
-        let mut node = terminal_pane(&model).with_fill();
+        let node = terminal_pane(&model).with_fill();
+        let mut node: RetainedNode<Msg> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -3936,7 +3940,8 @@ mod tests {
         });
         model.set_active_layout(LayoutKind::Wide);
 
-        let mut node = terminal_pane(&model).with_fill();
+        let node = terminal_pane(&model).with_fill();
+        let mut node: RetainedNode<Msg> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -3992,7 +3997,8 @@ mod tests {
             session: second_session,
         });
 
-        let mut node = terminal_pane(&model).with_fill();
+        let node = terminal_pane(&model).with_fill();
+        let mut node: RetainedNode<Msg> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -4042,7 +4048,8 @@ mod tests {
         update(&mut model, Msg::NewSession);
         update(&mut model, Msg::NewSession);
 
-        let mut node = terminal_pane(&model).with_fill();
+        let node = terminal_pane(&model).with_fill();
+        let mut node: RetainedNode<Msg> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -4108,13 +4115,14 @@ mod tests {
         model.focus = Focus::Sidebar;
 
         let project_name = &model.projects[0].name;
-        let mut node = sidebar_view(
+        let node = sidebar_view(
             &model.sidebar,
             true,
             |msg| Msg::Sidebar(SidebarMsg::Tree(msg)),
             || Msg::FocusSidebar,
         )
         .with_fill();
+        let mut node: RetainedNode<Msg> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -4175,9 +4183,11 @@ mod tests {
         update(&mut model, Msg::NewSession);
 
         // Create a test view
-        let mut node = terminal_pane(&model);
+        let node = terminal_pane(&model);
+        let node_to_render = terminal_pane(&model);
 
         // Layout with a reasonable size
+        let mut node: RetainedNode<Msg> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -4189,7 +4199,7 @@ mod tests {
         round_layout(&mut node);
 
         // Render to check for visual issues (content may be empty in test environment)
-        let _lines = render_node_to_lines(&mut node, 100, 24).expect("render should succeed");
+        let _lines = render_node_to_lines(node_to_render, 100, 24).expect("render should succeed");
 
         // Check that the node has reasonable dimensions
         let layout = node.layout_state().layout;
@@ -4228,33 +4238,33 @@ mod tests {
     }
 
     /// Helper to collect terminal layouts from the strip view
-    fn collect_terminal_layouts_strip(node: &Node<Msg>) -> Vec<TerminalLayout> {
+    fn collect_terminal_layouts_strip(node: &RetainedNode<Msg>) -> Vec<TerminalLayout> {
         let mut layouts = Vec::new();
         collect_terminal_layouts_recursive_strip(node, (0.0, 0.0), &mut layouts);
         layouts
     }
 
     fn collect_terminal_layouts_recursive_strip(
-        node: &Node<Msg>,
+        node: &RetainedNode<Msg>,
         origin: (f32, f32),
         layouts: &mut Vec<TerminalLayout>,
     ) {
-        let layout = node.layout_state().layout;
-        let x = origin.0 + layout.location.x;
-        let y = origin.1 + layout.location.y;
+        let layout = &node.layout_state();
+        let x = origin.0 + layout.layout.location.x;
+        let y = origin.1 + layout.layout.location.y;
 
         if let Some(renderable) = node.as_renderable() {
             if renderable.debug_label() == "terminal" {
                 layouts.push(TerminalLayout {
-                    width: layout.size.width,
-                    height: layout.size.height,
+                    width: layout.layout.size.width,
+                    height: layout.layout.size.height,
                     x,
                     y,
                 });
             }
         }
         if let Some(element) = node.as_element() {
-            let new_origin = (origin.0 + layout.location.x, origin.1 + layout.location.y);
+            let new_origin = (x, y);
             for child in &element.children {
                 collect_terminal_layouts_recursive_strip(child, new_origin, layouts);
             }
@@ -4268,8 +4278,9 @@ mod tests {
             scroll: ScrollState::horizontal(),
         };
 
-        let mut node = modal_view(&modal_state, |_| panic!("no modal msg expected"));
+        let node = modal_view(&modal_state, |_| panic!("no modal msg expected"));
 
+        let mut node: RetainedNode<Msg> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -4356,7 +4367,8 @@ mod tests {
         // Open layout picker
         model.open_layout_picker();
 
-        let mut node = view(&model);
+        let node: RetainedNode<Msg> = view(&model).into();
+        let mut node: RetainedNode<Msg> = node.into();
         compute_root_layout(
             &mut node,
             u64::MAX.into(),
@@ -4367,7 +4379,7 @@ mod tests {
         );
         round_layout(&mut node);
 
-        let lines = render_node_to_lines(&mut node, 60, 20).expect("render should succeed");
+        let lines = render_node_to_lines(node, 60, 20).expect("render should succeed");
         let output = lines.join("\n");
 
         assert!(output.contains("Select Layout"), "Should show modal title");
@@ -4456,8 +4468,8 @@ mod tests {
         // By default, all projects are inactive
         assert!(!has_active_projects(&model.projects));
 
-        let mut node = view(&model);
-        let lines = render_node_to_lines(&mut node, 80, 24).expect("render succeeds");
+        let node = view(&model);
+        let lines = render_node_to_lines(node, 80, 24).expect("render succeeds");
         let content = lines.join("\n");
 
         assert!(
@@ -4488,8 +4500,8 @@ mod tests {
             .add_project(cwd.clone(), "project-beta".to_string())
             .expect("project added");
 
-        let mut node = view(&model);
-        let lines = render_node_to_lines(&mut node, 80, 24).expect("render succeeds");
+        let node = view(&model);
+        let lines = render_node_to_lines(node, 80, 24).expect("render succeeds");
         let content = lines.join("\n");
 
         assert!(
@@ -4528,8 +4540,8 @@ mod tests {
         }
 
         // Render with enough space for columns to wrap
-        let mut node = view(&model);
-        let lines = render_node_to_lines(&mut node, 120, 24).expect("render succeeds");
+        let node = view(&model);
+        let lines = render_node_to_lines(node, 120, 24).expect("render succeeds");
         let content = lines.join("\n");
 
         // All projects should still be visible
@@ -4583,8 +4595,8 @@ mod tests {
 
         assert!(has_active_projects(&model.projects));
 
-        let mut node = view(&model);
-        let lines = render_node_to_lines(&mut node, 80, 24).expect("render succeeds");
+        let node = view(&model);
+        let lines = render_node_to_lines(node, 80, 24).expect("render succeeds");
         let content = lines.join("\n");
 
         // Should NOT show welcome message

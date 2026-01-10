@@ -6,7 +6,13 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use crate::buffer::DoubleBuffer;
-use crate::dom::Node;
+use crate::dom::RetainedNodeContent;
+use crate::dom::patch::{PatchResult, patch_borrowed};
+
+// Type alias for the borrowed node returned by view functions
+pub type NodeRef<'a, Msg> = crate::dom::patch::NodeRef<'a, Msg>;
+// Type alias for the retained node stored in the program
+pub type RetainedNode<Msg> = crate::dom::RetainedNode<Msg>;
 use crate::error::ProgramError;
 use crate::event::{
     Event, Key, KeyCode, KeyEventKind, LocalMouseEvent, MediaKeyCode, ModifierKeyCode, MouseButton,
@@ -24,7 +30,8 @@ use termina::{PlatformTerminal, Terminal};
 use tracing::{info, warn};
 
 pub type UpdateFn<Model, Msg> = Box<dyn FnMut(&mut Model, Msg) -> Transition<Msg>>;
-pub type ViewFn<Model, Msg> = Box<dyn Fn(&Model) -> Node<Msg>>;
+/// View function now returns NodeRef which can borrow from the model
+pub type ViewFn<Model, Msg> = Box<dyn for<'a> Fn(&'a Model) -> NodeRef<'a, Msg>>;
 pub type EventFn<Msg> = Box<dyn Fn(Event) -> Option<Msg>>;
 pub type TaskFn<Msg> = Pin<Box<dyn Future<Output = Msg> + 'static>>;
 
@@ -69,7 +76,7 @@ pub struct Program<'a, Model, Msg> {
     view: ViewFn<Model, Msg>,
     event_mapper: EventFn<Msg>,
     current_size: Size,
-    current_view: Option<Node<Msg>>,
+    current_view: Option<RetainedNode<Msg>>,
     last_click: Option<LastClick>,
     palette: Palette,
     queued_quit: bool,
@@ -83,7 +90,7 @@ impl<'a, Model, Msg: 'static> Program<'a, Model, Msg> {
     pub fn new(
         model: &'a mut Model,
         update: impl FnMut(&mut Model, Msg) -> Transition<Msg> + 'static,
-        view: impl Fn(&Model) -> Node<Msg> + 'static,
+        view: impl for<'b> Fn(&'b Model) -> NodeRef<'b, Msg> + 'static,
     ) -> Self {
         let (snd, recv) = smol::channel::unbounded();
         Self {
@@ -516,16 +523,19 @@ impl<'a, Model, Msg: 'static> Program<'a, Model, Msg> {
     }
 
     fn rebuild_view(&mut self) {
-        let new_view = (self.view)(self.model);
+        // View now returns NodeRef which can borrow from the model
+        let new_view: NodeRef<'_, Msg> = (self.view)(self.model);
 
         if let Some(existing_view) = self.current_view.take() {
-            let patched = crate::dom::patch::patch(existing_view, new_view);
+            // Patch the retained node with the borrowed node
+            let patched = patch_borrowed(existing_view, new_view);
             self.current_view = Some(match patched {
-                crate::dom::patch::PatchResult::Patched { node, .. } => node,
-                crate::dom::patch::PatchResult::Replaced(replacement) => replacement,
+                PatchResult::Patched { node, .. } => node,
+                PatchResult::Replaced(replacement) => replacement,
             });
         } else {
-            self.current_view = Some(new_view);
+            // First render: convert borrowed node to owned
+            self.current_view = Some(new_view.into());
         }
 
         if let Some(view) = self.current_view.as_mut() {
@@ -543,7 +553,7 @@ impl<'a, Model, Msg: 'static> Program<'a, Model, Msg> {
 
             // TODO early exit if Transition::Quit
             let mut pending_resize_msgs: Vec<Msg> = Vec::new();
-            view.report_changed(&mut |node: &Node<Msg>| {
+            view.report_changed(&mut |node: &RetainedNode<Msg>| {
                 if let Some(resize_callback) = &node.on_resize
                     && let Some(msg) = resize_callback(&node.layout_state.layout)
                 {
@@ -580,7 +590,7 @@ impl<'a, Model, Msg: 'static> Program<'a, Model, Msg> {
         }
     }
 
-    fn collect_pending_scrolls(node: &mut Node<Msg>, effects: &mut Vec<ScrollEffect<Msg>>) {
+    fn collect_pending_scrolls(node: &mut RetainedNode<Msg>, effects: &mut Vec<ScrollEffect<Msg>>) {
         if let Some(pending) = node.take_pending_scroll()
             && let Some((target_top, target_height)) =
                 Self::target_geometry(node, pending.target_hash)
@@ -606,22 +616,26 @@ impl<'a, Model, Msg: 'static> Program<'a, Model, Msg> {
             }
         }
 
-        if let crate::dom::NodeContent::Element(element) = &mut node.content {
+        if let RetainedNodeContent::Element(element) = &mut node.content {
             for child in &mut element.children {
                 Self::collect_pending_scrolls(child, effects);
             }
         }
     }
 
-    fn target_geometry(node: &Node<Msg>, target_hash: u64) -> Option<(f32, f32)> {
-        fn helper<Msg>(node: &Node<Msg>, target_hash: u64, offset: f32) -> Option<(f32, f32)> {
+    fn target_geometry(node: &RetainedNode<Msg>, target_hash: u64) -> Option<(f32, f32)> {
+        fn helper<Msg>(
+            node: &crate::dom::RetainedNode<Msg>,
+            target_hash: u64,
+            offset: f32,
+        ) -> Option<(f32, f32)> {
             if node.hashed_id() == target_hash {
                 let layout = node.layout_state.layout;
                 return Some((offset, layout.size.height.max(0.0)));
             }
 
             match &node.content {
-                crate::dom::NodeContent::Element(element) => {
+                crate::dom::RetainedNodeContent::Element(element) => {
                     for child in &element.children {
                         let child_layout = child.layout_state.layout;
                         let child_offset = offset + child_layout.location.y;
@@ -631,8 +645,8 @@ impl<'a, Model, Msg: 'static> Program<'a, Model, Msg> {
                     }
                     None
                 }
-                crate::dom::NodeContent::Text(_) => None,
-                crate::dom::NodeContent::Renderable(_) => None,
+                crate::dom::RetainedNodeContent::Text(_) => None,
+                crate::dom::RetainedNodeContent::Renderable(_) => None,
             }
         }
 
@@ -901,7 +915,7 @@ fn map_media_key_code(code: termina::event::MediaKeyCode) -> MediaKeyCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::dom::{column, text};
+    use crate::dom::{Node, column, text};
 
     #[derive(Default)]
     struct CounterModel {
@@ -923,7 +937,7 @@ mod tests {
         }
     }
 
-    fn view(model: &CounterModel) -> Node<Msg> {
+    fn view(model: &CounterModel) -> Node<'_, Msg> {
         column(vec![text(format!("count: {}", model.count))])
     }
 
@@ -969,7 +983,7 @@ mod tests {
         }
     }
 
-    fn click_view(_model: &ClickModel) -> Node<ClickMsg> {
+    fn click_view(_model: &ClickModel) -> Node<'_, ClickMsg> {
         text("button").on_click(|| ClickMsg::Click)
     }
 
@@ -1049,7 +1063,7 @@ mod tests {
         }
     }
 
-    fn double_click_view(_model: &DoubleClickModel) -> Node<DoubleClickMsg> {
+    fn double_click_view(_model: &DoubleClickModel) -> Node<'_, DoubleClickMsg> {
         text("button").on_mouse(|event| {
             if event.is_double_click() {
                 Some(DoubleClickMsg::Double)
@@ -1181,7 +1195,7 @@ mod tests {
         }
     }
 
-    fn task_view(_model: &TaskModel) -> Node<TaskMsg> {
+    fn task_view(_model: &TaskModel) -> Node<'_, TaskMsg> {
         text("task view")
     }
 

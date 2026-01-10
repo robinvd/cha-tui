@@ -2996,12 +2996,12 @@ impl WordKind {
     }
 }
 
-pub fn input<Msg>(
+pub fn input<'a, Msg>(
     id: &'static str,
     state: &InputState,
     style: &InputStyle,
     map_msg: impl Fn(InputMsg) -> Msg + 'static,
-) -> Node<Msg>
+) -> Node<'a, Msg>
 where
     Msg: 'static,
 {
@@ -4076,6 +4076,7 @@ pub fn default_keybindings<UpdateMsg>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dom::RetainedNode;
 
     #[test]
     fn insert_and_delete_text() {
@@ -4380,7 +4381,8 @@ mod tests {
     fn multiline_render_breaks_lines() {
         let state = InputState::with_value_multiline("foo\nbar");
         let style = InputStyle::default();
-        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+        let mut node: crate::dom::RetainedNode<()> =
+            crate::input::<()>("input", &state, &style, |_| ()).into();
 
         use crate::buffer::DoubleBuffer;
         use crate::dom::rounding::round_layout;
@@ -4429,7 +4431,8 @@ mod tests {
         let renderable = InputRenderable::new(&state, &style);
         assert_eq!(renderable.content_line_count, 2);
 
-        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+        let node = crate::input::<()>("input", &state, &style, |_| ());
+        let mut node: RetainedNode<()> = node.into();
 
         use crate::buffer::DoubleBuffer;
         use crate::dom::rounding::round_layout;
@@ -4616,7 +4619,8 @@ mod tests {
         let mut state = InputState::with_value("abc");
         state.update(InputMsg::MoveToStart { extend: false });
         let style = InputStyle::default();
-        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+        let node = crate::input::<()>("input", &state, &style, |_| ());
+        let mut node: RetainedNode<()> = node.into();
 
         use crate::buffer::{CursorShape, CursorState, DoubleBuffer};
         use crate::dom::rounding::round_layout;
@@ -4861,7 +4865,8 @@ mod tests {
 
         let style = InputStyle::default();
         // Build node and ensure it asks for x-scroll
-        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+        let node = crate::input::<()>("input", &state, &style, |_| ());
+        let mut node: RetainedNode<()> = node.into();
         // Layout and render to 8x1
         use crate::buffer::DoubleBuffer;
         use crate::dom::rounding::round_layout;
@@ -4903,7 +4908,8 @@ mod tests {
         // Move cursor to end to trigger scroll
         state.update(InputMsg::MoveToEnd { extend: false });
         let style = InputStyle::default();
-        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+        let node = crate::input::<()>("input", &state, &style, |_| ());
+        let mut node: RetainedNode<()> = node.into();
 
         use crate::buffer::DoubleBuffer;
         use crate::dom::rounding::round_layout;
@@ -4939,7 +4945,8 @@ mod tests {
         // Only the placeholder cell at the cursor position should adopt the cursor style.
         let state = InputState::with_value("hi");
         let style = InputStyle::default();
-        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+        let node = crate::input::<()>("input", &state, &style, |_| ());
+        let mut node: RetainedNode<()> = node.into();
 
         use crate::buffer::{CursorShape, CursorState, DoubleBuffer};
         use crate::dom::rounding::round_layout;
@@ -5004,7 +5011,8 @@ mod tests {
         style.cursor.bg = Some(crate::dom::Color::rgb(0x11, 0x22, 0x33));
         style.cursor.fg = Some(crate::dom::Color::rgb(0xee, 0xdd, 0xcc));
 
-        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+        let node = crate::input::<()>("input", &state, &style, |_| ());
+        let mut node: RetainedNode<()> = node.into();
 
         use crate::buffer::DoubleBuffer;
         use crate::event::Size;
@@ -5065,7 +5073,8 @@ mod tests {
         let mut state = InputState::with_value_multiline("foo\nbar");
         state.set_line_number_gutter(true);
         let style = InputStyle::default();
-        let mut node = crate::input::<()>("input", &state, &style, |_| ());
+        let node = crate::input::<()>("input", &state, &style, |_| ());
+        let mut node: RetainedNode<()> = node.into();
 
         use crate::buffer::DoubleBuffer;
         use crate::event::Size;
