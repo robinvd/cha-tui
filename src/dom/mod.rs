@@ -622,15 +622,11 @@ pub fn rich_text<'a, Msg>(spans: Vec<TextSpanRef<'a>>) -> Node<'a, Msg> {
 }
 
 pub fn renderable<'a, Msg>(widget: impl Renderable + 'static) -> Node<'a, Msg> {
-    Node::new(NodeContent::Renderable(Box::new(
-        widget,
-    )))
+    Node::new(NodeContent::Renderable(Box::new(widget)))
 }
 
 pub fn renderable_ref<'a, Msg>(widget: impl RenderableRef + 'a) -> Node<'a, Msg> {
-    Node::new(NodeContent::Renderable(Box::new(
-        widget,
-    )))
+    Node::new(NodeContent::Renderable(Box::new(widget)))
 }
 
 pub fn column<'a, Msg>(children: Vec<Node<'a, Msg>>) -> Node<'a, Msg> {

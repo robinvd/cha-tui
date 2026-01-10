@@ -1,6 +1,6 @@
 use crate::dom::{
-    ElementNode, Node, NodeContent, RenderablePatch, RetainedElementNode,
-    RetainedNode, RetainedNodeContent, TextNode, TextNodeRef,
+    ElementNode, Node, NodeContent, RenderablePatch, RetainedElementNode, RetainedNode,
+    RetainedNodeContent, TextNode, TextNodeRef,
 };
 
 pub type NodeRef<'a, Msg> = Node<'a, Msg>;
