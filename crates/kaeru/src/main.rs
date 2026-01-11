@@ -25,7 +25,7 @@ use chatui::{
     InputMsg, InputState, InputStyle, Program, ScrollMsg, ScrollState, Style, TextSpan, Transition,
     block_with_title, column, default_input_keybindings, input, row, scrollable_content, text,
 };
-use fuztea::{FuzzyFinder, FuzzyFinderEvent, FuzzyFinderMsg};
+use fuztea::{ColumnConfig, FuzzyFinder, FuzzyFinderEvent, FuzzyFinderMsg};
 use miette::{Context, IntoDiagnostic, Result, miette};
 use smol::channel;
 use smol::process::Command;
@@ -612,16 +612,24 @@ fn handle_key(model: &mut Model, key: Key) -> Transition<Msg> {
 
     if key.ctrl && matches!(key.code, KeyCode::Char('l')) {
         let sessions = model.session_io.load_sessions().unwrap_or_default();
-        let (finder, handle) = FuzzyFinder::new(|s: &SavedSession| {
-            let date_str = s
-                .date
-                .format(&time::format_description::well_known::Rfc3339)
-                .unwrap_or_default();
-            vec![date_str, s.prompt.clone(), s.id.clone()]
-        });
+        let config = ColumnConfig::default()
+            .with_column_names(vec!["Date".to_string(), "Prompt".to_string()]);
+
+        let (mut finder, handle) = FuzzyFinder::with_config(
+            |s: &SavedSession| {
+                let date_str = s
+                    .date
+                    .format(&time::format_description::well_known::Rfc3339)
+                    .unwrap_or_default();
+                vec![date_str, s.prompt.clone()]
+            },
+            config,
+        );
         for s in sessions {
             handle.push_item(s);
         }
+        // Force a tick to process injected items so they appear immediately
+        finder.tick();
         model.session_finder = Some(finder);
         return Transition::Continue;
     }
@@ -1492,6 +1500,34 @@ mod tests {
         model.input.update(InputMsg::InsertText("Line 2".to_string()));
         model.input.update(InputMsg::InsertChar('\n'));
         model.input.update(InputMsg::InsertText("Line 3".to_string()));
+
+        let node = view(&model);
+        let output = render_node_to_string(node, 80, 20).unwrap();
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn render_session_loader() {
+        let (command_tx, _) = channel::unbounded();
+        let (_, event_rx) = channel::unbounded();
+        let session_io = Arc::new(FakeIo::new());
+        
+        let _ = session_io.save_session(SavedSession {
+            id: "session-1".to_string(),
+            date: OffsetDateTime::UNIX_EPOCH,
+            prompt: "First session prompt".to_string(),
+        });
+        let _ = session_io.save_session(SavedSession {
+            id: "session-2".to_string(),
+            date: OffsetDateTime::UNIX_EPOCH + time::Duration::hours(1),
+            prompt: "Second session prompt".to_string(),
+        });
+
+        let mut model = Model::new(event_rx, command_tx, "test-server".to_string(), session_io);
+
+        let ctrl_l = Key::with_modifiers(KeyCode::Char('l'), true, false, false, false);
+        // We use the public update function which calls handle_key internally
+        update(&mut model, Msg::KeyPressed(ctrl_l));
 
         let node = view(&model);
         let output = render_node_to_string(node, 80, 20).unwrap();

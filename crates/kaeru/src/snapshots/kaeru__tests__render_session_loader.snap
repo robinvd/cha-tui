@@ -1,0 +1,25 @@
+---
+source: crates/kaeru/src/main.rs
+assertion_line: 1534
+expression: output
+---
+fuztea  Esc quits  Enter selects  Ctrl-n/p move  Ctrl-d/u page                  
+┌──────────────────────────────────────────────────────────────────────────────┐
+│>                                                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+Date                                    Prompt                                  
+1970-01-01T01:00:00Z                    Second session prompt                   
+1970-01-01T00:00:00Z                    First session prompt                    
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+2/2 matches
