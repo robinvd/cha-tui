@@ -300,6 +300,10 @@ impl<T: Clone + Send + Sync + PartialEq + 'static> FuzzyFinder<T> {
         let _ = self.refresh_matches(true);
     }
 
+    pub fn query(&self) -> String {
+        self.input.value()
+    }
+
     pub fn tick(&mut self) {
         let _ = self.refresh_matches(true);
     }

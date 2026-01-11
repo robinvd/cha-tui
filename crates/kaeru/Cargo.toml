@@ -8,9 +8,14 @@ agent-client-protocol = "0.9.0"
 async-trait = "0.1"
 chatui = { path = "../.." }
 chatui-markdown = { path = "../chatui-markdown" }
+directories = "5.0.1"
+fuztea = { path = "../fuztea" }
 miette = { version = "7", features = ["fancy"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 smol = "2"
 taffy = "0.9.1"
+time = { version = "0.3", features = ["formatting", "parsing", "serde", "local-offset"] }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [dev-dependencies]

@@ -4,11 +4,12 @@ use std::env;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::thread;
 
 use agent_client_protocol::{
     Agent, CancelNotification, Client, ClientCapabilities, ClientSideConnection, Content,
-    ContentBlock, Implementation, InitializeRequest, NewSessionRequest, PermissionOptionKind, Plan,
+    ContentBlock, Implementation, InitializeRequest, LoadSessionRequest, NewSessionRequest, PermissionOptionKind, Plan,
     PlanEntryPriority, PlanEntryStatus, PromptRequest, ProtocolVersion, RequestPermissionOutcome,
     RequestPermissionRequest, RequestPermissionResponse, SelectedPermissionOutcome,
     SessionNotification, SessionUpdate, StopReason, TextContent, ToolCall, ToolCallContent,
@@ -24,11 +25,16 @@ use chatui::{
     InputMsg, InputState, InputStyle, Program, ScrollMsg, ScrollState, Style, TextSpan, Transition,
     block_with_title, column, default_input_keybindings, input, row, scrollable_content, text,
 };
+use fuztea::{FuzzyFinder, FuzzyFinderEvent, FuzzyFinderMsg};
 use miette::{Context, IntoDiagnostic, Result, miette};
 use smol::channel;
 use smol::process::Command;
 use taffy::prelude::TaffyZero;
 use taffy::style::Dimension;
+use time::OffsetDateTime;
+
+mod session_store;
+use session_store::{RealIo, SavedSession, SessionIo};
 
 #[derive(Clone)]
 struct AgentArgs {
@@ -41,6 +47,7 @@ struct AgentArgs {
 enum AgentCommand {
     SendPrompt(String),
     CancelPrompt,
+    LoadSession(String),
 }
 
 #[derive(Clone, Debug)]
@@ -101,6 +108,8 @@ struct Model {
     server_label: String,
     pending_permission_idx: Option<usize>,
     tool_calls: HashMap<ToolCallId, ToolCall>,
+    session_finder: Option<FuzzyFinder<SavedSession>>,
+    session_io: Arc<dyn SessionIo>,
 }
 
 impl Model {
@@ -108,6 +117,7 @@ impl Model {
         events: channel::Receiver<AgentEvent>,
         commands: channel::Sender<AgentCommand>,
         server_label: String,
+        session_io: Arc<dyn SessionIo>,
     ) -> Self {
         let mut chat_scroll = ScrollState::new(ScrollBehavior::Vertical);
         chat_scroll.set_offset(0.0);
@@ -127,6 +137,8 @@ impl Model {
             server_label,
             pending_permission_idx: None,
             tool_calls: HashMap::new(),
+            session_finder: None,
+            session_io,
         }
     }
 
@@ -215,9 +227,10 @@ fn main() -> Result<()> {
 
     let args = parse_args()?;
     let server_label = args.server.clone();
-    let (command_tx, event_rx) = start_agent_thread(args)?;
+    let session_io = Arc::new(RealIo::new());
+    let (command_tx, event_rx) = start_agent_thread(args, session_io.clone())?;
 
-    let mut model = Model::new(event_rx, command_tx, server_label.clone());
+    let mut model = Model::new(event_rx, command_tx, server_label.clone(), session_io);
     let mut program = Program::new(&mut model, update, view).map_event(map_event);
 
     if let Err(err) = smol::block_on(program.run_async()) {
@@ -262,6 +275,7 @@ fn parse_args() -> Result<AgentArgs> {
 
 fn start_agent_thread(
     args: AgentArgs,
+    session_io: Arc<dyn SessionIo>,
 ) -> Result<(channel::Sender<AgentCommand>, channel::Receiver<AgentEvent>)> {
     let (command_tx, command_rx) = channel::unbounded();
     let (event_tx, event_rx) = channel::unbounded();
@@ -272,7 +286,7 @@ fn start_agent_thread(
         let events = event_tx.clone();
         let result = smol::block_on(async move {
             run_executor
-                .run(agent_worker(executor, args, command_rx, event_tx))
+                .run(agent_worker(executor, args, command_rx, event_tx, session_io))
                 .await
         });
 
@@ -289,6 +303,7 @@ async fn agent_worker(
     args: AgentArgs,
     commands: channel::Receiver<AgentCommand>,
     events: channel::Sender<AgentEvent>,
+    session_io: Arc<dyn SessionIo>,
 ) -> Result<()> {
     let mut child = Command::new(&args.server);
     if !args.server_args.is_empty() {
@@ -342,7 +357,7 @@ async fn agent_worker(
                 .send(AgentEvent::Error(format!("Initialize failed: {}", err)))
                 .await;
             let _ = child.kill();
-            return Ok(())
+            return Ok(());
         }
     };
 
@@ -350,16 +365,24 @@ async fn agent_worker(
         .new_session(NewSessionRequest::new(args.cwd.clone()))
         .await;
 
-    let session_id = match session {
+    let mut session_id = match session {
         Ok(resp) => resp.session_id,
         Err(err) => {
             let _ = events
                 .send(AgentEvent::Error(format!("Session start failed: {}", err)))
                 .await;
             let _ = child.kill();
-            return Ok(())
+            return Ok(());
         }
     };
+
+    if let Err(e) = session_io.save_session(SavedSession {
+        id: session_id.to_string(),
+        date: OffsetDateTime::now_utc(),
+        prompt: "<New Session>".to_string(),
+    }) {
+         let _ = events.send(AgentEvent::Error(format!("Failed to save session: {}", e))).await;
+    }
 
     let _ = events.send(AgentEvent::Ready).await;
     let _ = events
@@ -369,12 +392,35 @@ async fn agent_worker(
         )))
         .await;
 
+    let mut first_prompt = true;
     let prompt_inflight = Rc::new(Cell::new(false));
     while let Ok(command) = commands.recv().await {
         match command {
+            AgentCommand::LoadSession(id) => {
+                let req = LoadSessionRequest::new(id.clone(), args.cwd.clone());
+                match connection.load_session(req).await {
+                    Ok(_) => {
+                        session_id = id.into();
+                        first_prompt = false; // Loaded session presumably has history
+                        let _ = events
+                            .send(AgentEvent::Status(format!("Session loaded: {}", session_id)))
+                            .await;
+                    }
+                    Err(err) => {
+                        let _ = events
+                            .send(AgentEvent::Error(format!("Failed to load session: {}", err)))
+                            .await;
+                    }
+                }
+            }
             AgentCommand::SendPrompt(text) => {
                 if text.trim().is_empty() {
                     continue;
+                }
+
+                if first_prompt {
+                    let _ = session_io.update_session_prompt(&session_id.to_string(), text.clone());
+                    first_prompt = false;
                 }
 
                 if prompt_inflight.replace(true) {
@@ -459,13 +505,65 @@ enum Msg {
     Agent(Box<AgentEvent>),
     AgentClosed,
     Markdown(usize, MarkdownMsg),
+    SessionFinder(FuzzyFinderMsg),
     Noop,
+}
+
+fn handle_finder_event(
+    model: &mut Model,
+    event: FuzzyFinderEvent<SavedSession, Msg>,
+) -> Transition<Msg> {
+    match event {
+        FuzzyFinderEvent::Continue => Transition::Continue,
+        FuzzyFinderEvent::Cancel => {
+            model.session_finder = None;
+            Transition::Continue
+        }
+        FuzzyFinderEvent::Select(selection) => {
+            model.session_finder = None;
+            if let Some(session) = selection {
+                let id = session.id;
+                model.status = format!("Loading session {}...", id);
+                let commands = model.agent_commands.clone();
+                Transition::Task(Box::pin(async move {
+                    let _ = commands.send(AgentCommand::LoadSession(id)).await;
+                    Msg::Noop
+                }))
+            } else {
+                Transition::Continue
+            }
+        }
+        FuzzyFinderEvent::Activate => {
+             let selection = model.session_finder.as_ref().and_then(|f| f.submission()).cloned();
+             model.session_finder = None;
+             if let Some(session) = selection {
+                 let id = session.id;
+                 model.status = format!("Loading session {}...", id);
+                 let commands = model.agent_commands.clone();
+                 Transition::Task(Box::pin(async move {
+                     let _ = commands.send(AgentCommand::LoadSession(id)).await;
+                     Msg::Noop
+                 }))
+             } else {
+                 Transition::Continue
+             }
+        }
+        FuzzyFinderEvent::Task(task) => Transition::Task(task),
+    }
 }
 
 fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
     match msg {
         Msg::KeyPressed(key) => handle_key(model, key),
         Msg::Resize => Transition::Multiple(vec![Transition::Continue, listen_for_agent(model)]),
+        Msg::SessionFinder(msg) => {
+            let event = if let Some(finder) = &mut model.session_finder {
+                fuztea::update(finder, msg, Msg::SessionFinder)
+            } else {
+                return Transition::Continue;
+            };
+            handle_finder_event(model, event)
+        }
         Msg::Input(input_msg) => {
             model.input.update(input_msg);
             Transition::Continue
@@ -504,6 +602,30 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
 }
 
 fn handle_key(model: &mut Model, key: Key) -> Transition<Msg> {
+    if model.session_finder.is_some() {
+        let event = {
+            let finder = model.session_finder.as_mut().unwrap();
+            fuztea::update(finder, FuzzyFinderMsg::KeyPressed(key), Msg::SessionFinder)
+        };
+        return handle_finder_event(model, event);
+    }
+
+    if key.ctrl && matches!(key.code, KeyCode::Char('l')) {
+        let sessions = model.session_io.load_sessions().unwrap_or_default();
+        let (finder, handle) = FuzzyFinder::new(|s: &SavedSession| {
+            let date_str = s
+                .date
+                .format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default();
+            vec![date_str, s.prompt.clone(), s.id.clone()]
+        });
+        for s in sessions {
+            handle.push_item(s);
+        }
+        model.session_finder = Some(finder);
+        return Transition::Continue;
+    }
+
     if key.ctrl
         && matches!(
             key.code,
@@ -1104,7 +1226,13 @@ fn view(model: &Model) -> Node<'_, Msg> {
         .with_style(Style::bg(Color::Palette(8)));
 
     // column(vec![header, chat_box, input_row]).with_fill()
-    column(vec![chat_log, input_area, header]).with_fill()
+    let main_view = column(vec![chat_log, input_area, header]).with_fill();
+
+    if let Some(finder) = &model.session_finder {
+        return fuztea::view(finder, Msg::SessionFinder);
+    }
+
+    main_view
 }
 
 fn render_entry(idx: usize, entry: &ChatEntry) -> Node<'_, Msg> {
@@ -1320,11 +1448,13 @@ fn render_thought(thought: &str) -> Node<'_, Msg> {
 mod tests {
     use super::*;
     use chatui::test_utils::render_node_to_string;
+    use session_store::FakeIo;
 
     fn test_model() -> Model {
         let (command_tx, _) = channel::unbounded();
         let (_, event_rx) = channel::unbounded();
-        Model::new(event_rx, command_tx, "test-server".to_string())
+        let session_io = Arc::new(FakeIo::new());
+        Model::new(event_rx, command_tx, "test-server".to_string(), session_io)
     }
 
     #[test]
