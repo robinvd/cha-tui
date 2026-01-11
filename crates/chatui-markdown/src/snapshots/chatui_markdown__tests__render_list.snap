@@ -1,0 +1,9 @@
+---
+source: crates/chatui-markdown/src/tests.rs
+expression: rendered
+---
+- Item 1                                                                        
+- Item 2                                                                        
+                                                                                
+1. Ordered                                                                      
+2. Items

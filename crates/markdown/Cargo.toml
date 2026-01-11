@@ -1,0 +1,11 @@
+[package]
+name = "markdown"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+chatui = { path = "../../" }
+chatui-markdown = { path = "../chatui-markdown" }
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1.0"
+smol = "2.0.2"

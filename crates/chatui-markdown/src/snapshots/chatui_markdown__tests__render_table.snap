@@ -1,0 +1,6 @@
+---
+source: crates/chatui-markdown/src/tests.rs
+expression: rendered
+---
+A                                       B                                       
+1                                       2
