@@ -162,3 +162,56 @@ fn render_table() {
 
     insta::assert_snapshot!(rendered);
 }
+
+#[test]
+fn render_code_block_with_horizontal_scroll() {
+    use chatui::components::scroll::{ScrollAxis, ScrollMsg};
+    use chatui::event::Size;
+
+    // A long line that requires horizontal scrolling in a narrow viewport
+    let doc = MarkdownDocument::parse("```rust\nfn very_long_function_name_that_exceeds_width(arg1: Type1, arg2: Type2) -> ReturnType {\n    // content\n}\n```");
+    let mut state = MarkdownState::default();
+    state.sync_with(&doc);
+
+    // Use a narrow viewport to force horizontal scrolling
+    let viewport_width = 30;
+    let viewport_height = 10;
+
+    for offset in 0..=8 {
+        // First, do a "warm-up" render to establish viewport/content sizes.
+        // The on_resize callback would normally send a Resize message during
+        // rendering, but we need to manually process it here.
+        let _view = markdown_view("scroll_test", &doc, &state, |msg| msg);
+        let _ = chatui::test_utils::render_node_to_string(
+            _view,
+            viewport_width,
+            viewport_height,
+        );
+
+        // Now manually set the viewport and content sizes based on what we know.
+        // The content width is roughly the length of the longest line (~85 chars).
+        state.update(crate::MarkdownMsg::CodeBlockScroll {
+            id: crate::CodeBlockId(0),
+            msg: ScrollMsg::Resize {
+                viewport: Size::new(viewport_width as u16, viewport_height as u16),
+                content: Size::new(85, 4),
+            },
+        });
+
+        // Set the horizontal scroll offset (will now be properly clamped)
+        state.update(crate::MarkdownMsg::CodeBlockScroll {
+            id: crate::CodeBlockId(0),
+            msg: ScrollMsg::AxisJumpTo {
+                axis: ScrollAxis::Horizontal,
+                offset: offset as f32,
+            },
+        });
+
+        // Render again with the correct offset
+        let view = markdown_view("scroll_test", &doc, &state, |msg| msg);
+        let rendered = chatui::test_utils::render_node_to_string(view, viewport_width, viewport_height)
+            .unwrap();
+
+        insta::assert_snapshot!(format!("offset_{offset}"), rendered);
+    }
+}

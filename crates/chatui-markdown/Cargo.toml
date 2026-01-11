@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 chatui = { path = "../../" }
 pulldown-cmark = "0.12"
+syntax-highlight = { path = "../syntax-highlight" }
 taffy = "0.9.2"
 unicode-width = "0.1.11"
 

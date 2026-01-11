@@ -22,7 +22,7 @@ use tree_house::tree_sitter::InputEdit;
 
 use super::runtime;
 
-const HIGHLIGHT_NAMES: &[&str] = &[
+pub const HIGHLIGHT_NAMES: &[&str] = &[
     "attribute",
     "boolean",
     "comment",
@@ -82,7 +82,7 @@ const HIGHLIGHT_NAMES: &[&str] = &[
     "variable.parameter",
 ];
 
-const SYNTAX_TIMEOUT_MILLIS: u64 = 100;
+pub const SYNTAX_TIMEOUT_MILLIS: u64 = 100;
 
 pub struct DocumentHighlighter {
     loader: TreeHouseLoader,
@@ -684,7 +684,7 @@ impl HighlightRegistry {
     }
 }
 
-struct HighlightPalette {
+pub struct HighlightPalette {
     styles: Vec<Style>,
     name_to_highlight: HashMap<&'static str, Highlight>,
 }
@@ -719,7 +719,7 @@ impl HighlightPalette {
         }
     }
 
-    fn style_for(&self, highlight: Highlight) -> Style {
+    pub fn style_for(&self, highlight: Highlight) -> Style {
         self.styles
             .get(highlight.idx())
             .cloned()
@@ -727,14 +727,14 @@ impl HighlightPalette {
     }
 }
 
-struct TreeHouseLoader {
+pub struct TreeHouseLoader {
     runtime: &'static runtime::TreeSitterRuntime,
     palette: HighlightPalette,
     state: Mutex<LoaderState>,
 }
 
 impl TreeHouseLoader {
-    fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let runtime = runtime::runtime()?;
         Ok(Self {
             runtime,
@@ -743,11 +743,11 @@ impl TreeHouseLoader {
         })
     }
 
-    fn palette(&self) -> &HighlightPalette {
+    pub fn palette(&self) -> &HighlightPalette {
         &self.palette
     }
 
-    fn language_for_name(&self, name: &str) -> Result<TreeHouseLanguage> {
+    pub fn language_for_name(&self, name: &str) -> Result<TreeHouseLanguage> {
         self.language_for_key(name, name)
     }
 
@@ -975,7 +975,7 @@ fn push_segment(line: &mut Vec<TextSpan>, segment: &str, style: &Style) {
     line.push(TextSpan::new(segment, style.clone()));
 }
 
-fn canonical_language_from_token(token: &str) -> Option<&'static str> {
+pub fn canonical_language_from_token(token: &str) -> Option<&'static str> {
     let trimmed =
         token.trim_matches(|c: char| c.is_ascii_whitespace() || c == '`' || c == '"' || c == '\'');
     if trimmed.is_empty() {

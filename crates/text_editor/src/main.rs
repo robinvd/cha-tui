@@ -1,6 +1,3 @@
-mod highlight;
-mod runtime;
-
 use std::fs::{self, File};
 use std::io;
 use std::io::ErrorKind;
@@ -19,8 +16,8 @@ use chatui::{
     rich_text_retained, text,
 };
 use color_eyre::eyre::WrapErr;
-use highlight::DocumentHighlighter;
 use ropey::Rope;
+use syntax_highlight::DocumentHighlighter;
 use taffy::Dimension;
 use time::OffsetDateTime;
 use tree_house::tree_sitter::{InputEdit, Point};

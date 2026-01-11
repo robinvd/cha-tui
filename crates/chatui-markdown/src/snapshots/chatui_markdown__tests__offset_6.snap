@@ -1,0 +1,10 @@
+---
+source: crates/chatui-markdown/src/tests.rs
+expression: rendered
+---
+┌rust───────────────────────┐ 
+│ y_long_function_name_that_│ 
+│  content                  │ 
+│                           │ 
+│                           │ 
+└──▀▀▀▀▀▀▀▀─────────────────┘

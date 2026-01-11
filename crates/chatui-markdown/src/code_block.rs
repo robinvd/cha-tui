@@ -1,4 +1,4 @@
-use chatui::dom::{Renderable, RenderablePatch, RenderableRef, Style};
+use chatui::dom::{Renderable, RenderablePatch, RenderableRef, Style, TextSpan};
 use chatui::render::RenderContext;
 use taffy::{AvailableSpace, Size, Style as TaffyStyle};
 use unicode_width::UnicodeWidthChar;
@@ -9,6 +9,7 @@ const TAB_WIDTH: usize = 8;
 pub(crate) struct CodeBlock {
     content: String,
     style: Style,
+    highlighted_lines: Option<Vec<Vec<TextSpan>>>,
 }
 
 impl CodeBlock {
@@ -16,6 +17,7 @@ impl CodeBlock {
         Self {
             content: content.into(),
             style: Style::default(),
+            highlighted_lines: None,
         }
     }
 
@@ -31,6 +33,11 @@ impl CodeBlock {
             .unwrap_or(0)
             .max(1)
     }
+
+    fn with_highlighting(mut self, highlighted_lines: Vec<Vec<TextSpan>>) -> Self {
+        self.highlighted_lines = Some(highlighted_lines);
+        self
+    }
 }
 
 impl Renderable for CodeBlock {
@@ -41,12 +48,16 @@ impl Renderable for CodeBlock {
 
     fn patch_retained(&self, other: &mut dyn Renderable) -> RenderablePatch {
         if let Some(other) = other.as_any_mut().downcast_mut::<Self>() {
-            if self.content == other.content && self.style == other.style {
+            if self.content == other.content
+                && self.style == other.style
+                && self.highlighted_lines == other.highlighted_lines
+            {
                 RenderablePatch::NoChange
             } else {
                 let layout_changed = self.content != other.content;
                 other.content.clone_from(&self.content);
                 other.style = self.style;
+                other.highlighted_lines = self.highlighted_lines.clone();
                 if layout_changed {
                     RenderablePatch::ChangedLayout
                 } else {
@@ -84,31 +95,99 @@ impl Renderable for CodeBlock {
         let mut y = area.y;
         let mut remaining_rows = area.height;
 
-        let mut rendered_any = false;
-        for line in self
-            .content
-            .split_terminator('\n')
-            .skip(scroll_y)
-            .take(area.height)
-        {
-            if remaining_rows == 0 {
-                break;
+        // If we have highlighted lines, render them with syntax highlighting
+        if let Some(ref lines) = self.highlighted_lines {
+            let mut rendered_any = false;
+            for line in lines.iter().skip(scroll_y).take(area.height) {
+                if remaining_rows == 0 {
+                    break;
+                }
+
+                rendered_any = true;
+                clear_line(ctx, area.x, y, area.width, &attrs);
+
+                // Render each span in the line
+                let mut x = area.x;
+                let mut content_x = 0; // Position within the line's content
+                let max_x = area.x + area.width;
+
+                for span in line {
+                    if x >= max_x {
+                        break;
+                    }
+
+                    let span_text = &span.content;
+                    let span_width = display_width(span_text);
+
+                    // Skip columns if we're scrolled horizontally
+                    if content_x + span_width <= skip_cols {
+                        // Skip this span - advance content position only
+                        // (skipped content is off the left edge, doesn't affect screen position)
+                        content_x += span_width;
+                        continue;
+                    }
+
+                    // Calculate how much of this span we can render
+                    let start_skip = if skip_cols > content_x {
+                        display_width_to_char_offset(span_text, skip_cols - content_x)
+                    } else {
+                        0
+                    };
+
+                    let remaining_width = max_x - x;
+                    let end_take = if start_skip + remaining_width < span_width {
+                        display_width_to_char_offset(span_text, start_skip + remaining_width)
+                    } else {
+                        span_text.len()
+                    };
+
+                    if start_skip < end_take {
+                        let to_render = &span_text[start_skip..end_take];
+                        let span_attrs = ctx.style_to_attributes(&span.style);
+                        let merged_attrs = merge_attributes(&span_attrs, &attrs);
+                        ctx.write_text_length(x, y, to_render, &merged_attrs, remaining_width);
+                        x += display_width(to_render);
+                    }
+                    content_x += span_width;
+                }
+
+                y += 1;
+                remaining_rows = remaining_rows.saturating_sub(1);
             }
 
-            rendered_any = true;
-            clear_line(ctx, area.x, y, area.width, &attrs);
+            if !rendered_any && scroll_y == 0 && remaining_rows > 0 {
+                clear_line(ctx, area.x, y, area.width, &attrs);
+                y += 1;
+                remaining_rows = remaining_rows.saturating_sub(1);
+            }
+        } else {
+            // Original plain text rendering
+            let mut rendered_any = false;
+            for line in self
+                .content
+                .split_terminator('\n')
+                .skip(scroll_y)
+                .take(area.height)
+            {
+                if remaining_rows == 0 {
+                    break;
+                }
 
-            let rendered = window_line(line, skip_cols, area.width);
-            ctx.write_text_length(area.x, y, &rendered, &attrs, area.width);
+                rendered_any = true;
+                clear_line(ctx, area.x, y, area.width, &attrs);
 
-            y += 1;
-            remaining_rows = remaining_rows.saturating_sub(1);
-        }
+                let rendered = window_line(line, skip_cols, area.width);
+                ctx.write_text_length(area.x, y, &rendered, &attrs, area.width);
 
-        if !rendered_any && scroll_y == 0 && remaining_rows > 0 {
-            clear_line(ctx, area.x, y, area.width, &attrs);
-            y += 1;
-            remaining_rows = remaining_rows.saturating_sub(1);
+                y += 1;
+                remaining_rows = remaining_rows.saturating_sub(1);
+            }
+
+            if !rendered_any && scroll_y == 0 && remaining_rows > 0 {
+                clear_line(ctx, area.x, y, area.width, &attrs);
+                y += 1;
+                remaining_rows = remaining_rows.saturating_sub(1);
+            }
         }
 
         while remaining_rows > 0 {
@@ -135,11 +214,21 @@ impl Renderable for CodeBlock {
 pub(crate) struct CodeBlockRef<'a> {
     pub(crate) content: &'a str,
     pub(crate) style: Style,
+    pub(crate) highlighted_lines: Option<Vec<Vec<TextSpan>>>,
 }
 
 impl<'a> CodeBlockRef<'a> {
     pub(crate) fn new(content: &'a str, style: Style) -> Self {
-        Self { content, style }
+        Self {
+            content,
+            style,
+            highlighted_lines: None,
+        }
+    }
+
+    pub(crate) fn with_highlighting(mut self, highlighted_lines: Vec<Vec<TextSpan>>) -> Self {
+        self.highlighted_lines = Some(highlighted_lines);
+        self
     }
 }
 
@@ -150,12 +239,16 @@ impl<'a> RenderableRef for CodeBlockRef<'a> {
 
     fn patch_retained(&self, retained: &mut dyn Renderable) -> RenderablePatch {
         if let Some(block) = retained.as_any_mut().downcast_mut::<CodeBlock>() {
-            if block.content == self.content && block.style == self.style {
+            if block.content == self.content
+                && block.style == self.style
+                && block.highlighted_lines.as_ref() == self.highlighted_lines.as_ref()
+            {
                 RenderablePatch::NoChange
             } else {
                 let layout_changed = block.content != self.content;
                 block.content = self.content.to_string();
                 block.style = self.style;
+                block.highlighted_lines = self.highlighted_lines.clone();
                 if layout_changed {
                     RenderablePatch::ChangedLayout
                 } else {
@@ -168,7 +261,11 @@ impl<'a> RenderableRef for CodeBlockRef<'a> {
     }
 
     fn into_retained(self: Box<Self>) -> Box<dyn Renderable> {
-        Box::new(CodeBlock::new(self.content).with_style(self.style))
+        let mut block = CodeBlock::new(self.content).with_style(self.style);
+        if let Some(highlighted) = self.highlighted_lines {
+            block = block.with_highlighting(highlighted);
+        }
+        Box::new(block)
     }
 }
 
@@ -252,4 +349,34 @@ fn window_line(line: &str, skip_cols: usize, max_cols: usize) -> String {
     }
 
     out
+}
+
+fn merge_attributes(
+    primary: &chatui::buffer::CellAttributes,
+    base: &chatui::buffer::CellAttributes,
+) -> chatui::buffer::CellAttributes {
+    let mut merged = base.clone();
+    // Primary style takes precedence for colors
+    if primary.foreground.is_some() {
+        merged.foreground = primary.foreground;
+    }
+    if primary.background.is_some() {
+        merged.background = primary.background;
+    }
+    // For boolean attributes, use OR logic
+    merged.bold = merged.bold || primary.bold;
+    merged.dim = merged.dim || primary.dim;
+    merged.reverse = merged.reverse || primary.reverse;
+    merged
+}
+
+fn display_width_to_char_offset(text: &str, target_width: usize) -> usize {
+    let mut col = 0usize;
+    for (idx, ch) in text.char_indices() {
+        if col >= target_width {
+            return idx;
+        }
+        col += UnicodeWidthChar::width(ch).unwrap_or(0).max(1);
+    }
+    text.len()
 }

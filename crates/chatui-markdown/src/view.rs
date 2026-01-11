@@ -8,6 +8,7 @@ use chatui::dom::{
     Style, TableColumn, TableColumnWidth, TableRow, TextSpan,
 };
 use std::rc::Rc;
+use syntax_highlight::highlight_code_block;
 use taffy::Dimension;
 
 const DOC_SCROLL_ID: &str = "chatui-markdown-doc";
@@ -158,7 +159,15 @@ fn render_code_block<'a, Msg: 'static>(
         ..Default::default()
     };
 
-    let inner = renderable_ref(CodeBlockRef::new(content, code_style));
+    // Try to highlight the code block
+    let highlighted = highlight_code_block(lang, content);
+    let code_block_ref = if let Some(lines) = highlighted {
+        CodeBlockRef::new(content, code_style).with_highlighting(lines)
+    } else {
+        CodeBlockRef::new(content, code_style)
+    };
+
+    let inner = renderable_ref(code_block_ref);
     let container = if lang.is_empty() {
         block(vec![inner])
     } else {
