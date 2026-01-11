@@ -1135,6 +1135,7 @@ dependencies = [
  "fuztea",
  "insta",
  "miette",
+ "piper",
  "serde",
  "serde_json",
  "smol",

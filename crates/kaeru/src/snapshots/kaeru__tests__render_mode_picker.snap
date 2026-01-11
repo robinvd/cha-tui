@@ -1,0 +1,24 @@
+---
+source: crates/kaeru/src/main.rs
+expression: output
+---
+fuztea  Esc quits  Enter selects  Ctrl-n/p move  Ctrl-d/u page                  
+┌──────────────────────────────────────────────────────────────────────────────┐
+│>                                                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+Mode                                                                            
+Ask                                                                             
+Code                                                                            
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+2/2 matches

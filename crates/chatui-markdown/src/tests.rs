@@ -182,11 +182,7 @@ fn render_code_block_with_horizontal_scroll() {
         // The on_resize callback would normally send a Resize message during
         // rendering, but we need to manually process it here.
         let _view = markdown_view("scroll_test", &doc, &state, |msg| msg);
-        let _ = chatui::test_utils::render_node_to_string(
-            _view,
-            viewport_width,
-            viewport_height,
-        );
+        let _ = chatui::test_utils::render_node_to_string(_view, viewport_width, viewport_height);
 
         // Now manually set the viewport and content sizes based on what we know.
         // The content width is roughly the length of the longest line (~85 chars).
@@ -209,8 +205,9 @@ fn render_code_block_with_horizontal_scroll() {
 
         // Render again with the correct offset
         let view = markdown_view("scroll_test", &doc, &state, |msg| msg);
-        let rendered = chatui::test_utils::render_node_to_string(view, viewport_width, viewport_height)
-            .unwrap();
+        let rendered =
+            chatui::test_utils::render_node_to_string(view, viewport_width, viewport_height)
+                .unwrap();
 
         insta::assert_snapshot!(format!("offset_{offset}"), rendered);
     }

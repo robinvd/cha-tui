@@ -1,0 +1,24 @@
+---
+source: crates/kaeru/src/main.rs
+expression: output
+---
+fuztea  Esc quits  Enter selects  Ctrl-n/p move  Ctrl-d/u page                  
+┌──────────────────────────────────────────────────────────────────────────────┐
+│>                                                                             │
+└──────────────────────────────────────────────────────────────────────────────┘
+Model                                                                           
+GPT-4o mini                                                                     
+GPT-4.1                                                                         
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+2/2 matches

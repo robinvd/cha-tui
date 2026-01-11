@@ -5,13 +5,13 @@
 
 use std::time::Duration;
 
-use color_eyre::eyre::{Result, eyre, WrapErr};
+use color_eyre::eyre::{Result, WrapErr, eyre};
 use once_cell::sync::Lazy;
 use ropey::Rope;
 use tree_house::Syntax;
 use tree_house::highlighter::{HighlightEvent, Highlighter as TreeHouseHighlighter};
 
-use crate::highlight::{TreeHouseLoader, SYNTAX_TIMEOUT_MILLIS};
+use crate::highlight::{SYNTAX_TIMEOUT_MILLIS, TreeHouseLoader};
 use chatui::dom::{Style, TextSpan};
 
 /// Highlight a code block given a language tag and content.
@@ -30,17 +30,12 @@ pub fn highlight_code_block(lang: &str, content: &str) -> Option<Vec<Vec<TextSpa
         return None;
     }
 
-    let Some(language_name) = crate::highlight::canonical_language_from_token(lang) else {
-        return None;
-    };
+    let language_name = crate::highlight::canonical_language_from_token(lang)?;
 
-    static REGISTRY: Lazy<HighlightRegistry> = Lazy::new(|| {
-        HighlightRegistry::new().expect("failed to initialize highlight registry")
-    });
+    static REGISTRY: Lazy<HighlightRegistry> =
+        Lazy::new(|| HighlightRegistry::new().expect("failed to initialize highlight registry"));
 
-    REGISTRY
-        .highlight(language_name, content)
-        .ok()
+    REGISTRY.highlight(language_name, content).ok()
 }
 
 struct HighlightRegistry {
@@ -153,7 +148,7 @@ fn push_segment(line: &mut Vec<TextSpan>, segment: &str, style: &Style) {
         last.content.push_str(segment);
         return;
     }
-    line.push(TextSpan::new(segment, style.clone()));
+    line.push(TextSpan::new(segment, *style));
 }
 
 #[cfg(test)]

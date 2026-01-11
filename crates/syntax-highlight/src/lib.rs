@@ -9,5 +9,5 @@ pub mod markdown;
 pub mod runtime;
 
 // Re-export commonly used items
-pub use highlight::{language_for_path, DocumentHighlighter};
+pub use highlight::{DocumentHighlighter, language_for_path};
 pub use markdown::highlight_code_block;
