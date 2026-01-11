@@ -2,3 +2,4 @@
 todo.log
 gs.log
 .env
+*.snap.new

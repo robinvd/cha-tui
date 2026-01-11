@@ -21,7 +21,7 @@ struct RenderContext<'a, Msg> {
 }
 
 pub fn markdown_view<'a, Msg: 'static>(
-    id_prefix: &'static str,
+    id_prefix: &str,
     doc: &'a MarkdownDocument,
     state: &'a MarkdownState,
     map_msg: impl Fn(MarkdownMsg) -> Msg + 'static,

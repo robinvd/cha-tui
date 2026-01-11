@@ -1,0 +1,34 @@
+---
+source: crates/kaeru/src/main.rs
+expression: output
+---
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+• Header                                                                        
+                                                                                
+  - List item 1                                                                 
+  - List item 2                                                                 
+                                                                                
+  ┌rust──────────────────────────────────────────────────────────────────────┐  
+  │ fn main() {}                                                             │  
+  │                                                                          │  
+  └──────────────────────────────────────────────────────────────────────────┘  
+                                                                                
+                                                                                
+                                                                                
+ >                                                                              
+                                                                                
+kaeru – test-server  Connecting to test-server  [idle]

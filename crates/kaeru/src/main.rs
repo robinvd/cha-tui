@@ -15,6 +15,7 @@ use agent_client_protocol::{
     ToolCallId, ToolCallStatus, ToolCallUpdate,
 };
 use async_trait::async_trait;
+use chatui_markdown::{MarkdownDocument, MarkdownMsg, MarkdownState, markdown_view};
 use chatui::components::paragraph;
 use chatui::components::scroll::{ScrollAxis, ScrollBehavior, ScrollTarget};
 use chatui::dom::{Color, Node};
@@ -66,6 +67,8 @@ enum Author {
 struct ChatMessage {
     author: Author,
     content: String,
+    markdown: Option<MarkdownDocument>,
+    markdown_state: MarkdownState,
 }
 
 #[derive(Clone, Debug)]
@@ -111,70 +114,7 @@ impl Model {
         let mut input_style = InputStyle::default();
         input_style.text.bg = Some(Color::Palette(8));
         Self {
-            timeline: vec![
-                ChatEntry::Message(ChatMessage {
-                    author: Author::System,
-                    content: "Changes
-
-- Added ACP client dependencies (agent-client-protocol, async-trait) in Cargo.toml to support talking to external servers.
-- Built new single-window chat binary crates/kaeru/src/main.rs that parses CLI server/args, spawns an ACP connection on a background
-  LocalExecutor, and forwards session updates back to the UI via channels.
-- Implemented scrollable chat log, status header, and input widget; user prompts are sent to the configured ACP server, while agent streams,
-  permission prompts, and stop reasons are rendered inline.
-Tests
-- cargo clippy
-- just test (existing warnings from other modules: unused import Rgba, dead-code Quit variant in program::tests)
-Potential next steps: 1) surface ACP permission choices instead of auto-cancel; 2) add reconnect/shutdown handling for the server process;
-3) render more session update types (plans, tool output) with richer formatting."
-                        .to_owned(),
-                }),
-                ChatEntry::Thought("Thinking about how to summarize the codebase...".to_owned()),
-                ChatEntry::Message(ChatMessage {
-                    author: Author::User,
-                    content: "Both are amazing projects and I learned a lot from these. Special thanks to the Helix team for my daily editor, and for making the tree-house and termina crates. Both of which are heavily used in this project!".to_owned(),
-                }),
-                ChatEntry::Message(ChatMessage {
-                    author: Author::System,
-                    content: "Both are amazing projects and I learned a lot from these. Special thanks to the Helix team for my daily editor, and for making the tree-house and termina crates. Both of which are heavily used in this project!".to_owned(),
-                }),
-                ChatEntry::Message(ChatMessage {
-                    author: Author::System,
-                    content: "Both are amazing projects and I learned a lot from these. Special thanks to the Helix team for my daily editor, and for making the tree-house and termina crates. Both of which are heavily used in this project!".to_owned(),
-                }),
-                ChatEntry::Message(ChatMessage {
-                    author: Author::System,
-                    content: "Both are amazing projects and I learned a lot from these. Special thanks to the Helix team for my daily editor, and for making the tree-house and termina crates. Both of which are heavily used in this project!".to_owned(),
-                }),
-                ChatEntry::Message(ChatMessage {
-                    author: Author::System,
-                    content: "Both are amazing projects and I learned a lot from these. Special thanks to the Helix team for my daily editor, and for making the tree-house and termina crates. Both of which are heavily used in this project!".to_owned(),
-                }),
-                ChatEntry::ToolCall(
-                    ToolCall::new("demo-tool-1", "Read main.rs")
-                        .status(ToolCallStatus::Completed)
-                        .content(vec![ToolCallContent::Content(Content::new(
-                            ContentBlock::Text(TextContent::new(
-                                "use chatui::components::data_table::{ CellPosition, ColumnDef, DataTableMsg, DataTableState }",
-                            )),
-                        ))]),
-                ),
-                ChatEntry::Message(ChatMessage {
-                    author: Author::System,
-                    content: "Changes
-
-- Added ACP client dependencies (agent-client-protocol, async-trait) in Cargo.toml to support talking to external servers.
-- Built new single-window chat binary crates/kaeru/src/main.rs that parses CLI server/args, spawns an ACP connection on a background
-  LocalExecutor, and forwards session updates back to the UI via channels.
-- Implemented scrollable chat log, status header, and input widget; user prompts are sent to the configured ACP server, while agent streams,
-  permission prompts, and stop reasons are rendered inline.
-Tests
-- cargo clippy
-- just test (existing warnings from other modules: unused import Rgba, dead-code Quit variant in program::tests)
-Potential next steps: 1) surface ACP permission choices instead of auto-cancel; 2) add reconnect/shutdown handling for the server process;
-3) render more session update types (plans, tool output) with richer formatting."
-                        .to_owned(),
-                }),
-            ],
+            timeline: Vec::new(),
             input: InputState::new_multiline(),
             input_style,
             chat_scroll,
@@ -194,6 +134,8 @@ Potential next steps: 1) surface ACP permission choices instead of auto-cancel; 
         self.push_entry(ChatEntry::Message(ChatMessage {
             author,
             content: content.into(),
+            markdown: None,
+            markdown_state: MarkdownState::new(),
         }));
     }
 
@@ -400,7 +342,7 @@ async fn agent_worker(
                 .send(AgentEvent::Error(format!("Initialize failed: {}", err)))
                 .await;
             let _ = child.kill();
-            return Ok(());
+            return Ok(())
         }
     };
 
@@ -415,7 +357,7 @@ async fn agent_worker(
                 .send(AgentEvent::Error(format!("Session start failed: {}", err)))
                 .await;
             let _ = child.kill();
-            return Ok(());
+            return Ok(())
         }
     };
 
@@ -477,7 +419,8 @@ async fn agent_worker(
                 executor
                     .spawn(async move {
                         match cancel_connection.cancel(cancel).await {
-                            Ok(()) => {
+                            Ok(())
+                                => {
                                 if prompt_state.replace(false) {
                                     let _ = cancel_events
                                         .send(AgentEvent::PromptFinished(StopReason::Cancelled))
@@ -515,6 +458,7 @@ enum Msg {
     Scroll(ScrollMsg),
     Agent(Box<AgentEvent>),
     AgentClosed,
+    Markdown(usize, MarkdownMsg),
     Noop,
 }
 
@@ -548,6 +492,12 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             } else {
                 Transition::Continue
             }
+        }
+        Msg::Markdown(idx, msg) => {
+            if let Some(ChatEntry::Message(msg_entry)) = model.timeline.get_mut(idx) {
+                msg_entry.markdown_state.update(msg);
+            }
+            Transition::Continue
         }
         Msg::Noop => Transition::Continue,
     }
@@ -669,8 +619,21 @@ fn handle_agent_event(model: &mut Model, event: AgentEvent) -> Transition<Msg> {
         }
         AgentEvent::Session(update) => handle_session_update(model, *update),
         AgentEvent::PromptFinished(stop_reason) => {
-            model.status = format!("Prompt finished: {stop_reason:?}");
+            model.status = format!("Prompt finished: {:?}", stop_reason);
             model.agent_in_progress = false;
+
+            if let Some(ChatEntry::Message(last)) = model
+                .timeline
+                .iter_mut()
+                .rev()
+                .find(|e| matches!(e, ChatEntry::Message(m) if m.author == Author::Agent))
+            {
+                if last.markdown.is_none() {
+                    let doc = MarkdownDocument::parse(&last.content);
+                    last.markdown_state.sync_with(&doc);
+                    last.markdown = Some(doc);
+                }
+            }
 
             if let Some(cancel) =
                 clear_permission_prompt(model, RequestPermissionOutcome::Cancelled)
@@ -732,6 +695,8 @@ fn handle_session_update(model: &mut Model, update: SessionUpdate) {
                     model.timeline.push(ChatEntry::Message(ChatMessage {
                         author: Author::Agent,
                         content: text,
+                        markdown: None,
+                        markdown_state: MarkdownState::new(),
                     }));
                 }
             });
@@ -747,6 +712,8 @@ fn handle_session_update(model: &mut Model, update: SessionUpdate) {
                     model.timeline.push(ChatEntry::Message(ChatMessage {
                         author: Author::User,
                         content: text,
+                        markdown: None,
+                        markdown_state: MarkdownState::new(),
                     }));
                 }
             });
@@ -1083,7 +1050,7 @@ fn view(model: &Model) -> Node<'_, Msg> {
     if model.timeline.is_empty() {
         message_nodes.push(text::<Msg>("No messages yet. Type to chat.").with_style(Style::dim()));
     } else {
-        message_nodes.extend(model.timeline.iter().map(render_entry));
+        message_nodes.extend(model.timeline.iter().enumerate().map(|(i, e)| render_entry(i, e)));
     }
 
     let total_nodes = message_nodes.len();
@@ -1140,9 +1107,9 @@ fn view(model: &Model) -> Node<'_, Msg> {
     column(vec![chat_log, input_area, header]).with_fill()
 }
 
-fn render_entry(entry: &ChatEntry) -> Node<'_, Msg> {
+fn render_entry(idx: usize, entry: &ChatEntry) -> Node<'_, Msg> {
     match entry {
-        ChatEntry::Message(message) => render_message(message),
+        ChatEntry::Message(message) => render_message(idx, message),
         ChatEntry::Thought(thought) => render_thought(thought),
         ChatEntry::Plan(plan) => render_plan(plan),
         ChatEntry::ToolCall(call) => render_tool_call(call),
@@ -1302,7 +1269,7 @@ fn permission_kind_label(kind: &PermissionOptionKind) -> &'static str {
     }
 }
 
-fn render_message(message: &ChatMessage) -> Node<'_, Msg> {
+fn render_message(idx: usize, message: &ChatMessage) -> Node<'_, Msg> {
     let (label, mut label_style, msg_style) = match message.author {
         Author::User => (
             ">",
@@ -1319,10 +1286,20 @@ fn render_message(message: &ChatMessage) -> Node<'_, Msg> {
     }
 
     let label_node = text::<Msg>(label).with_style(label_style);
-    let content =
+    let content = if let Some(doc) = &message.markdown {
+        markdown_view(
+            &format!("msg-{idx}"),
+            doc,
+            &message.markdown_state,
+            move |msg| Msg::Markdown(idx, msg),
+        )
+        .with_flex_grow(1.)
+        .with_min_width(Dimension::ZERO)
+    } else {
         paragraph::rich_paragraph::<Msg>(vec![TextSpan::new(&message.content, msg_style)])
             .with_flex_grow(1.)
-            .with_min_width(Dimension::ZERO);
+            .with_min_width(Dimension::ZERO)
+    };
 
     row(vec![label_node, content])
         .with_gap(1, 0)
@@ -1337,4 +1314,57 @@ fn render_thought(thought: &str) -> Node<'_, Msg> {
             .with_min_width(Dimension::ZERO),
     ])
     .with_gap(1, 0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chatui::test_utils::render_node_to_string;
+
+    fn test_model() -> Model {
+        let (command_tx, _) = channel::unbounded();
+        let (_, event_rx) = channel::unbounded();
+        Model::new(event_rx, command_tx, "test-server".to_string())
+    }
+
+    #[test]
+    fn render_initial_state() {
+        let model = test_model();
+        let node = view(&model);
+        let output = render_node_to_string(node, 80, 20).unwrap();
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn render_markdown_message() {
+        let mut model = test_model();
+        
+        let content = "# Header\n\n- List item 1\n- List item 2\n\n```rust\nfn main() {}\n```";
+        model.push_message(Author::Agent, content);
+        
+        if let Some(ChatEntry::Message(msg)) = model.timeline.last_mut() {
+             let doc = MarkdownDocument::parse(&msg.content);
+             msg.markdown_state.sync_with(&doc);
+             msg.markdown = Some(doc);
+        }
+
+        let node = view(&model);
+        let output = render_node_to_string(node, 80, 30).unwrap();
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn render_input_multiline() {
+        let mut model = test_model();
+        
+        model.input.update(InputMsg::InsertText("Line 1".to_string()));
+        model.input.update(InputMsg::InsertChar('\n'));
+        model.input.update(InputMsg::InsertText("Line 2".to_string()));
+        model.input.update(InputMsg::InsertChar('\n'));
+        model.input.update(InputMsg::InsertText("Line 3".to_string()));
+
+        let node = view(&model);
+        let output = render_node_to_string(node, 80, 20).unwrap();
+        insta::assert_snapshot!(output);
+    }
 }
