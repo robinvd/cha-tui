@@ -71,9 +71,11 @@ pub fn patch<Msg>(
             RenderablePatch::NoChange => {}
             RenderablePatch::ChangedNoLayout => {}
             RenderablePatch::ChangedLayout => {
+                tracing::debug!("renderable changed layout: {}", new_leaf.debug_label());
                 layout_changed = true;
             }
             RenderablePatch::Replace => {
+                tracing::debug!("renderable replaced, new={}", new_leaf.debug_label());
                 *existing_leaf = new_leaf;
                 layout_changed = true;
             }
@@ -337,6 +339,7 @@ fn patch_element<Msg>(
     existing.attrs = new_attrs;
     if attrs_changed {
         layout_changed = true;
+        tracing::debug!("element changed style")
     }
 
     if existing.title != new_title {
