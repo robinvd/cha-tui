@@ -19,6 +19,8 @@ pub trait SessionIo: Send + Sync {
     fn load_sessions(&self) -> Result<Vec<SavedSession>>;
     fn save_session(&self, session: SavedSession) -> Result<()>;
     fn update_session_prompt(&self, id: &str, prompt: String) -> Result<()>;
+    fn save_transcript(&self, id: &str, content: &str) -> Result<()>;
+    fn load_transcript(&self, id: &str) -> Result<Option<String>>;
 }
 
 pub struct RealIo {
@@ -35,6 +37,16 @@ impl RealIo {
     #[cfg(test)]
     fn for_session_file(path: PathBuf) -> Self {
         Self { path }
+    }
+
+    fn transcript_path(&self, id: &str) -> PathBuf {
+        // sessions.json is at .../sessions.json
+        // We want .../transcripts/<id>.json
+        let mut path = self.path.clone();
+        path.pop(); // remove sessions.json
+        path.push("transcripts");
+        path.push(format!("{}.json", id));
+        path
     }
 }
 
@@ -75,6 +87,24 @@ impl SessionIo for RealIo {
         }
         Ok(())
     }
+
+    fn save_transcript(&self, id: &str, content: &str) -> Result<()> {
+        let path = self.transcript_path(id);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).into_diagnostic()?;
+        }
+        fs::write(&path, content).into_diagnostic()?;
+        Ok(())
+    }
+
+    fn load_transcript(&self, id: &str) -> Result<Option<String>> {
+        let path = self.transcript_path(id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&path).into_diagnostic()?;
+        Ok(Some(content))
+    }
 }
 
 fn write_sessions(path: &PathBuf, sessions: &[SavedSession]) -> Result<()> {
@@ -106,6 +136,7 @@ fn sort_and_dedup_by_id_keep_latest(mut sessions: Vec<SavedSession>) -> Vec<Save
 #[cfg(test)]
 pub struct FakeIo {
     sessions: Mutex<Vec<SavedSession>>,
+    transcripts: Mutex<std::collections::HashMap<String, String>>,
 }
 
 #[cfg(test)]
@@ -113,6 +144,7 @@ impl FakeIo {
     pub fn new() -> Self {
         Self {
             sessions: Mutex::new(Vec::new()),
+            transcripts: Mutex::new(std::collections::HashMap::new()),
         }
     }
 }
@@ -140,6 +172,17 @@ impl SessionIo for FakeIo {
         }
         sessions.sort_by(|a, b| b.date.cmp(&a.date));
         Ok(())
+    }
+
+    fn save_transcript(&self, id: &str, content: &str) -> Result<()> {
+        let mut transcripts = self.transcripts.lock().unwrap();
+        transcripts.insert(id.to_string(), content.to_string());
+        Ok(())
+    }
+
+    fn load_transcript(&self, id: &str) -> Result<Option<String>> {
+        let transcripts = self.transcripts.lock().unwrap();
+        Ok(transcripts.get(id).cloned())
     }
 }
 

@@ -8,13 +8,14 @@ use std::sync::Arc;
 use std::thread;
 
 use agent_client_protocol::{
-    Agent, CancelNotification, Client, ClientCapabilities, ClientSideConnection, ContentBlock,
-    Implementation, InitializeRequest, LoadSessionRequest, ModelId, ModelInfo, NewSessionRequest,
-    PermissionOptionKind, Plan, PlanEntryPriority, PlanEntryStatus, PromptRequest, ProtocolVersion,
-    RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse,
-    SelectedPermissionOutcome, SessionMode, SessionModeId, SessionModeState, SessionModelState,
-    SessionNotification, SessionUpdate, SetSessionModeRequest, SetSessionModelRequest, StopReason,
-    ToolCall, ToolCallContent, ToolCallId, ToolCallStatus, ToolCallUpdate,
+    Agent, AvailableCommand, CancelNotification, Client, ClientCapabilities, ClientSideConnection,
+    ContentBlock, Implementation, InitializeRequest, LoadSessionRequest, ModelId, ModelInfo,
+    NewSessionRequest, PermissionOptionKind, Plan, PlanEntryPriority, PlanEntryStatus,
+    PromptRequest, ProtocolVersion, RequestPermissionOutcome, RequestPermissionRequest,
+    RequestPermissionResponse, SelectedPermissionOutcome, SessionMode, SessionModeId,
+    SessionModeState, SessionModelState, SessionNotification, SessionUpdate, SetSessionModeRequest,
+    SetSessionModelRequest, StopReason, ToolCall, ToolCallContent, ToolCallId, ToolCallStatus,
+    ToolCallUpdate,
 };
 use async_trait::async_trait;
 use chatui::components::paragraph;
@@ -28,6 +29,7 @@ use chatui::{
 use chatui_markdown::{MarkdownDocument, MarkdownMsg, MarkdownState, markdown_view};
 use fuztea::{ColumnConfig, FuzzyFinder, FuzzyFinderEvent, FuzzyFinderMsg};
 use miette::{Context, IntoDiagnostic, Result, miette};
+use serde::{Deserialize, Serialize};
 use smol::channel;
 use smol::process::Command;
 use taffy::prelude::TaffyZero;
@@ -36,6 +38,7 @@ use time::OffsetDateTime;
 
 mod session_store;
 use session_store::{RealIo, SavedSession, SessionIo};
+use tracing_subscriber::fmt::format::FmtSpan;
 
 #[derive(Clone)]
 struct AgentArgs {
@@ -58,6 +61,7 @@ enum AgentEvent {
     Status(String),
     Ready,
     SessionState {
+        session_id: String,
         modes: Option<SessionModeState>,
         models: Option<SessionModelState>,
     },
@@ -71,22 +75,24 @@ enum AgentEvent {
     Error(String),
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum Author {
     User,
     Agent,
     System,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct ChatMessage {
     author: Author,
     content: String,
+    #[serde(skip)]
     markdown: Option<MarkdownDocument>,
+    #[serde(skip)]
     markdown_state: MarkdownState,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 enum ChatEntry {
     Message(ChatMessage),
     Thought(String),
@@ -95,10 +101,11 @@ enum ChatEntry {
     PermissionPrompt(PermissionPrompt),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct PermissionPrompt {
     request: RequestPermissionRequest,
-    responder: channel::Sender<RequestPermissionResponse>,
+    #[serde(skip)]
+    responder: Option<channel::Sender<RequestPermissionResponse>>,
     selected: usize,
 }
 
@@ -120,9 +127,12 @@ struct Model {
     session_finder: Option<FuzzyFinder<SavedSession>>,
     mode_finder: Option<FuzzyFinder<SessionMode>>,
     model_finder: Option<FuzzyFinder<ModelInfo>>,
+    command_finder: Option<FuzzyFinder<AvailableCommand>>,
     session_modes: Option<SessionModeState>,
     session_models: Option<SessionModelState>,
+    available_commands: Vec<AvailableCommand>,
     session_io: Arc<dyn SessionIo>,
+    current_session_id: Option<String>,
 }
 
 impl Model {
@@ -153,9 +163,12 @@ impl Model {
             session_finder: None,
             mode_finder: None,
             model_finder: None,
+            command_finder: None,
             session_modes: None,
             session_models: None,
+            available_commands: Vec::new(),
             session_io,
+            current_session_id: None,
         }
     }
 
@@ -170,6 +183,15 @@ impl Model {
 
     fn push_entry(&mut self, entry: ChatEntry) {
         self.apply_sticky_scroll(|model| model.timeline.push(entry));
+        self.save_timeline();
+    }
+
+    fn save_timeline(&self) {
+        if let Some(session_id) = &self.current_session_id {
+            if let Ok(content) = serde_json::to_string(&self.timeline) {
+                let _ = self.session_io.save_transcript(session_id, &content);
+            }
+        }
     }
 
     fn apply_sticky_scroll(&mut self, f: impl FnOnce(&mut Self)) {
@@ -230,15 +252,32 @@ impl Client for UiClient {
 
 fn main() -> Result<()> {
     miette::set_panic_hook();
+    let mut _profile_guard = None;
 
+    // Set up Chrome tracing to file only if KAERU_PROFILE is set
+    if std::env::var("KAERU_PROFILE").is_ok() {
+        use tracing_subscriber::prelude::*;
+        let (layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
+            .file("trace-kaeru.json")
+            .include_args(true)
+            .build();
+        _profile_guard = Some(guard);
+        tracing_subscriber::registry().with(layer).init();
+        eprintln!("Chrome profiling enabled: trace-kaeru.json");
+    }
     // Set up tracing to file only if KAERU_LOG is set
-    if let Ok(log_file_path) = std::env::var("KAERU_LOG") {
+    else if let Ok(log_file_path) = std::env::var("KAERU_LOG") {
         use std::fs::File;
         use tracing_subscriber::fmt;
         use tracing_subscriber::prelude::*;
         let log_file = File::create(&log_file_path).expect("failed to create log file");
         tracing_subscriber::registry()
-            .with(fmt::layer().with_writer(log_file).with_ansi(false))
+            .with(
+                fmt::layer()
+                    .with_writer(log_file)
+                    .with_ansi(false)
+                    .with_span_events(FmtSpan::CLOSE),
+            )
             .init();
     }
 
@@ -388,6 +427,7 @@ async fn agent_worker(
         Ok(resp) => {
             let _ = events
                 .send(AgentEvent::SessionState {
+                    session_id: resp.session_id.to_string(),
                     modes: resp.modes.clone(),
                     models: resp.models.clone(),
                 })
@@ -431,6 +471,7 @@ async fn agent_worker(
                     Ok(resp) => {
                         let _ = events
                             .send(AgentEvent::SessionState {
+                                session_id: id.clone(),
                                 modes: resp.modes.clone(),
                                 models: resp.models.clone(),
                             })
@@ -611,8 +652,10 @@ enum Msg {
     SessionFinder(FuzzyFinderMsg),
     ModeFinder(FuzzyFinderMsg),
     ModelFinder(FuzzyFinderMsg),
+    CommandFinder(FuzzyFinderMsg),
     OpenModePicker,
     OpenModelPicker,
+    OpenCommandPicker,
     Noop,
 }
 
@@ -637,6 +680,27 @@ fn handle_finder_event(
             if let Some(session) = selection {
                 let id = session.id;
                 model.status = format!("Loading session {}...", id);
+
+                // Try to load transcript from disk
+                if let Ok(Some(content)) = model.session_io.load_transcript(&id) {
+                    if let Ok(mut timeline) = serde_json::from_str::<Vec<ChatEntry>>(&content) {
+                        // Rehydrate markdown
+                        for entry in &mut timeline {
+                            if let ChatEntry::Message(msg) = entry {
+                                let doc = MarkdownDocument::parse(&msg.content);
+                                msg.markdown_state.sync_with(&doc);
+                                msg.markdown = Some(doc);
+                            }
+                        }
+                        model.timeline = timeline;
+                        // Scroll to bottom after loading
+                        model
+                            .chat_scroll
+                            .ensure_visible("chat-log", ScrollTarget::new("chat-last-message"));
+                        model.current_session_id = Some(id.clone());
+                    }
+                }
+
                 let commands = model.agent_commands.clone();
                 Transition::Task(Box::pin(async move {
                     let _ = commands.send(AgentCommand::LoadSession(id)).await;
@@ -688,6 +752,27 @@ fn open_model_picker(model: &mut Model) {
 
     finder.tick();
     model.model_finder = Some(finder);
+}
+
+fn open_command_picker(model: &mut Model) {
+    if model.available_commands.is_empty() {
+        return;
+    }
+
+    let config = ColumnConfig::default()
+        .with_separator("\t")
+        .with_column_names(vec!["Command".to_string(), "Description".to_string()]);
+    let (mut finder, handle) = FuzzyFinder::with_config(
+        |c: &AvailableCommand| vec![c.name.clone(), c.description.clone()],
+        config,
+    );
+
+    for cmd in model.available_commands.iter().cloned() {
+        handle.push_item(cmd);
+    }
+
+    finder.tick();
+    model.command_finder = Some(finder);
 }
 
 fn handle_mode_finder_event(
@@ -760,6 +845,37 @@ fn handle_model_finder_event(
     }
 }
 
+fn handle_command_finder_event(
+    model: &mut Model,
+    event: FuzzyFinderEvent<AvailableCommand, Msg>,
+) -> Transition<Msg> {
+    match event {
+        FuzzyFinderEvent::Continue => Transition::Continue,
+        FuzzyFinderEvent::Cancel => {
+            model.command_finder = None;
+            Transition::Continue
+        }
+        FuzzyFinderEvent::Select(_) => Transition::Continue,
+        FuzzyFinderEvent::Activate => {
+            let selection = model
+                .command_finder
+                .as_ref()
+                .and_then(|f| f.submission())
+                .cloned();
+            model.command_finder = None;
+
+            if let Some(cmd) = selection {
+                model
+                    .input
+                    .update(InputMsg::InsertText(format!("/{} ", cmd.name)));
+            }
+
+            Transition::Continue
+        }
+        FuzzyFinderEvent::Task(task) => Transition::Task(task),
+    }
+}
+
 fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
     match msg {
         Msg::KeyPressed(key) => handle_key(model, key),
@@ -788,6 +904,14 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
             };
             handle_model_finder_event(model, event)
         }
+        Msg::CommandFinder(msg) => {
+            let event = if let Some(finder) = &mut model.command_finder {
+                fuztea::update(finder, msg, Msg::CommandFinder)
+            } else {
+                return Transition::Continue;
+            };
+            handle_command_finder_event(model, event)
+        }
         Msg::OpenModePicker => {
             if model.mode_finder.is_none() {
                 open_mode_picker(model);
@@ -797,6 +921,12 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
         Msg::OpenModelPicker => {
             if model.model_finder.is_none() {
                 open_model_picker(model);
+            }
+            Transition::Continue
+        }
+        Msg::OpenCommandPicker => {
+            if model.command_finder.is_none() {
+                open_command_picker(model);
             }
             Transition::Continue
         }
@@ -846,6 +976,14 @@ fn handle_key(model: &mut Model, key: Key) -> Transition<Msg> {
         return handle_finder_event(model, event);
     }
 
+    if model.command_finder.is_some() {
+        let event = {
+            let finder = model.command_finder.as_mut().unwrap();
+            fuztea::update(finder, FuzzyFinderMsg::KeyPressed(key), Msg::CommandFinder)
+        };
+        return handle_command_finder_event(model, event);
+    }
+
     if model.mode_finder.is_some() {
         let event = {
             let finder = model.mode_finder.as_mut().unwrap();
@@ -869,6 +1007,11 @@ fn handle_key(model: &mut Model, key: Key) -> Transition<Msg> {
 
     if key.ctrl && matches!(key.code, KeyCode::Char('m') | KeyCode::Char('M')) {
         open_model_picker(model);
+        return Transition::Continue;
+    }
+
+    if key.ctrl && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+        open_command_picker(model);
         return Transition::Continue;
     }
 
@@ -1009,7 +1152,12 @@ fn handle_agent_event(model: &mut Model, event: AgentEvent) -> Transition<Msg> {
             model.agent_ready = true;
             model.status = "Session ready".to_string();
         }
-        AgentEvent::SessionState { modes, models } => {
+        AgentEvent::SessionState {
+            session_id,
+            modes,
+            models,
+        } => {
+            model.current_session_id = Some(session_id);
             model.session_modes = modes;
             model.session_models = models;
         }
@@ -1040,6 +1188,7 @@ fn handle_agent_event(model: &mut Model, event: AgentEvent) -> Transition<Msg> {
             {
                 transitions.push(cancel);
             }
+            model.save_timeline();
         }
         AgentEvent::PermissionRequest {
             request,
@@ -1055,7 +1204,7 @@ fn handle_agent_event(model: &mut Model, event: AgentEvent) -> Transition<Msg> {
             );
             let prompt = PermissionPrompt {
                 request,
-                responder: respond_to,
+                responder: Some(respond_to),
                 selected: 0,
             };
             let idx = model.timeline.len();
@@ -1123,14 +1272,8 @@ fn handle_session_update(model: &mut Model, update: SessionUpdate) {
             model.status = "Plan updated".to_string();
         }
         SessionUpdate::AvailableCommandsUpdate(update) => {
-            model.push_message(
-                Author::System,
-                format!(
-                    "Available commands updated ({} commands) {:?}.",
-                    update.available_commands.len(),
-                    update.available_commands,
-                ),
-            );
+            model.available_commands = update.available_commands;
+            model.status = format!("Available commands: {}", model.available_commands.len());
         }
         SessionUpdate::CurrentModeUpdate(mode) => {
             if let Some(modes) = model.session_modes.as_mut() {
@@ -1366,12 +1509,16 @@ fn resolve_permission_prompt(
     outcome: RequestPermissionOutcome,
 ) -> Transition<Msg> {
     let responder = prompt.responder.clone();
-    Transition::Task(Box::pin(async move {
-        let _ = responder
-            .send(RequestPermissionResponse::new(outcome))
-            .await;
-        Msg::Noop
-    }))
+    if let Some(responder) = responder {
+        Transition::Task(Box::pin(async move {
+            let _ = responder
+                .send(RequestPermissionResponse::new(outcome))
+                .await;
+            Msg::Noop
+        }))
+    } else {
+        Transition::Continue
+    }
 }
 
 fn cancel_or_quit(model: &mut Model) -> Transition<Msg> {
@@ -1444,6 +1591,7 @@ fn view(model: &Model) -> Node<'_, Msg> {
 
     let has_mode = model.session_modes.is_some();
     let has_model = model.session_models.is_some();
+    let has_commands = !model.available_commands.is_empty();
 
     let mut header_children = vec![
         text::<Msg>(format!("kaeru – {}", model.server_label)).with_style(Style::bold()),
@@ -1451,12 +1599,20 @@ fn view(model: &Model) -> Node<'_, Msg> {
         text::<Msg>(format!("  {activity_label}")).with_style(activity_style),
     ];
 
-    if has_mode || has_model {
+    if has_mode || has_model || has_commands {
         header_children.push(
             column(vec![])
                 .with_flex_grow(1.)
                 .with_flex_shrink(1.)
                 .with_min_width(Dimension::ZERO),
+        );
+    }
+
+    if has_commands {
+        header_children.push(
+            text::<Msg>("  [cmd: C-p]".to_string())
+                .with_style(Style::fg(Color::Palette(2)))
+                .on_click(|| Msg::OpenCommandPicker),
         );
     }
 
@@ -1569,6 +1725,10 @@ fn view(model: &Model) -> Node<'_, Msg> {
 
     if let Some(finder) = &model.model_finder {
         return fuztea::view(finder, Msg::ModelFinder);
+    }
+
+    if let Some(finder) = &model.command_finder {
+        return fuztea::view(finder, Msg::CommandFinder);
     }
 
     main_view
@@ -1958,6 +2118,33 @@ mod tests {
         ));
 
         update(&mut model, Msg::OpenModelPicker);
+        let node = view(&model);
+        let output = render_node_to_string(node, 80, 20).unwrap();
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn render_command_buttons() {
+        let mut model = test_model();
+        model.available_commands = vec![
+            AvailableCommand::new("create_plan", "Create an execution plan"),
+            AvailableCommand::new("research_codebase", "Analyze the repository"),
+        ];
+
+        let node = view(&model);
+        let output = render_node_to_string(node, 80, 20).unwrap();
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn render_command_picker() {
+        let mut model = test_model();
+        model.available_commands = vec![
+            AvailableCommand::new("create_plan", "Create an execution plan"),
+            AvailableCommand::new("research_codebase", "Analyze the repository"),
+        ];
+
+        update(&mut model, Msg::OpenCommandPicker);
         let node = view(&model);
         let output = render_node_to_string(node, 80, 20).unwrap();
         insta::assert_snapshot!(output);
