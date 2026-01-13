@@ -502,7 +502,7 @@ pub static DEFAULT_BINDINGS: &[Binding] = &[
     // Terminal locked scope
     Binding {
         scope: Scope::TerminalLocked,
-        chord: KeyChord::ctrl(KeyCode::Char('g')),
+        chord: KeyChord::ctrl(KeyCode::Char('x')),
         action: Action::ToggleTerminalLock,
         description: "unlock terminal",
         show_in_status: true,

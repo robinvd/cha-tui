@@ -1163,8 +1163,8 @@ fn update(model: &mut Model, msg: Msg) -> Transition<Msg> {
                 return handle_action(model, action, key, transitions);
             }
 
-            // Fallback: when terminal focused, send to terminal
-            if model.focus == Focus::Terminal
+            // Fallback: when terminal focused (including locked mode), send to terminal
+            if matches!(model.focus, Focus::Terminal | Focus::TerminalLocked)
                 && let Some(active) = model.sidebar.active()
                 && let Some((_, session)) = model.active_session()
                 && let Some(msg) =
